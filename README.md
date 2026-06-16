@@ -16,3 +16,10 @@ The Phase 1 backend foundation lives in `backend/` and uses FastAPI, PostgreSQL,
 SQLAlchemy 2.x, Alembic, Pydantic v2, and Python 3.12+.
 
 See `backend/README.md` for local setup, verification commands, and migration workflow.
+
+## Frontend
+
+The minimal Phase 1 MVP frontend lives in `frontend/` and uses React,
+TypeScript, and Vite.
+
+See `frontend/README.md` for local setup and build commands.
