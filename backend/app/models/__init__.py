@@ -1,1 +1,19 @@
-# Import future SQLAlchemy models here so Alembic autogenerate can discover them.
+from app.models.core import (
+    CounterpartyType,
+    ExtractedEvent,
+    ExtractedEventStatus,
+    ExtractedEventType,
+    Project,
+    RawEntry,
+    RawEntryStatus,
+)
+
+__all__ = [
+    "CounterpartyType",
+    "ExtractedEvent",
+    "ExtractedEventStatus",
+    "ExtractedEventType",
+    "Project",
+    "RawEntry",
+    "RawEntryStatus",
+]
