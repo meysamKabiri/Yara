@@ -23,6 +23,7 @@ from app.schemas.projects import (
     RawEntryCreate,
     RawEntryRead,
 )
+from app.services.extraction import extract_pending_events
 
 router = APIRouter(tags=["projects"])
 
@@ -151,6 +152,39 @@ def create_extracted_events(
     raw_entry.status = RawEntryStatus.PROCESSED
     db.add_all(events)
     db.commit()
+    for event in events:
+        db.refresh(event)
+    return events
+
+
+@router.post(
+    "/projects/{project_id}/raw-entries/{raw_entry_id}/extract",
+    response_model=list[ExtractedEventRead],
+    status_code=status.HTTP_201_CREATED,
+)
+def extract_raw_entry_events(
+    project_id: int,
+    raw_entry_id: int,
+    db: DbSession,
+) -> list[ExtractedEvent]:
+    raw_entry = _get_raw_entry(db, project_id, raw_entry_id)
+    try:
+        events = extract_pending_events(raw_entry.text)
+        for event in events:
+            event.project_id = project_id
+            event.raw_entry_id = raw_entry_id
+            event.status = ExtractedEventStatus.PENDING
+        raw_entry.status = RawEntryStatus.PROCESSED
+        db.add_all(events)
+        db.commit()
+    except Exception as exc:
+        raw_entry.status = RawEntryStatus.FAILED
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Extraction failed",
+        ) from exc
+
     for event in events:
         db.refresh(event)
     return events

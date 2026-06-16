@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -7,10 +8,14 @@ def create_project(client: TestClient) -> dict:
     return response.json()
 
 
-def create_raw_entry(client: TestClient, project_id: int) -> dict:
+def create_raw_entry(
+    client: TestClient,
+    project_id: int,
+    text: str = "Paid Dana 250 for tile work",
+) -> dict:
     response = client.post(
         f"/projects/{project_id}/raw-entries",
-        json={"text": "Paid Dana 250 for tile work"},
+        json={"text": text},
     )
     assert response.status_code == 201
     return response.json()
@@ -149,3 +154,95 @@ def test_blocking_confirm_or_discard_when_event_is_not_pending(client: TestClien
     assert client.post(f"/extracted-events/{confirmed['id']}/discard").status_code == 409
     assert client.post(f"/extracted-events/{discarded['id']}/confirm").status_code == 409
     assert client.post(f"/extracted-events/{discarded['id']}/discard").status_code == 409
+
+
+def test_extraction_creates_pending_events(client: TestClient) -> None:
+    project = create_project(client)
+    raw_entry = create_raw_entry(client, project["id"], "Client paid me 1200 for cabinets")
+
+    response = client.post(f"/projects/{project['id']}/raw-entries/{raw_entry['id']}/extract")
+
+    assert response.status_code == 201
+    assert response.json()[0]["type"] == "MONEY_IN"
+    assert response.json()[0]["amount"] == "1200.00"
+    assert response.json()[0]["status"] == "PENDING"
+
+
+def test_extracted_pending_events_do_not_affect_totals(client: TestClient) -> None:
+    project = create_project(client)
+    raw_entry = create_raw_entry(client, project["id"], "Received 1200 from client")
+
+    extract_response = client.post(
+        f"/projects/{project['id']}/raw-entries/{raw_entry['id']}/extract"
+    )
+    assert extract_response.status_code == 201
+    response = client.get(f"/projects/{project['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["totals"] == {
+        "money_in": "0",
+        "money_out": "0",
+        "net": "0",
+    }
+
+
+def test_confirming_extracted_event_updates_totals(client: TestClient) -> None:
+    project = create_project(client)
+    raw_entry = create_raw_entry(client, project["id"], "Bought supplies for 75.50")
+    extract_response = client.post(
+        f"/projects/{project['id']}/raw-entries/{raw_entry['id']}/extract"
+    )
+    event = extract_response.json()[0]
+
+    assert client.post(f"/extracted-events/{event['id']}/confirm").status_code == 200
+    response = client.get(f"/projects/{project['id']}")
+
+    assert response.json()["totals"] == {
+        "money_in": "0",
+        "money_out": "75.50",
+        "net": "-75.50",
+    }
+
+
+def test_unclear_text_creates_note_event(client: TestClient) -> None:
+    project = create_project(client)
+    raw_entry = create_raw_entry(client, project["id"], "Talked to Dana about next week")
+
+    response = client.post(f"/projects/{project['id']}/raw-entries/{raw_entry['id']}/extract")
+
+    assert response.status_code == 201
+    assert response.json()[0]["type"] == "NOTE"
+    assert response.json()[0]["amount"] is None
+    assert response.json()[0]["status"] == "PENDING"
+
+
+def test_extraction_updates_raw_entry_status_to_processed(client: TestClient) -> None:
+    project = create_project(client)
+    raw_entry = create_raw_entry(client, project["id"], "Paid 220 for paint")
+
+    extract_response = client.post(
+        f"/projects/{project['id']}/raw-entries/{raw_entry['id']}/extract"
+    )
+    assert extract_response.status_code == 201
+    response = client.get(f"/projects/{project['id']}/raw-entries")
+
+    assert response.status_code == 200
+    assert response.json()[0]["status"] == "PROCESSED"
+
+
+def test_extraction_failure_marks_raw_entry_failed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    raw_entry = create_raw_entry(client, project["id"], "Paid 220 for paint")
+
+    def fail_extraction(text: str) -> list:
+        raise RuntimeError("placeholder extractor failed")
+
+    monkeypatch.setattr("app.api.projects.extract_pending_events", fail_extraction)
+    response = client.post(f"/projects/{project['id']}/raw-entries/{raw_entry['id']}/extract")
+
+    assert response.status_code == 500
+    raw_entries_response = client.get(f"/projects/{project['id']}/raw-entries")
+    assert raw_entries_response.json()[0]["status"] == "FAILED"
