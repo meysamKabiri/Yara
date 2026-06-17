@@ -9,6 +9,7 @@ from app.core.semantic_rules.conflict_detector import ConflictDetectorService
 from app.core.semantic_rules.explainability import RuleTrace, SemanticExplainabilityService
 from app.models.core import Worker
 from app.services.persian_money_engine import normalize_text
+from app.services.persian_role_extractor import PersianRoleExtractor
 
 
 class CanonicalEventType(StrEnum):
@@ -145,6 +146,11 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
 
 
 class SemanticRuleEngine:
+    """
+    DEPRECATED: Will be removed after full LLM migration.
+    Kept for backward compatibility only.
+    """
+
     def __init__(
         self,
         explainability: SemanticExplainabilityService | None = None,
@@ -152,6 +158,7 @@ class SemanticRuleEngine:
     ) -> None:
         self.explainability = explainability or SemanticExplainabilityService()
         self.conflict_detector = conflict_detector or ConflictDetectorService()
+        self.role_extractor = PersianRoleExtractor()
 
     def classify(
         self,
@@ -328,6 +335,20 @@ class SemanticRuleEngine:
         text: str,
         context: list[Worker],
     ) -> Worker | None:
+        # First, try deterministic role-phrase extraction
+        extracted_role = self.role_extractor.extract(text)
+        if extracted_role:
+            # Match by exact name first
+            for entity in context:
+                if self._normalize(entity.name) == self._normalize(extracted_role.name):
+                    return entity
+            # If no exact match and this is a CLIENT role phrase, match any CLIENT
+            if extracted_role.worker_type.value == "CLIENT":
+                for entity in context:
+                    if entity.type.value == "CLIENT":
+                        return entity
+        
+        # Fallback to existing logic
         normalized_text = self._normalize(text)
         if "کارفرما" in normalized_text:
             for entity in context:

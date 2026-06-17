@@ -22,6 +22,11 @@ class FirewallDecision:
 
 
 class SemanticFirewallService:
+    """
+    DEPRECATED: Will be removed after full LLM migration.
+    Kept for backward compatibility only.
+    """
+
     def __init__(self, rule_engine: SemanticRuleEngine | None = None) -> None:
         self.rule_engine = rule_engine or SemanticRuleEngine()
 
@@ -58,3 +63,10 @@ class SemanticFirewallService:
             status="FIXED",
             reason=f"reclassified {event.type.value} -> {fixed.type.value}",
         )
+
+
+class LegacyValidatorFacade(SemanticFirewallService):
+    """
+    DEPRECATED: Will be removed after full LLM migration.
+    Kept for backward compatibility only.
+    """

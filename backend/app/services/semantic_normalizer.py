@@ -5,6 +5,11 @@ from app.models.core import Worker
 
 
 class SemanticNormalizerService:
+    """
+    DEPRECATED: Will be removed after full LLM migration.
+    Kept for backward compatibility only.
+    """
+
     def __init__(self, rule_engine: SemanticRuleEngine | None = None) -> None:
         self.rule_engine = rule_engine or SemanticRuleEngine()
 

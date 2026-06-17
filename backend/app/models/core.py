@@ -108,6 +108,12 @@ class Project(TimestampMixin, Base):
     pending_interpretations: Mapped[list["PendingInterpretation"]] = relationship(
         back_populates="project"
     )
+    shadow_interpretation_logs: Mapped[list["ShadowInterpretationLog"]] = relationship(
+        back_populates="project"
+    )
+    financial_migration_logs: Mapped[list["FinancialMigrationLog"]] = relationship(
+        back_populates="project"
+    )
 
 
 class RawEntry(TimestampMixin, Base):
@@ -317,3 +323,30 @@ class PendingInterpretation(TimestampMixin, Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="pending_interpretations")
+
+
+class ShadowInterpretationLog(TimestampMixin, Base):
+    __tablename__ = "shadow_interpretation_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    legacy_json: Mapped[dict | list] = mapped_column(JSON, nullable=False)
+    shadow_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    diff_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="shadow_interpretation_logs")
+
+
+class FinancialMigrationLog(TimestampMixin, Base):
+    __tablename__ = "financial_migration_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    legacy_json: Mapped[dict | list] = mapped_column(JSON, nullable=False)
+    shadow_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    chosen_system: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="financial_migration_logs")

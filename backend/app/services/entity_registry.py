@@ -5,12 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.core import Worker, WorkerType
+from app.services.persian_role_extractor import PersianRoleExtractor
 
 
 class EntityRegistryService:
     def __init__(self, db: Session, project_id: int) -> None:
         self.db = db
         self.project_id = project_id
+        self.role_extractor = PersianRoleExtractor()
 
     def apply_setup(self, entities: list[dict[str, Any]]) -> list[Worker]:
         updated_entities: list[Worker] = []
@@ -26,6 +28,24 @@ class EntityRegistryService:
             updated_entities.append(worker)
 
         return updated_entities
+    
+    def apply_setup_from_text(self, text: str) -> list[Worker]:
+        """
+        Apply setup using deterministic role-phrase extraction.
+        
+        This method uses the PersianRoleExtractor to extract entity names
+        and types directly from Persian text, without relying on LLM output.
+        """
+        extracted_role = self.role_extractor.extract(text)
+        if not extracted_role:
+            return []
+        
+        worker = self._get_or_create_entity(
+            extracted_role.name,
+            extracted_role.worker_type,
+        )
+        
+        return [worker]
 
     def update_entities(self, entities: list[dict[str, Any]]) -> list[Worker]:
         updated_entities: list[Worker] = []

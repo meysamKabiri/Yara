@@ -7,11 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
+from app.core import unified_pipeline
 from app.dependencies.database import DbSession
-from app.dev_tools.semantic_firewall.firewall import (
-    SemanticFirewallError,
-    SemanticFirewallService,
-)
 from app.models.core import (
     CounterpartyType,
     EventCorrection,
@@ -44,8 +41,8 @@ from app.schemas.projects import (
     HistoryEntryRead,
     InvoiceCreate,
     InvoiceRead,
-    NaturalInputInterpretationResult,
     NaturalInputCreate,
+    NaturalInputInterpretationResult,
     NaturalInputResult,
     PaymentCreate,
     PaymentRead,
@@ -66,11 +63,11 @@ from app.schemas.projects import (
 )
 from app.services.entity_registry import EntityRegistryService
 from app.services.llm_extraction import extract, extract_graph
+from app.services.llm_v2_interpreter import LLMv2Interpreter
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
-    SemanticNormalizerService,
 )
 
 router = APIRouter(tags=["projects"])
@@ -690,35 +687,7 @@ def process_natural_input(
     payload: NaturalInputCreate,
     db: DbSession,
 ) -> NaturalInputInterpretationResult:
-    _get_project(db, project_id)
-    graph = extract_graph(payload.text)
-    entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
-    canonical_event = SemanticNormalizerService().normalize(graph, payload.text, entity_context)
-    try:
-        firewall_decision = SemanticFirewallService().validate(
-            canonical_event,
-            payload.text,
-            entity_context,
-            graph,
-        )
-    except SemanticFirewallError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-    canonical_event = firewall_decision.event
-    interpretations = _build_pending_interpretations(
-        project_id,
-        payload.text,
-        graph,
-        canonical_event,
-        entity_context,
-    )
-    for interpretation in interpretations:
-        db.add(interpretation)
-    db.commit()
-    for interpretation in interpretations:
-        db.refresh(interpretation)
+    interpretations = unified_pipeline.process_input(db, project_id, payload.text)
     return NaturalInputInterpretationResult(interpretations=interpretations)
 
 
