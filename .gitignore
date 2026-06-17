@@ -18,3 +18,6 @@ dist/
 .idea/
 
 *.egg-info/
+
+# Dev sandbox output
+backend/dev_tools/sandbox/last_status.json

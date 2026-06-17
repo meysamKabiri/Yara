@@ -1,0 +1,135 @@
+import re
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.core import Worker, WorkerType
+
+
+class EntityRegistryService:
+    def __init__(self, db: Session, project_id: int) -> None:
+        self.db = db
+        self.project_id = project_id
+
+    def apply_setup(self, entities: list[dict[str, Any]]) -> list[Worker]:
+        updated_entities: list[Worker] = []
+        for entity in entities:
+            name = entity.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+
+            worker = self._get_or_create_entity(name.strip(), self._entity_type(entity.get("type")))
+            self._update_if_present(worker, "phone", entity.get("phone"))
+            self._update_if_present(worker, "account_number", entity.get("account_number"))
+            self._update_if_present(worker, "role_detail", entity.get("role_detail"))
+            updated_entities.append(worker)
+
+        return updated_entities
+
+    def update_entities(self, entities: list[dict[str, Any]]) -> list[Worker]:
+        updated_entities: list[Worker] = []
+        for entity in entities:
+            name = entity.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            worker = self.find_by_partial_match(name)
+            if worker is None:
+                worker = self._get_or_create_entity(
+                    name.strip(),
+                    self._entity_type(entity.get("type")),
+                )
+            updates = (
+                entity.get("field_updates")
+                if isinstance(entity.get("field_updates"), dict)
+                else entity
+            )
+            self._update_if_present(worker, "phone", updates.get("phone"))
+            self._update_if_present(worker, "account_number", updates.get("account_number"))
+            self._update_if_present(worker, "role_detail", updates.get("role_detail"))
+            updated_entities.append(worker)
+        return updated_entities
+
+    def update_entity_by_partial_match(self, text: str) -> list[Worker]:
+        worker = self.find_by_partial_match(text)
+        if worker is None:
+            return []
+        phone = self._extract_phone(text)
+        account_number = self._extract_account_number(text)
+        if phone is None and account_number is None:
+            return []
+        self._update_if_present(worker, "phone", phone)
+        self._update_if_present(worker, "account_number", account_number)
+        return [worker]
+
+    def find_by_partial_match(self, text: str) -> Worker | None:
+        normalized_text = self._normalize_name(text)
+        workers = self.db.scalars(select(Worker).where(Worker.project_id == self.project_id))
+        for worker in workers:
+            normalized_name = self._normalize_name(worker.name)
+            if normalized_name and normalized_name in normalized_text:
+                return worker
+            name_parts = normalized_name.split()
+            if name_parts and name_parts[-1] in normalized_text:
+                return worker
+        return None
+
+    def detect_duplicate_entities(self) -> list[list[Worker]]:
+        groups: dict[str, list[Worker]] = {}
+        workers = self.db.scalars(select(Worker).where(Worker.project_id == self.project_id))
+        for worker in workers:
+            groups.setdefault(self._normalize_name(worker.name), []).append(worker)
+        return [group for group in groups.values() if len(group) > 1]
+
+    def merge_entities(self, keep: Worker, duplicate: Worker) -> Worker:
+        self._update_if_present(keep, "phone", keep.phone or duplicate.phone)
+        self._update_if_present(
+            keep,
+            "account_number",
+            keep.account_number or duplicate.account_number,
+        )
+        self._update_if_present(keep, "role_detail", keep.role_detail or duplicate.role_detail)
+        self.db.delete(duplicate)
+        self.db.flush()
+        return keep
+
+    def _get_or_create_entity(self, name: str, entity_type: WorkerType) -> Worker:
+        worker = self.db.scalar(
+            select(Worker).where(Worker.project_id == self.project_id, Worker.name == name)
+        )
+        if worker is not None:
+            if worker.type != entity_type:
+                worker.type = entity_type
+            return worker
+
+        worker = Worker(project_id=self.project_id, name=name, type=entity_type)
+        self.db.add(worker)
+        self.db.flush()
+        return worker
+
+    def _entity_type(self, value: Any) -> WorkerType:
+        if value == "CLIENT":
+            return WorkerType.CLIENT
+        if value == "VENDOR":
+            return WorkerType.VENDOR
+        return WorkerType.DAILY_WORKER
+
+    def _update_if_present(self, worker: Worker, field: str, value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            setattr(worker, field, value.strip())
+
+    def _normalize_name(self, value: str) -> str:
+        normalized = value.replace("\u200c", " ").strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = re.sub(r"^(مش|آقای|اقای|خانم)\s+", "", normalized)
+        return normalized
+
+    def _extract_phone(self, text: str) -> str | None:
+        match = re.search(r"09\d{9}", text.replace(" ", ""))
+        return match.group() if match is not None else None
+
+    def _extract_account_number(self, text: str) -> str | None:
+        if "حساب" not in text and "کارت" not in text and "شبا" not in text:
+            return None
+        match = re.search(r"\d{8,26}", text.replace(" ", ""))
+        return match.group() if match is not None else None

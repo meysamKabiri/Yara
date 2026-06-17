@@ -53,6 +53,22 @@ header,
   margin-bottom: 1rem;
 }
 
+.flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.flow li {
+  background: #fff;
+  border: 1px solid #d1c7b8;
+  border-radius: 999px;
+  padding: 0.4rem 0.65rem;
+}
+
 .panel {
   background: #fff;
   border: 1px solid #ded8ce;
@@ -65,7 +81,15 @@ header,
   gap: 0.5rem;
 }
 
+.row.wrap {
+  flex-wrap: wrap;
+}
+
 .row input {
+  flex: 1;
+}
+
+.row select {
   flex: 1;
 }
 
@@ -140,6 +164,46 @@ header,
   margin-bottom: 1rem;
 }
 
+.subsection {
+  border-top: 1px solid #ece7df;
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.examples {
+  background: #fbfaf7;
+  border: 1px solid #e5ded3;
+  border-radius: 6px;
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.example-buttons,
+.raw-entry-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.example-buttons button {
+  text-align: left;
+}
+
+.raw-entry {
+  align-items: center;
+  border: 1px solid #dedede;
+  border-radius: 8px;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 0.75rem;
+}
+
+.raw-entry p,
+.extract-box p {
+  margin: 0.35rem 0;
+}
+
 .extract-box {
   align-items: center;
   background: #f4f8fb;
@@ -155,6 +219,10 @@ header,
   gap: 0.75rem;
 }
 
+.compact-list {
+  margin: 0.75rem 0;
+}
+
 .card {
   border: 1px solid #d8d8d8;
   border-radius: 8px;
@@ -164,6 +232,13 @@ header,
 .pending-card {
   background: #fffdf0;
   border-color: #d7b84a;
+}
+
+.pending-inline-warning {
+  background: #fff7d6;
+  border-radius: 4px;
+  margin: 0 0 0.75rem;
+  padding: 0.45rem 0.55rem;
 }
 
 .confirmed-card {
@@ -200,6 +275,10 @@ header,
   overflow-wrap: anywhere;
 }
 
+.compact-fields {
+  margin-top: 0.5rem;
+}
+
 .edit-grid {
   display: grid;
   gap: 0.75rem;
@@ -221,7 +300,8 @@ header,
 @media (max-width: 700px) {
   .row,
   .extract-box,
-  .card-header {
+  .card-header,
+  .raw-entry {
     align-items: stretch;
     flex-direction: column;
   }

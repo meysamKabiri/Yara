@@ -48,6 +48,107 @@ export type EventUpdate = Pick<
   "type" | "counterparty_name" | "counterparty_type" | "amount" | "description" | "event_date"
 >;
 
+export type WorkerType = "DAILY_WORKER" | "SKILLED_WORKER" | "VENDOR" | "CLIENT";
+export type WorkUnit = "meter" | "day" | "item" | "project" | "custom";
+export type PaymentType = "CASH" | "BANK_TRANSFER" | "OTHER";
+
+export type Worker = {
+  id: number;
+  project_id: number;
+  name: string;
+  type: WorkerType;
+  role_detail: string | null;
+  phone: string | null;
+  account_number: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkLog = {
+  id: number;
+  project_id: number;
+  worker_id: number;
+  task_name: string;
+  unit: WorkUnit;
+  quantity: string;
+  rate_per_unit: string | null;
+  total_amount: string | null;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Invoice = {
+  id: number;
+  project_id: number;
+  vendor_id: number;
+  total_amount: string;
+  description: string | null;
+  status: "OPEN" | "PARTIAL" | "PAID";
+  created_at: string;
+  updated_at: string;
+};
+
+export type Payment = {
+  id: number;
+  project_id: number;
+  entity_id: number;
+  amount: string;
+  related_invoice_id: number | null;
+  type: PaymentType;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OperatingSummary = {
+  total_work_amount: string;
+  total_invoice_amount: string;
+  total_payments: string;
+  vendor_debts: Array<{
+    vendor_id: number;
+    vendor_name: string;
+    invoice_total: string;
+    paid_total: string;
+    debt: string;
+  }>;
+};
+
+export type WorkerState = {
+  id: number;
+  project_id: number;
+  worker_id: number;
+  name: string;
+  role: "DAILY" | "SKILLED" | "VENDOR" | "CLIENT";
+  total_days_worked: string;
+  total_quantity: string;
+  unit: string | null;
+  financial_balance: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HistoryEntry = {
+  id: number;
+  project_id: number;
+  worker_state_id: number | null;
+  input_text: string;
+  change_type: "WORK" | "PAYMENT" | "INVOICE" | "SETUP" | "NOTE";
+  delta: Record<string, string | number | null> | string | number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NaturalInputResult = {
+  raw_entry_id: number;
+  intent: string;
+  workers: Worker[];
+  states: WorkerState[];
+  history_entries: HistoryEntry[];
+  work_logs: WorkLog[];
+  invoices: Invoice[];
+  payments: Payment[];
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -73,6 +174,7 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   getProject: (projectId: number) => request<ProjectDetail>(`/projects/${projectId}`),
+  listRawEntries: (projectId: number) => request<RawEntry[]>(`/projects/${projectId}/raw-entries`),
   createRawEntry: (projectId: number, text: string) =>
     request<RawEntry>(`/projects/${projectId}/raw-entries`, {
       method: "POST",
@@ -95,4 +197,26 @@ export const api = {
     request<ExtractedEvent>(`/extracted-events/${eventId}/confirm`, { method: "POST" }),
   discardEvent: (eventId: number) =>
     request<ExtractedEvent>(`/extracted-events/${eventId}/discard`, { method: "POST" }),
+  listWorkers: (projectId: number) => request<Worker[]>(`/projects/${projectId}/workers`),
+  listWorkerStates: (projectId: number) => request<WorkerState[]>(`/projects/${projectId}/worker-states`),
+  listHistory: (projectId: number) => request<HistoryEntry[]>(`/projects/${projectId}/history`),
+  createWorker: (projectId: number, payload: Pick<Worker, "name" | "type"> & Partial<Pick<Worker, "role_detail" | "phone" | "account_number">>) =>
+    request<Worker>(`/projects/${projectId}/workers`, { method: "POST", body: JSON.stringify(payload) }),
+  listWorkLogs: (projectId: number) => request<WorkLog[]>(`/projects/${projectId}/work-logs`),
+  createWorkLog: (projectId: number, payload: { worker_id: number; task_name: string; unit: WorkUnit; quantity: string; rate_per_unit?: string | null; description?: string | null }) =>
+    request<WorkLog>(`/projects/${projectId}/work-logs`, { method: "POST", body: JSON.stringify(payload) }),
+  updateWorkLog: (workLogId: number, payload: Partial<{ task_name: string; unit: WorkUnit; quantity: string; rate_per_unit: string | null; description: string | null }>) =>
+    request<WorkLog>(`/work-logs/${workLogId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  listInvoices: (projectId: number) => request<Invoice[]>(`/projects/${projectId}/invoices`),
+  createInvoice: (projectId: number, payload: { vendor_id: number; total_amount: string; description?: string | null }) =>
+    request<Invoice>(`/projects/${projectId}/invoices`, { method: "POST", body: JSON.stringify(payload) }),
+  listPayments: (projectId: number) => request<Payment[]>(`/projects/${projectId}/payments`),
+  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType }) =>
+    request<Payment>(`/projects/${projectId}/payments`, { method: "POST", body: JSON.stringify(payload) }),
+  getOperatingSummary: (projectId: number) => request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
+  processNaturalInput: (projectId: number, text: string) =>
+    request<NaturalInputResult>(`/projects/${projectId}/natural-input`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
 };
