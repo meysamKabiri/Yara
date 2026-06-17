@@ -229,6 +229,11 @@ header,
   padding: 0.85rem;
 }
 
+.card.uncertain {
+  background: #fff8ed;
+  border-color: #d99a45;
+}
+
 .pending-card {
   background: #fffdf0;
   border-color: #d7b84a;

@@ -210,6 +210,9 @@ class HistoryEntryRead(BaseModel):
     input_text: str
     change_type: HistoryChangeType
     delta: dict | str | int | float | None
+    rule_id: str | None
+    explanation: dict | None
+    conflict_warnings: list[dict] | None
     created_at: datetime
     updated_at: datetime
 

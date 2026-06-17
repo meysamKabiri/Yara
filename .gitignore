@@ -21,3 +21,4 @@ dist/
 
 # Dev sandbox output
 backend/dev_tools/sandbox/last_status.json
+backend/app/dev_tools/semantic_firewall/semantic_failures.json

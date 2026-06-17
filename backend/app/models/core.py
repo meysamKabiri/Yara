@@ -258,6 +258,9 @@ class HistoryEntry(TimestampMixin, Base):
         nullable=False,
     )
     delta: Mapped[dict | str | int | float | None] = mapped_column(JSON, nullable=True)
+    rule_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    conflict_warnings: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="history_entries")
     worker_state: Mapped[WorkerState | None] = relationship(back_populates="history_entries")

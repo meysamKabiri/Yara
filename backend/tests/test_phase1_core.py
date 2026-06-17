@@ -2,9 +2,19 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.models.core import EventCorrection
+from app.core.semantic_rules import ConflictDetectorService, EVENT_RULES, SemanticRuleEngine
+from app.dev_tools.semantic_firewall.firewall import (
+    SemanticFirewallError,
+    SemanticFirewallService,
+)
+from app.models.core import EventCorrection, HistoryEntry, Worker, WorkerType
 from app.services.llm_extraction import extract
 from app.services.persian_money_engine import normalize_text, parse_persian_money
+from app.services.semantic_normalizer import (
+    CanonicalEvent,
+    CanonicalEventType,
+    SemanticNormalizerService,
+)
 
 
 def create_project(client: TestClient) -> dict:
@@ -230,7 +240,7 @@ def test_invalid_llm_json_falls_back_to_note(monkeypatch: pytest.MonkeyPatch) ->
 
     assert events == [
         {
-            "type": "NOTE",
+            "raw_type": None,
             "entity_name": None,
             "amount_text": None,
             "unit": None,
@@ -800,7 +810,7 @@ def test_natural_input_entity_update_updates_existing_entity(
     )
 
     assert response.status_code == 201
-    assert response.json()["intent"] == "ENTITY_UPDATE"
+    assert response.json()["intent"] == "SETUP_EVENT"
     assert response.json()["workers"][0]["phone"] == "09130000000"
     assert response.json()["history_entries"][0]["change_type"] == "ENTITY_UPDATE"
 
@@ -839,7 +849,7 @@ def test_note_with_existing_entity_context_becomes_entity_update(
     workers = client.get(f"/projects/{project['id']}/workers").json()
 
     assert response.status_code == 201
-    assert response.json()["intent"] == "ENTITY_UPDATE"
+    assert response.json()["intent"] == "SETUP_EVENT"
     assert len(workers) == 1
     assert workers[0]["phone"] == "09131111111"
 
@@ -1037,3 +1047,195 @@ def test_natural_input_skilled_work_defaults_to_one_unit(
     assert response.json()["states"][0]["role"] == "SKILLED"
     assert response.json()["states"][0]["total_quantity"] == "1.00"
     assert response.json()["history_entries"][0]["change_type"] == "WORK"
+
+
+def test_semantic_normalizer_classifies_implicit_work() -> None:
+    event = SemanticNormalizerService().normalize(
+        {"intent": "NOTE", "entity": "مش رحیم", "confidence": 0.3},
+        "مش رحیم امروز کار کرد",
+        [],
+    )
+
+    assert event.type == CanonicalEventType.WORK
+    assert event.action == "INCREMENT"
+
+
+def test_semantic_normalizer_classifies_financial_text() -> None:
+    event = SemanticNormalizerService().normalize(
+        {"intent": "NOTE", "entities": [], "confidence": 0.3},
+        "۱۰۰ میلیون دادم",
+        [],
+    )
+
+    assert event.type == CanonicalEventType.FINANCIAL
+    assert event.action == "PAYMENT"
+
+
+def test_semantic_normalizer_classifies_setup_text() -> None:
+    event = SemanticNormalizerService().normalize(
+        {
+            "intent": "NOTE",
+            "entities": [{"name": "میثم کبیری", "type": "CLIENT"}],
+            "confidence": 0.3,
+        },
+        "کارفرما میثم کبیری است",
+        [],
+    )
+
+    assert event.type == CanonicalEventType.SETUP
+
+
+def test_semantic_normalizer_keeps_ambiguous_text_as_note() -> None:
+    event = SemanticNormalizerService().normalize(
+        {"intent": "NOTE", "entities": [], "confidence": 0.3},
+        "یادم باشد بعدا بررسی کنم",
+        [],
+    )
+
+    assert event.type == CanonicalEventType.NOTE
+
+
+def test_known_entity_today_context_does_not_become_note() -> None:
+    worker = Worker(id=1, project_id=1, name="مش رحیم", type=WorkerType.DAILY_WORKER)
+    event = SemanticNormalizerService().normalize(
+        {"intent": "NOTE", "entity": None, "entities": [], "confidence": 0.3},
+        "رحیم امروز",
+        [worker],
+    )
+
+    assert event.type == CanonicalEventType.WORK
+
+
+def test_firewall_reclassifies_illegal_note_financial_input() -> None:
+    event = CanonicalEvent(
+        type=CanonicalEventType.NOTE,
+        entity_id=None,
+        entity_name=None,
+        action="NOTE",
+        metadata={"confidence": 0.3, "source_text": "۱۰۰ میلیون دادم"},
+    )
+
+    decision = SemanticFirewallService().validate(event, "۱۰۰ میلیون دادم", [], {})
+
+    assert decision.status == "FIXED"
+    assert decision.event.type == CanonicalEventType.FINANCIAL
+
+
+def test_firewall_blocks_known_entity_note_without_action() -> None:
+    worker = Worker(id=1, project_id=1, name="مش رحیم", type=WorkerType.DAILY_WORKER)
+    event = CanonicalEvent(
+        type=CanonicalEventType.NOTE,
+        entity_id=worker.id,
+        entity_name=worker.name,
+        action="NOTE",
+        metadata={"confidence": 0.3, "source_text": "رحیم"},
+    )
+
+    with pytest.raises(SemanticFirewallError):
+        SemanticFirewallService().validate(event, "رحیم", [worker], {})
+
+
+def test_semantic_rule_engine_defines_all_canonical_events() -> None:
+    assert set(EVENT_RULES) == {"SETUP_EVENT", "WORK_EVENT", "FINANCIAL_EVENT", "NOTE_EVENT"}
+    assert EVENT_RULES["FINANCIAL_EVENT"]["priority"] < EVENT_RULES["WORK_EVENT"]["priority"]
+
+
+def test_llm_raw_intent_does_not_control_classification() -> None:
+    event = SemanticRuleEngine().classify(
+        {"raw_intent": "NOTE", "intent": "NOTE", "entity": "مش رحیم", "confidence": 0.1},
+        "مش رحیم امروز کار کرد",
+        [],
+    )
+
+    assert event.type == CanonicalEventType.WORK
+
+
+def test_semantic_explanation_generated_for_classification() -> None:
+    event = SemanticRuleEngine().classify(
+        {"intent": "NOTE", "entity": "مش رحیم", "confidence": 0.92},
+        "مش رحیم امروز کار کرد",
+        [],
+    )
+
+    explanation = event.metadata["semantic_explanation"]
+    assert explanation["event_type"] == "WORK_EVENT"
+    assert explanation["triggered_rule"] == "WORK_RULE_01"
+    assert "کار کرد" in explanation["matched_signals"]
+    assert explanation["decision_path"][-1] == "event classified as WORK_EVENT"
+
+
+def test_conflict_detector_finds_overlapping_priority_collision() -> None:
+    rules = {
+        "WORK_EVENT": {
+            "rule_id": "WORK_RULE_01",
+            "event_type": "WORK_EVENT",
+            "triggers": {"keywords": ["دادم"], "patterns": []},
+            "priority": 1,
+        },
+        "FINANCIAL_EVENT": {
+            "rule_id": "FINANCIAL_RULE_03",
+            "event_type": "FINANCIAL_EVENT",
+            "triggers": {"keywords": ["دادم"], "patterns": []},
+            "priority": 1,
+        },
+        "NOTE_EVENT": {
+            "rule_id": "NOTE_RULE_01",
+            "event_type": "NOTE_EVENT",
+            "triggers": {"keywords": [], "patterns": ["no_action"]},
+            "fallback": None,
+        },
+    }
+
+    report = ConflictDetectorService().audit(rules)
+
+    assert report["severity"] == "HIGH"
+    assert {conflict["type"] for conflict in report["conflicts"]} == {
+        "OVERLAPPING_RULES",
+        "PRIORITY_COLLISION",
+    }
+
+
+def test_conflict_detector_flags_ambiguous_input() -> None:
+    report = ConflictDetectorService().audit_text(
+        "رحیم امروز متر کار کرد و پول دادم",
+        [
+            {"rule_id": "WORK_RULE_01", "event_type": "WORK_EVENT", "confidence": 0.82},
+            {
+                "rule_id": "FINANCIAL_RULE_01",
+                "event_type": "FINANCIAL_EVENT",
+                "confidence": 0.8,
+            },
+        ],
+    )
+
+    assert report["severity"] == "HIGH"
+    assert report["conflicts"][0]["type"] == "AMBIGUOUS_CLASSIFICATION_ZONE"
+
+
+def test_history_entry_contains_full_semantic_traceability(client, monkeypatch) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {
+            "intent": "WORK",
+            "entity": "نادری جوشکار",
+            "action": "INCREMENT",
+            "confidence": 0.88,
+        },
+    )
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "نادری جوشکار امروز کار کرد"},
+    )
+
+    assert response.status_code == 201
+    history = response.json()["history_entries"][0]
+    assert history["rule_id"] == "WORK_RULE_01"
+    assert history["explanation"]["event_type"] == "WORK_EVENT"
+    assert history["conflict_warnings"] == []
+
+    with client.app.state.testing_session_factory() as db:
+        stored = db.scalar(select(HistoryEntry).where(HistoryEntry.id == history["id"]))
+        assert stored.rule_id == "WORK_RULE_01"
+        assert stored.explanation["triggered_rule"] == "WORK_RULE_01"

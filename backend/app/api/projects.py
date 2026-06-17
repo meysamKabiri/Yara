@@ -8,6 +8,10 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
 from app.dependencies.database import DbSession
+from app.dev_tools.semantic_firewall.firewall import (
+    SemanticFirewallError,
+    SemanticFirewallService,
+)
 from app.models.core import (
     CounterpartyType,
     EventCorrection,
@@ -57,6 +61,7 @@ from app.schemas.projects import (
 from app.services.entity_registry import EntityRegistryService
 from app.services.llm_extraction import extract, extract_graph
 from app.services.persian_money_engine import normalize_text, parse_persian_money
+from app.services.semantic_normalizer import CanonicalEvent, CanonicalEventType, SemanticNormalizerService
 
 router = APIRouter(tags=["projects"])
 
@@ -173,6 +178,8 @@ def _role_to_state_role(role: str | None, text: str, intent: str | None = None) 
         return WorkerStateRole.CLIENT
     if role == "VENDOR" or intent == "INVOICE":
         return WorkerStateRole.VENDOR
+    if "کارفرما" in normalized:
+        return WorkerStateRole.CLIENT
     if "جوشکار" in normalized or "برقکار" in normalized or role == "SKILLED":
         return WorkerStateRole.SKILLED
     return WorkerStateRole.DAILY
@@ -301,6 +308,16 @@ def _history_delta(**values: Any) -> dict[str, str | int | float | None]:
         else:
             delta[key] = str(value)
     return delta
+
+
+def _semantic_history_fields(event: CanonicalEvent) -> dict[str, Any]:
+    explanation = event.metadata.get("semantic_explanation")
+    conflict_warnings = event.metadata.get("conflict_warnings", [])
+    return {
+        "rule_id": event.metadata.get("rule_id"),
+        "explanation": explanation if isinstance(explanation, dict) else None,
+        "conflict_warnings": conflict_warnings if isinstance(conflict_warnings, list) else [],
+    }
 
 
 def _fallback_note_event(text: str) -> dict[str, Any]:
@@ -467,8 +484,25 @@ def process_natural_input(
     db.flush()
 
     graph = extract_graph(payload.text)
-    intent = _graph_intent(graph)
-    entity_name = _graph_entity_name(graph)
+    registry = EntityRegistryService(db, project_id)
+    entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
+    canonical_event = SemanticNormalizerService().normalize(graph, payload.text, entity_context)
+    try:
+        firewall_decision = SemanticFirewallService().validate(
+            canonical_event,
+            payload.text,
+            entity_context,
+            graph,
+        )
+    except SemanticFirewallError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    canonical_event = firewall_decision.event
+    semantic_history = _semantic_history_fields(canonical_event)
+    intent = _execution_intent(graph, canonical_event.type, canonical_event.action)
+    entity_name = canonical_event.entity_name or _graph_entity_name(graph)
     role_guess = _graph_role_guess(graph)
     entity_by_name: dict[str, Worker] = {}
     states: list[WorkerState] = []
@@ -477,8 +511,7 @@ def process_natural_input(
     created_invoices: list[Invoice] = []
     created_payments: list[Payment] = []
 
-    if intent == "SETUP":
-        registry = EntityRegistryService(db, project_id)
+    if canonical_event.type == CanonicalEventType.SETUP and intent == "SETUP":
         setup_entities = registry.apply_setup(_graph_setup_entities(graph))
         for entity in setup_entities:
             entity_by_name[entity.name] = entity
@@ -487,6 +520,8 @@ def process_natural_input(
             input_text=payload.text,
             change_type=HistoryChangeType.SETUP,
             delta={
+                "canonical_event_type": canonical_event.type.value,
+                "semantic_action": canonical_event.action,
                 "entities": [
                     {
                         "id": entity.id,
@@ -499,6 +534,7 @@ def process_natural_input(
                     for entity in setup_entities
                 ]
             },
+            **semantic_history,
         )
         db.add(history)
         db.flush()
@@ -508,7 +544,7 @@ def process_natural_input(
             db.refresh(item)
         return NaturalInputResult(
             raw_entry_id=raw_entry.id,
-            intent=intent,
+            intent=canonical_event.type.value,
             workers=setup_entities,
             states=[],
             history_entries=history_entries,
@@ -517,8 +553,7 @@ def process_natural_input(
             payments=[],
         )
 
-    if intent == "ENTITY_UPDATE":
-        registry = EntityRegistryService(db, project_id)
+    if canonical_event.type == CanonicalEventType.SETUP and intent == "ENTITY_UPDATE":
         updated_entities = registry.update_entities(_graph_setup_entities(graph))
         if not updated_entities:
             updated_entities = registry.update_entity_by_partial_match(payload.text)
@@ -528,7 +563,12 @@ def process_natural_input(
             project_id=project_id,
             input_text=payload.text,
             change_type=HistoryChangeType.ENTITY_UPDATE,
-            delta={"entities": [_entity_snapshot(entity) for entity in updated_entities]},
+            delta={
+                "canonical_event_type": canonical_event.type.value,
+                "semantic_action": canonical_event.action,
+                "entities": [_entity_snapshot(entity) for entity in updated_entities],
+            },
+            **semantic_history,
         )
         db.add(history)
         db.flush()
@@ -538,7 +578,7 @@ def process_natural_input(
             db.refresh(item)
         return NaturalInputResult(
             raw_entry_id=raw_entry.id,
-            intent=intent,
+            intent=canonical_event.type.value,
             workers=updated_entities,
             states=[],
             history_entries=history_entries,
@@ -547,14 +587,18 @@ def process_natural_input(
             payments=[],
         )
 
-    registry = EntityRegistryService(db, project_id)
     context_updates = registry.update_entity_by_partial_match(payload.text)
-    if context_updates:
+    if canonical_event.type == CanonicalEventType.SETUP and context_updates:
         history = HistoryEntry(
             project_id=project_id,
             input_text=payload.text,
             change_type=HistoryChangeType.ENTITY_UPDATE,
-            delta={"entities": [_entity_snapshot(entity) for entity in context_updates]},
+            delta={
+                "canonical_event_type": canonical_event.type.value,
+                "semantic_action": canonical_event.action,
+                "entities": [_entity_snapshot(entity) for entity in context_updates],
+            },
+            **semantic_history,
         )
         db.add(history)
         db.flush()
@@ -564,7 +608,7 @@ def process_natural_input(
             db.refresh(item)
         return NaturalInputResult(
             raw_entry_id=raw_entry.id,
-            intent="ENTITY_UPDATE",
+            intent=canonical_event.type.value,
             workers=context_updates,
             states=[],
             history_entries=history_entries,
@@ -573,12 +617,20 @@ def process_natural_input(
             payments=[],
         )
 
+    if entity_name is None and canonical_event.type == CanonicalEventType.FINANCIAL:
+        entity_name = "طرف حساب نامشخص"
+
     if entity_name is None:
         history = HistoryEntry(
             project_id=project_id,
             input_text=payload.text,
             change_type=HistoryChangeType.NOTE,
-            delta=_history_delta(reason="missing entity"),
+            delta=_history_delta(
+                canonical_event_type=canonical_event.type.value,
+                semantic_action=canonical_event.action,
+                reason="missing entity",
+            ),
+            **semantic_history,
         )
         db.add(history)
         db.flush()
@@ -591,21 +643,31 @@ def process_natural_input(
             entity_by_name[worker.name] = worker
         states.append(state)
 
-        if intent == "WORK":
+        if canonical_event.type == CanonicalEventType.WORK:
             quantity = (
                 _graph_quantity(graph)
                 or _parse_quantity_from_text(payload.text)
+                or canonical_event.delta
                 or Decimal("1")
             )
             if state.role == WorkerStateRole.DAILY:
                 state.total_days_worked += quantity
                 change_type = HistoryChangeType.WORK
-                delta = _history_delta(days=quantity)
+                delta = _history_delta(
+                    canonical_event_type=canonical_event.type.value,
+                    semantic_action=canonical_event.action,
+                    days=quantity,
+                )
             else:
                 state.total_quantity += quantity
                 state.unit = state.unit or _unit_from_text(payload.text, state.role)
                 change_type = HistoryChangeType.WORK
-                delta = _history_delta(quantity=quantity, unit=state.unit)
+                delta = _history_delta(
+                    canonical_event_type=canonical_event.type.value,
+                    semantic_action=canonical_event.action,
+                    quantity=quantity,
+                    unit=state.unit,
+                )
 
             work_log = WorkLog(
                 project_id=project_id,
@@ -621,9 +683,17 @@ def process_natural_input(
             db.flush()
             created_work_logs.append(work_log)
             history_entries.append(
-                _add_history(db, project_id, state, payload.text, change_type, delta)
+                _add_history(
+                    db,
+                    project_id,
+                    state,
+                    payload.text,
+                    change_type,
+                    delta,
+                    semantic_history,
+                )
             )
-        elif intent == "INVOICE":
+        elif canonical_event.type == CanonicalEventType.FINANCIAL and intent == "INVOICE":
             amount = _graph_amount(graph, payload.text)
             if amount is not None:
                 state.role = WorkerStateRole.VENDOR
@@ -645,10 +715,33 @@ def process_natural_input(
                         state,
                         payload.text,
                         HistoryChangeType.INVOICE,
-                        _history_delta(amount=amount, balance=state.financial_balance),
+                        _history_delta(
+                            canonical_event_type=canonical_event.type.value,
+                            semantic_action=canonical_event.action,
+                            amount=amount,
+                            balance=state.financial_balance,
+                        ),
+                        semantic_history,
                     )
                 )
-        elif intent == "PAYMENT":
+            else:
+                history_entries.append(
+                    _add_history(
+                        db,
+                        project_id,
+                        state,
+                        payload.text,
+                        HistoryChangeType.INVOICE,
+                        _history_delta(
+                            canonical_event_type=canonical_event.type.value,
+                            semantic_action=canonical_event.action,
+                            amount=None,
+                            reason="financial amount missing",
+                        ),
+                        semantic_history,
+                    )
+                )
+        elif canonical_event.type == CanonicalEventType.FINANCIAL and intent == "PAYMENT":
             amount = _graph_amount(graph, payload.text)
             if amount is not None:
                 state.financial_balance -= amount
@@ -669,10 +762,33 @@ def process_natural_input(
                         state,
                         payload.text,
                         HistoryChangeType.PAYMENT,
-                        _history_delta(amount=amount, balance=state.financial_balance),
+                        _history_delta(
+                            canonical_event_type=canonical_event.type.value,
+                            semantic_action=canonical_event.action,
+                            amount=amount,
+                            balance=state.financial_balance,
+                        ),
+                        semantic_history,
                     )
                 )
-        elif intent == "SETUP":
+            else:
+                history_entries.append(
+                    _add_history(
+                        db,
+                        project_id,
+                        state,
+                        payload.text,
+                        HistoryChangeType.PAYMENT,
+                        _history_delta(
+                            canonical_event_type=canonical_event.type.value,
+                            semantic_action=canonical_event.action,
+                            amount=None,
+                            reason="financial amount missing",
+                        ),
+                        semantic_history,
+                    )
+                )
+        elif canonical_event.type == CanonicalEventType.SETUP:
             history_entries.append(
                 _add_history(
                     db,
@@ -680,7 +796,12 @@ def process_natural_input(
                     state,
                     payload.text,
                     HistoryChangeType.SETUP,
-                    _history_delta(role=state.role),
+                    _history_delta(
+                        canonical_event_type=canonical_event.type.value,
+                        semantic_action=canonical_event.action,
+                        role=state.role,
+                    ),
+                    semantic_history,
                 )
             )
         else:
@@ -691,7 +812,12 @@ def process_natural_input(
                     state,
                     payload.text,
                     HistoryChangeType.NOTE,
-                    _history_delta(intent=intent),
+                    _history_delta(
+                        canonical_event_type=canonical_event.type.value,
+                        semantic_action=canonical_event.action,
+                        intent=intent,
+                    ),
+                    semantic_history,
                 )
             )
 
@@ -710,7 +836,7 @@ def process_natural_input(
 
     return NaturalInputResult(
         raw_entry_id=raw_entry.id,
-        intent=intent,
+        intent=canonical_event.type.value,
         workers=list(entity_by_name.values()),
         states=states,
         history_entries=history_entries,
@@ -738,6 +864,20 @@ def _graph_intent(graph: dict[str, Any]) -> str:
             return "WORK"
         if event_type in {"PAYMENT", "INVOICE"}:
             return str(event_type)
+    return "NOTE"
+
+
+def _execution_intent(
+    graph: dict[str, Any],
+    canonical_type: CanonicalEventType,
+    semantic_action: str,
+) -> str:
+    if canonical_type == CanonicalEventType.SETUP:
+        return "ENTITY_UPDATE" if semantic_action == "ENTITY_UPDATE" else "SETUP"
+    if canonical_type == CanonicalEventType.FINANCIAL:
+        return "INVOICE" if semantic_action == "INVOICE" else "PAYMENT"
+    if canonical_type == CanonicalEventType.WORK:
+        return "WORK"
     return "NOTE"
 
 
@@ -842,6 +982,7 @@ def _add_history(
     input_text: str,
     change_type: HistoryChangeType,
     delta: dict[str, str | int | float | None],
+    semantic_history: dict[str, Any] | None = None,
 ) -> HistoryEntry:
     history = HistoryEntry(
         project_id=project_id,
@@ -849,6 +990,7 @@ def _add_history(
         input_text=input_text,
         change_type=change_type,
         delta=delta,
+        **(semantic_history or {}),
     )
     db.add(history)
     db.flush()

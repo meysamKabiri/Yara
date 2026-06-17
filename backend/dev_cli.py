@@ -5,7 +5,9 @@ from typing import Any
 
 from sqlalchemy import func, select
 
+from app.core.semantic_rules import ConflictDetectorService, EVENT_RULES
 from app.db.session import SessionLocal
+from app.dev_tools.semantic_firewall.run_semantic_tests import run_semantic_tests
 from app.models.core import Project, Worker
 from dev_tools.sandbox.reset_db import reset_database
 from dev_tools.sandbox.seed_runner import (
@@ -88,6 +90,20 @@ def status_command(_args: argparse.Namespace) -> None:
     )
 
 
+def semantic_test_command(_args: argparse.Namespace) -> None:
+    _assert_development_env()
+    run_semantic_tests()
+
+
+def rules_audit_command(_args: argparse.Namespace) -> None:
+    _assert_development_env()
+    report = ConflictDetectorService().audit(EVENT_RULES)
+    print("[RULES] Semantic rule audit report:")
+    _print_json_summary(report)
+    if report["severity"] == "HIGH":
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yara", description="Yara development CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -109,6 +125,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show current dev DB status")
     status_parser.set_defaults(func=status_command)
+
+    test_parser = subparsers.add_parser("test", help="Run Yara test suites")
+    test_subparsers = test_parser.add_subparsers(dest="test_command", required=True)
+    semantic_parser = test_subparsers.add_parser(
+        "semantic",
+        help="Run semantic regression tests and AI behavior firewall checks",
+    )
+    semantic_parser.set_defaults(func=semantic_test_command)
+
+    firewall_parser = subparsers.add_parser("firewall", help="Run firewall commands")
+    firewall_subparsers = firewall_parser.add_subparsers(dest="firewall_command", required=True)
+    firewall_check_parser = firewall_subparsers.add_parser(
+        "check",
+        help="Run semantic firewall regression checks",
+    )
+    firewall_check_parser.set_defaults(func=semantic_test_command)
+
+    rules_parser = subparsers.add_parser("rules", help="Run semantic rule commands")
+    rules_subparsers = rules_parser.add_subparsers(dest="rules_command", required=True)
+    rules_audit_parser = rules_subparsers.add_parser(
+        "audit",
+        help="Scan semantic rules and detect conflicts",
+    )
+    rules_audit_parser.set_defaults(func=rules_audit_command)
 
     return parser
 

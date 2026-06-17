@@ -132,7 +132,7 @@ export type HistoryEntry = {
   project_id: number;
   worker_state_id: number | null;
   input_text: string;
-  change_type: "WORK" | "PAYMENT" | "INVOICE" | "SETUP" | "NOTE";
+  change_type: "WORK" | "PAYMENT" | "INVOICE" | "SETUP" | "ENTITY_UPDATE" | "NOTE";
   delta: Record<string, string | number | null> | string | number | null;
   created_at: string;
   updated_at: string;

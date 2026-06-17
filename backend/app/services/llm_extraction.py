@@ -6,17 +6,17 @@ from typing import Any
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3"
 
-SYSTEM_PROMPT = """You are a financial extraction engine.
+SYSTEM_PROMPT = """You are a raw contractor note extraction engine.
 
-Your task is to extract raw construction work and financial intents from Persian and English
-contractor notes.
+Your task is to extract raw spans from Persian and English contractor notes.
+Do not classify business meaning.
 
 Return ONLY valid JSON array. No explanations. No markdown.
 
 Each item must follow this schema:
 
 {
-"type": "WORK_LOG | PAYMENT | INVOICE | NOTE",
+"raw_type": string | null,
 "entity_name": string | null,
 "amount_text": string | null,
 "unit": "meter | day | item" | null,
@@ -27,28 +27,29 @@ Each item must follow this schema:
 
 Rules:
 
-* If multiple work or financial activities exist, return multiple items.
-* If the text is unclear or not financial, return a single NOTE event.
+* If multiple raw activities exist, return multiple items.
 * Extract money amounts only as the exact raw text span in amount_text.
 * Extract work quantity only as the exact raw text span in quantity_text.
 * Do NOT output numeric amounts.
 * Do NOT calculate, scale, or convert million/thousand values.
 * Do NOT calculate totals.
-* Do NOT merge multiple activities.
+* Do NOT classify as work, financial, setup, or note.
+* Do NOT merge multiple raw activities.
 * Do NOT guess missing amounts or names.
 * Do NOT include any extra text.
 * Output must be valid JSON only."""
 
-GRAPH_PROMPT = """You are a construction finance graph extraction engine.
+GRAPH_PROMPT = """You are a raw construction note graph extraction engine.
 
-Your task is to convert Persian and English contractor notes into raw structured intent.
+Your task is to extract raw entities and raw context from Persian and English contractor notes.
+Do not classify business meaning. The application has a deterministic rule engine for that.
 
 Return ONLY valid JSON object. No explanations. No markdown.
 
 The object must follow this schema:
 
 {
-"intent": "SETUP | ENTITY_UPDATE | WORK | PAYMENT | INVOICE | NOTE",
+"raw_intent": string | null,
 "entity": string | null,
 "entities": [
 {
@@ -64,25 +65,20 @@ The object must follow this schema:
 }
 }
 ],
-"action": "INCREMENT | SET | PAYMENT | INVOICE",
+"raw_context": string,
 "confidence": number (0 to 1)
 }
 
 Rules:
 
-* Extract intent and entity name only.
-* Use SETUP when the input defines a project owner, client, worker, vendor, phone number,
-  account number, or role detail.
-* Use ENTITY_UPDATE when the input adds phone, account number, or role detail for an
-  existing entity.
-* For SETUP, fill entities with every entity mentioned.
-* For ENTITY_UPDATE, include the entity name and field_updates.
-* Prefer ENTITY_UPDATE over NOTE when entity context exists.
+* Extract entity names and raw field spans only.
+* Fill entities with every entity mentioned.
+* Include field_updates only when raw phone, account number, or role detail appears.
 * Do NOT calculate totals.
 * Do NOT convert money values to numbers.
 * Do NOT convert work quantities to numbers.
+* Do NOT classify the note as work, financial, setup, entity update, or note.
 * Do NOT ask for structured data.
-* If unclear, return intent NOTE.
 * Output must be valid JSON only."""
 
 
@@ -145,7 +141,7 @@ def _generate_json(prompt: str, text: str) -> Any:
 def _fallback_note(text: str) -> list[dict[str, Any]]:
     return [
         {
-            "type": "NOTE",
+            "raw_type": None,
             "entity_name": None,
             "amount_text": None,
             "unit": None,
@@ -158,9 +154,9 @@ def _fallback_note(text: str) -> list[dict[str, Any]]:
 
 def _fallback_graph_note(text: str) -> dict[str, Any]:
     return {
-        "intent": "NOTE",
+        "raw_intent": None,
         "entity": None,
         "entities": [],
-        "action": "SET",
+        "raw_context": text,
         "confidence": 0.3,
     }

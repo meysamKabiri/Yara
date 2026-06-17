@@ -178,7 +178,10 @@ function App() {
           <section className="subsection">
             <h3>History log</h3>
             <div className="cards">
-              {history.map((entry) => <article className="card" key={entry.id}><div className="card-header"><strong>{entry.change_type}</strong><span>{formatDateTime(entry.created_at)}</span></div><p>{entry.input_text}</p><small>{JSON.stringify(entry.delta)}</small></article>)}
+              {history.map((entry) => {
+                const semanticType = typeof entry.delta === "object" && entry.delta !== null && "canonical_event_type" in entry.delta ? String(entry.delta.canonical_event_type) : entry.change_type;
+                return <article className={semanticType === "NOTE_EVENT" ? "card uncertain" : "card"} key={entry.id}><div className="card-header"><strong>{semanticType}</strong><span>{formatDateTime(entry.created_at)}</span></div><p>{entry.input_text}</p><small>{JSON.stringify(entry.delta)}</small></article>;
+              })}
               {history.length === 0 && <p>No history yet.</p>}
             </div>
           </section>
