@@ -50,7 +50,8 @@ export type EventUpdate = Pick<
 
 export type WorkerType = "DAILY_WORKER" | "SKILLED_WORKER" | "VENDOR" | "CLIENT";
 export type WorkUnit = "meter" | "day" | "item" | "project" | "custom";
-export type PaymentType = "CASH" | "BANK_TRANSFER" | "OTHER";
+export type PaymentType = "CASH" | "BANK_TRANSFER" | "CHECK" | "OTHER";
+export type FinancialDirection = "INCOMING" | "OUTGOING" | "DEBT" | "DEFERRED";
 
 export type Worker = {
   id: number;
@@ -96,6 +97,7 @@ export type Payment = {
   amount: string;
   related_invoice_id: number | null;
   type: PaymentType;
+  direction: FinancialDirection;
   created_at: string;
   updated_at: string;
 };
@@ -147,6 +149,36 @@ export type NaturalInputResult = {
   work_logs: WorkLog[];
   invoices: Invoice[];
   payments: Payment[];
+};
+
+export type PendingInterpretationStatus = "PENDING" | "CONFIRMED" | "EDITED" | "DISCARDED";
+
+export type PendingInterpretation = {
+  id: number;
+  project_id: number;
+  raw_input_text: string;
+  canonical_event_type: string;
+  semantic_action: string;
+  suggested_entity_id: number | null;
+  matched_input_text: string | null;
+  extracted_entities: Array<Record<string, string | number | boolean | null | Record<string, string | number | boolean | null>>> | null;
+  extracted_amount: string | null;
+  extracted_quantity: string | null;
+  payment_method: PaymentType | null;
+  financial_direction: FinancialDirection | null;
+  due_date: string | null;
+  description: string | null;
+  semantic_explanation: Record<string, unknown> | null;
+  confidence: number | null;
+  status: PendingInterpretationStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PendingInterpretationUpdate = Partial<Pick<PendingInterpretation, "canonical_event_type" | "semantic_action" | "suggested_entity_id" | "matched_input_text" | "extracted_entities" | "extracted_amount" | "extracted_quantity" | "payment_method" | "financial_direction" | "due_date" | "description">>;
+
+export type NaturalInputInterpretationResult = {
+  interpretations: PendingInterpretation[];
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -215,8 +247,17 @@ export const api = {
     request<Payment>(`/projects/${projectId}/payments`, { method: "POST", body: JSON.stringify(payload) }),
   getOperatingSummary: (projectId: number) => request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
   processNaturalInput: (projectId: number, text: string) =>
-    request<NaturalInputResult>(`/projects/${projectId}/natural-input`, {
+    request<NaturalInputInterpretationResult>(`/projects/${projectId}/natural-input`, {
       method: "POST",
       body: JSON.stringify({ text }),
     }),
+  updatePendingInterpretation: (interpretationId: number, payload: PendingInterpretationUpdate) =>
+    request<PendingInterpretation>(`/pending-interpretations/${interpretationId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  confirmPendingInterpretation: (interpretationId: number) =>
+    request<NaturalInputResult>(`/pending-interpretations/${interpretationId}/confirm`, { method: "POST" }),
+  discardPendingInterpretation: (interpretationId: number) =>
+    request<PendingInterpretation>(`/pending-interpretations/${interpretationId}/discard`, { method: "POST" }),
 };

@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.core.semantic_rules import ConflictDetectorService, EVENT_RULES, SemanticRuleEngine
+from app.core.semantic_rules import EVENT_RULES, ConflictDetectorService, SemanticRuleEngine
 from app.dev_tools.semantic_firewall.firewall import (
     SemanticFirewallError,
     SemanticFirewallService,
@@ -21,6 +21,24 @@ def create_project(client: TestClient) -> dict:
     response = client.post("/projects", json={"name": "Kitchen remodel"})
     assert response.status_code == 201
     return response.json()
+
+
+def create_interpretation(client: TestClient, project_id: int, text: str) -> dict:
+    response = client.post(f"/projects/{project_id}/natural-input", json={"text": text})
+    assert response.status_code == 201
+    interpretations = response.json()["interpretations"]
+    assert interpretations
+    return interpretations[0]
+
+
+def confirm_interpretation(client: TestClient, interpretation: dict) -> dict:
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm")
+    assert response.status_code == 200
+    return response.json()
+
+
+def submit_and_confirm(client: TestClient, project_id: int, text: str) -> dict:
+    return confirm_interpretation(client, create_interpretation(client, project_id, text))
 
 
 def create_raw_entry(
@@ -702,16 +720,14 @@ def test_natural_input_setup_creates_client_entity(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "کارفرمای پروژه میثم کبیری است"},
-    )
+    interpretation = create_interpretation(client, project["id"], "کارفرمای پروژه میثم کبیری است")
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+    response = confirm_interpretation(client, interpretation)
 
-    assert response.status_code == 201
-    assert response.json()["workers"][0]["name"] == "میثم کبیری"
-    assert response.json()["workers"][0]["type"] == "CLIENT"
-    assert response.json()["states"] == []
-    assert response.json()["history_entries"][0]["change_type"] == "SETUP"
+    assert response["workers"][0]["name"] == "میثم کبیری"
+    assert response["workers"][0]["type"] == "CLIENT"
+    assert response["states"] == []
+    assert response["history_entries"][0]["change_type"] == "SETUP"
 
 
 def test_natural_input_setup_updates_existing_entity_phone(
@@ -749,14 +765,8 @@ def test_natural_input_setup_updates_existing_entity_phone(
     ]
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: responses.pop(0))
 
-    assert client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "کارفرمای پروژه میثم کبیری است"},
-    ).status_code == 201
-    assert client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "شماره تماس میثم کبیری 09130000000"},
-    ).status_code == 201
+    submit_and_confirm(client, project["id"], "کارفرمای پروژه میثم کبیری است")
+    submit_and_confirm(client, project["id"], "شماره تماس میثم کبیری 09130000000")
     workers = client.get(f"/projects/{project['id']}/workers").json()
 
     assert len(workers) == 1
@@ -800,19 +810,12 @@ def test_natural_input_entity_update_updates_existing_entity(
     ]
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: responses.pop(0))
 
-    assert client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "کارفرمای پروژه میثم کبیری است"},
-    ).status_code == 201
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "شماره تماس میثم کبیری 09130000000"},
-    )
+    submit_and_confirm(client, project["id"], "کارفرمای پروژه میثم کبیری است")
+    response = submit_and_confirm(client, project["id"], "شماره تماس میثم کبیری 09130000000")
 
-    assert response.status_code == 201
-    assert response.json()["intent"] == "SETUP_EVENT"
-    assert response.json()["workers"][0]["phone"] == "09130000000"
-    assert response.json()["history_entries"][0]["change_type"] == "ENTITY_UPDATE"
+    assert response["intent"] == "SETUP_EVENT"
+    assert response["workers"][0]["phone"] == "09130000000"
+    assert response["history_entries"][0]["change_type"] == "ENTITY_UPDATE"
 
 
 def test_note_with_existing_entity_context_becomes_entity_update(
@@ -838,18 +841,11 @@ def test_note_with_existing_entity_context_becomes_entity_update(
     ]
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: responses.pop(0))
 
-    assert client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "مش رحیم کارگر پروژه است"},
-    ).status_code == 201
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "شماره تماس رحیم 09131111111"},
-    )
+    submit_and_confirm(client, project["id"], "مش رحیم کارگر پروژه است")
+    response = submit_and_confirm(client, project["id"], "شماره تماس رحیم 09131111111")
     workers = client.get(f"/projects/{project['id']}/workers").json()
 
-    assert response.status_code == 201
-    assert response.json()["intent"] == "SETUP_EVENT"
+    assert response["intent"] == "SETUP_EVENT"
     assert len(workers) == 1
     assert workers[0]["phone"] == "09131111111"
 
@@ -883,13 +879,106 @@ def test_natural_input_setup_creates_multiple_workers(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "کارگرها مش رحیم و مش سهراب هستند"},
+    response = submit_and_confirm(client, project["id"], "کارگرها مش رحیم و مش سهراب هستند")
+
+    assert {worker["name"] for worker in response["workers"]} == {"مش رحیم", "مش سهراب"}
+
+
+def test_setup_sentence_with_multiple_daily_workers_creates_one_pending_draft(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "NOTE", "entities": [], "confidence": 0.4},
     )
 
-    assert response.status_code == 201
-    assert {worker["name"] for worker in response.json()["workers"]} == {"مش رحیم", "مش سهراب"}
+    interpretation = create_interpretation(
+        client,
+        project["id"],
+        "مش رحیم و آقای صابری به عنوان کارگر ساده در پروژه کار می‌کنند",
+    )
+
+    assert interpretation["canonical_event_type"] == "SETUP_EVENT"
+    assert interpretation["semantic_action"] == "SETUP"
+    assert [entity["name"] for entity in interpretation["extracted_entities"]] == [
+        "مش رحیم",
+        "آقای صابری",
+    ]
+    assert all(entity["type"] == "WORKER" for entity in interpretation["extracted_entities"])
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+
+
+def test_confirming_multi_entity_setup_creates_workers_without_states(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "NOTE", "entities": [], "confidence": 0.4},
+    )
+
+    response = submit_and_confirm(
+        client,
+        project["id"],
+        "مش رحیم و آقای صابری به عنوان کارگر ساده در پروژه کار می‌کنند",
+    )
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert {worker["name"] for worker in response["workers"]} == {"مش رحیم", "آقای صابری"}
+    assert {worker["type"] for worker in response["workers"]} == {"DAILY_WORKER"}
+    assert {worker["name"] for worker in workers} == {"مش رحیم", "آقای صابری"}
+    assert client.get(f"/projects/{project['id']}/worker-states").json() == []
+
+
+def test_multi_entity_setup_does_not_recreate_existing_worker(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    existing = create_worker(client, project["id"], "مش رحیم", "DAILY_WORKER")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "NOTE", "entities": [], "confidence": 0.4},
+    )
+
+    submit_and_confirm(
+        client,
+        project["id"],
+        "مش رحیم و آقای صابری به عنوان کارگر ساده در پروژه کار می‌کنند",
+    )
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert len(workers) == 2
+    assert [worker for worker in workers if worker["name"] == "مش رحیم"][0]["id"] == existing["id"]
+
+
+def test_editing_multi_entity_setup_can_remove_one_before_confirm(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "NOTE", "entities": [], "confidence": 0.4},
+    )
+    interpretation = create_interpretation(
+        client,
+        project["id"],
+        "مش رحیم و آقای صابری به عنوان کارگر ساده در پروژه کار می‌کنند",
+    )
+
+    edit = client.patch(
+        f"/pending-interpretations/{interpretation['id']}",
+        json={"extracted_entities": [interpretation["extracted_entities"][1]]},
+    )
+    response = confirm_interpretation(client, edit.json())
+
+    assert edit.status_code == 200
+    assert [worker["name"] for worker in response["workers"]] == ["آقای صابری"]
+    assert client.get(f"/projects/{project['id']}/worker-states").json() == []
 
 
 def test_natural_input_work_creates_daily_work_log(
@@ -914,15 +1003,13 @@ def test_natural_input_work_creates_daily_work_log(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "مش رحیم امروز ۳ روز کار کرد"},
-    )
+    interpretation = create_interpretation(client, project["id"], "مش رحیم امروز ۳ روز کار کرد")
+    assert client.get(f"/projects/{project['id']}/worker-states").json() == []
+    response = confirm_interpretation(client, interpretation)
 
-    assert response.status_code == 201
-    assert response.json()["work_logs"][0]["quantity"] == "3.00"
-    assert response.json()["work_logs"][0]["unit"] == "day"
-    assert response.json()["states"][0]["total_days_worked"] == "3.00"
+    assert response["work_logs"][0]["quantity"] == "3.00"
+    assert response["work_logs"][0]["unit"] == "day"
+    assert response["states"][0]["total_days_worked"] == "3.00"
 
 
 def test_natural_input_daily_work_defaults_to_one_day(
@@ -940,19 +1027,13 @@ def test_natural_input_daily_work_defaults_to_one_day(
         },
     )
 
-    first = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "مش رحیم امروز کار کرد"},
-    )
-    second = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "مش رحیم امروز کار کرد"},
-    )
+    first = submit_and_confirm(client, project["id"], "مش رحیم امروز کار کرد")
+    second = submit_and_confirm(client, project["id"], "مش رحیم امروز کار کرد")
     states = client.get(f"/projects/{project['id']}/worker-states")
     history = client.get(f"/projects/{project['id']}/history")
 
-    assert first.status_code == 201
-    assert second.status_code == 201
+    assert first["intent"] == "WORK_EVENT"
+    assert second["intent"] == "WORK_EVENT"
     assert states.json()[0]["total_days_worked"] == "2.00"
     assert len(history.json()) == 2
 
@@ -962,6 +1043,7 @@ def test_natural_input_payment_creates_payment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_project(client)
+    create_worker(client, project["id"], "جوشکار", "SKILLED_WORKER")
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
         lambda text: {
@@ -979,14 +1061,103 @@ def test_natural_input_payment_creates_payment(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "۱۰۰ میلیون دادم به جوشکار"},
+    interpretation = create_interpretation(client, project["id"], "۱۰۰ میلیون دادم به جوشکار")
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    response = confirm_interpretation(client, interpretation)
+
+    assert response["payments"][0]["amount"] == "100000000.00"
+    assert response["payments"][0]["direction"] == "OUTGOING"
+    assert response["states"][0]["financial_balance"] == "-100000000.00"
+
+
+def test_existing_client_partial_match_creates_incoming_payment_draft(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    client_worker = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entity": "میثم", "confidence": 0.9},
     )
 
-    assert response.status_code == 201
-    assert response.json()["payments"][0]["amount"] == "100000000.00"
-    assert response.json()["states"][0]["financial_balance"] == "-100000000.00"
+    interpretation = create_interpretation(
+        client,
+        project["id"],
+        "میثم ۲۰۰ ملیون پول داد برای شروع پروژه",
+    )
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert interpretation["suggested_entity_id"] == client_worker["id"]
+    assert interpretation["matched_input_text"] == "میثم"
+    assert interpretation["extracted_entities"][0]["name"] == "میثم کبیری"
+    assert interpretation["financial_direction"] == "INCOMING"
+    assert [worker["name"] for worker in workers] == ["میثم کبیری"]
+
+
+def test_confirming_client_payment_is_incoming_without_duplicate_entity(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    client_worker = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entity": "میثم", "confidence": 0.9},
+    )
+
+    interpretation = create_interpretation(
+        client,
+        project["id"],
+        "میثم ۲۰۰ ملیون پول داد برای شروع پروژه",
+    )
+    response = confirm_interpretation(client, interpretation)
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert response["payments"][0]["entity_id"] == client_worker["id"]
+    assert response["payments"][0]["amount"] == "200000000.00"
+    assert response["payments"][0]["direction"] == "INCOMING"
+    assert response["states"][0]["role"] == "CLIENT"
+    assert response["states"][0]["financial_balance"] == "200000000.00"
+    assert [worker["name"] for worker in workers] == ["میثم کبیری"]
+
+
+def test_multiple_partial_entity_matches_require_selection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    create_worker(client, project["id"], "میثم رضایی", "DAILY_WORKER")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entity": "میثم", "confidence": 0.9},
+    )
+
+    interpretation = create_interpretation(client, project["id"], "میثم ۲۰۰ ملیون پول داد")
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm")
+
+    assert interpretation["suggested_entity_id"] is None
+    assert response.status_code == 409
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+
+
+def test_unknown_financial_entity_cannot_confirm_without_resolution(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entity": "ناشناس", "confidence": 0.9},
+    )
+
+    interpretation = create_interpretation(client, project["id"], "ناشناس ۲۰۰ ملیون پول داد")
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm")
+
+    assert interpretation["suggested_entity_id"] is None
+    assert response.status_code == 409
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
 
 
 def test_natural_input_invoice_creates_vendor_debt(
@@ -994,6 +1165,7 @@ def test_natural_input_invoice_creates_vendor_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_project(client)
+    create_worker(client, project["id"], "جوشکار", "VENDOR")
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
         lambda text: {
@@ -1011,16 +1183,193 @@ def test_natural_input_invoice_creates_vendor_debt(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "جوشکار فاکتور ۳۴۵ میلیونی داده"},
-    )
+    interpretation = create_interpretation(client, project["id"], "جوشکار فاکتور ۳۴۵ میلیونی داده")
+    assert client.get(f"/projects/{project['id']}/invoices").json() == []
+    response = confirm_interpretation(client, interpretation)
     summary = client.get(f"/projects/{project['id']}/operating-summary")
 
-    assert response.status_code == 201
-    assert response.json()["invoices"][0]["total_amount"] == "345000000.00"
-    assert response.json()["states"][0]["financial_balance"] == "345000000.00"
+    assert response["invoices"][0]["total_amount"] == "345000000.00"
+    assert response["states"][0]["financial_balance"] == "345000000.00"
     assert summary.json()["vendor_debts"][0]["debt"] == "345000000.00"
+
+
+def test_purchase_with_money_defaults_to_paid_purchase(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {
+            "intent": "INVOICE",
+            "entity": "هادی‌پور سیم",
+            "action": "INVOICE",
+            "confidence": 0.9,
+        },
+    )
+
+    interpretation = create_interpretation(client, project["id"], "از هادی‌پور سیم ۵ میلیون خرید کردم")
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    response = confirm_interpretation(client, interpretation)
+
+    assert response["payments"][0]["amount"] == "5000000.00"
+    assert response["payments"][0]["type"] == "BANK_TRANSFER"
+    assert response["payments"][0]["direction"] == "OUTGOING"
+    assert response["invoices"] == []
+    explanation = response["history_entries"][0]["explanation"]
+    assert explanation["semantic_action"] == "PURCHASE_PAID"
+    assert response["states"][0]["financial_balance"] == "-5000000.00"
+
+
+def test_material_purchase_without_money_does_not_create_payment_or_debt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "NOTE", "entities": [], "confidence": 0.5},
+    )
+
+    response = confirm_interpretation(
+        client,
+        create_interpretation(client, project["id"], "۲۰ متر سیم خریدم"),
+    )
+
+    assert response["payments"] == []
+    assert response["invoices"] == []
+    assert response["history_entries"][0]["change_type"] == "NOTE"
+
+
+def test_unpaid_purchase_creates_debt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {
+            "intent": "PAYMENT",
+            "entity": "هادی‌پور سیم",
+            "action": "PAYMENT",
+            "confidence": 0.9,
+        },
+    )
+
+    response = submit_and_confirm(client, project["id"], "۵ میلیون خرید کردم ولی پولش را هنوز ندادم")
+
+    assert response["invoices"][0]["total_amount"] == "5000000.00"
+    assert response["payments"] == []
+    assert response["history_entries"][0]["explanation"]["semantic_action"] == "DEBT_CREATED"
+    assert response["states"][0]["financial_balance"] == "5000000.00"
+
+
+def test_check_purchase_records_deferred_payment_due_date(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "رفیعی سرامیک", "VENDOR")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {
+            "intent": "PAYMENT",
+            "entity": "رفیعی سرامیک",
+            "action": "PAYMENT",
+            "confidence": 0.9,
+        },
+    )
+
+    response = submit_and_confirm(
+        client,
+        project["id"],
+        "۵۰ میلیون سرامیک خریدم برای ۱۴ مهر ۱۴۰۵ چک دادم",
+    )
+
+    assert response["payments"][0]["amount"] == "50000000.00"
+    assert response["payments"][0]["type"] == "CHECK"
+    assert response["payments"][0]["direction"] == "DEFERRED"
+    assert response["payments"][0]["due_date"] == "14 مهر 1405"
+    assert response["invoices"] == []
+    explanation = response["history_entries"][0]["explanation"]
+    assert explanation["semantic_action"] == "CHECK_PAYMENT"
+
+
+def test_discard_pending_interpretation_has_no_side_effects(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "جوشکار", "SKILLED_WORKER")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "WORK", "entity": "مش رحیم", "confidence": 0.8},
+    )
+    interpretation = create_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
+
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/discard")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "DISCARDED"
+    assert client.get(f"/projects/{project['id']}/worker-states").json() == []
+    assert client.get(f"/projects/{project['id']}/history").json() == []
+
+
+def test_edit_pending_interpretation_executes_edited_values(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "جوشکار", "SKILLED_WORKER")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entity": "جوشکار", "confidence": 0.8},
+    )
+    interpretation = create_interpretation(client, project["id"], "۱۰۰ میلیون دادم به جوشکار")
+    edit = client.patch(
+        f"/pending-interpretations/{interpretation['id']}",
+        json={"extracted_amount": "75000000", "description": "edited payment"},
+    )
+
+    response = confirm_interpretation(client, edit.json())
+
+    assert edit.status_code == 200
+    assert edit.json()["status"] == "EDITED"
+    assert response["payments"][0]["amount"] == "75000000.00"
+    assert response["payments"][0]["amount"] != "100000000.00"
+
+
+def test_multiple_extracted_actions_create_independent_interpretations(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "جوشکار", "SKILLED_WORKER")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {
+            "intent": "PAYMENT",
+            "entities": [{"name": "جوشکار", "role_guess": "WORKER"}],
+            "events": [
+                {"type": "PAYMENT", "amount_text": "۱ میلیون", "description": "first"},
+                {"type": "PAYMENT", "amount_text": "۲ میلیون", "description": "second"},
+            ],
+        },
+    )
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "۱ میلیون و ۲ میلیون دادم به جوشکار"},
+    )
+
+    assert response.status_code == 201
+    interpretations = response.json()["interpretations"]
+    assert len(interpretations) == 2
+    first = confirm_interpretation(client, interpretations[0])
+    assert first["payments"][0]["amount"] == "1000000.00"
+    assert client.get(f"/projects/{project['id']}/payments").json()[0]["amount"] == "1000000.00"
 
 
 def test_natural_input_skilled_work_defaults_to_one_unit(
@@ -1038,15 +1387,11 @@ def test_natural_input_skilled_work_defaults_to_one_unit(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "نادری جوشکار امروز اومد و جوش زد"},
-    )
+    response = submit_and_confirm(client, project["id"], "نادری جوشکار امروز اومد و جوش زد")
 
-    assert response.status_code == 201
-    assert response.json()["states"][0]["role"] == "SKILLED"
-    assert response.json()["states"][0]["total_quantity"] == "1.00"
-    assert response.json()["history_entries"][0]["change_type"] == "WORK"
+    assert response["states"][0]["role"] == "SKILLED"
+    assert response["states"][0]["total_quantity"] == "1.00"
+    assert response["history_entries"][0]["change_type"] == "WORK"
 
 
 def test_semantic_normalizer_classifies_implicit_work() -> None:
@@ -1224,13 +1569,9 @@ def test_history_entry_contains_full_semantic_traceability(client, monkeypatch) 
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "نادری جوشکار امروز کار کرد"},
-    )
+    response = submit_and_confirm(client, project["id"], "نادری جوشکار امروز کار کرد")
 
-    assert response.status_code == 201
-    history = response.json()["history_entries"][0]
+    history = response["history_entries"][0]
     assert history["rule_id"] == "WORK_RULE_01"
     assert history["explanation"]["event_type"] == "WORK_EVENT"
     assert history["conflict_warnings"] == []

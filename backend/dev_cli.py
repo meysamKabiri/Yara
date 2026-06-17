@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.core.semantic_rules import ConflictDetectorService, EVENT_RULES
+from app.core.semantic_rules import EVENT_RULES, ConflictDetectorService
 from app.db.session import SessionLocal
 from app.dev_tools.semantic_firewall.run_semantic_tests import run_semantic_tests
 from app.models.core import Project, Worker

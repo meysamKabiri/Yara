@@ -19,6 +19,8 @@ class SemanticExplainabilityService:
         confidence: float,
         rule_traces: list[RuleTrace],
         rejected_rules: list[dict[str, str]],
+        semantic_action: str | None = None,
+        reasoning_notes: list[str] | None = None,
     ) -> dict[str, Any]:
         selected = next((trace for trace in rule_traces if trace.event_type == event_type), None)
         triggered_rule = selected.rule_id if selected is not None else f"{event_type}_FALLBACK"
@@ -30,11 +32,13 @@ class SemanticExplainabilityService:
             decision_path.append(f"event classified as {event_type}")
         else:
             decision_path.append(f"rule {triggered_rule} matched")
+            decision_path.extend(reasoning_notes or [])
             decision_path.append("priority resolved")
             decision_path.append(f"event classified as {event_type}")
 
         return {
             "event_type": event_type,
+            "semantic_action": semantic_action,
             "confidence": confidence,
             "triggered_rule": triggered_rule,
             "matched_signals": matched_signals,

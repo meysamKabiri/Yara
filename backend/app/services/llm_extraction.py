@@ -73,6 +73,9 @@ Rules:
 
 * Extract entity names and raw field spans only.
 * Fill entities with every entity mentioned.
+* If multiple people are joined in one setup sentence, return one entities[] item per person.
+* Split Persian joined names such as "مش رحیم و آقای صابری" into separate entities.
+* For role declarations such as "به عنوان کارگر ساده", "کارگر ساده", "کارگرهای پروژه", or "در پروژه کار می‌کنند", set those people as WORKER entities and keep the role phrase in role_detail.
 * Include field_updates only when raw phone, account number, or role detail appears.
 * Do NOT calculate totals.
 * Do NOT convert money values to numbers.

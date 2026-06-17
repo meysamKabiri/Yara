@@ -8,6 +8,7 @@ UNIT_MULTIPLIERS = {
     "هزار": 1_000,
     "thousand": 1_000,
     "میلیون": 1_000_000,
+    "میلیونی": 1_000_000,
     "million": 1_000_000,
     "میلیونش را": 1_000_000,
     "میلیونش": 1_000_000,
@@ -27,7 +28,7 @@ PERSIAN_NUMBER_WORDS = {
     "ده": 10,
     "صد": 100,
 }
-UNIT_PATTERN = r"هزار|thousand|میلیونش را|میلیونش|میلیون|million|میلیارد|billion"
+UNIT_PATTERN = r"هزار|thousand|میلیونش را|میلیونش|میلیونی|میلیون|million|میلیارد|billion"
 NUMBER_UNIT_PATTERN = re.compile(rf"(?<!\w)(\d+(?:\.\d+)?)\s*({UNIT_PATTERN})?(?!\w)")
 PERSIAN_HALF_PATTERN = re.compile(
     rf"({'|'.join(PERSIAN_NUMBER_WORDS)})\s+و\s+نیم\s*({UNIT_PATTERN})"

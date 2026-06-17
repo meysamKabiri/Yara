@@ -24,7 +24,10 @@ class ConflictDetectorService:
                     {
                         "type": "OVERLAPPING_RULES",
                         "rules": [left_id, right_id],
-                        "description": f"Both rules match {', '.join(repr(item) for item in overlap)} keyword",
+                        "description": (
+                            f"Both rules match {', '.join(repr(item) for item in overlap)} "
+                            "keyword"
+                        ),
                     }
                 )
                 if left_rule.get("priority") == right_rule.get("priority"):
@@ -41,7 +44,9 @@ class ConflictDetectorService:
                 {
                     "type": "MISSING_FALLBACK_COVERAGE",
                     "rules": [],
-                    "description": "No NOTE_EVENT fallback coverage is defined for unmatched inputs",
+                    "description": (
+                        "No NOTE_EVENT fallback coverage is defined for unmatched inputs"
+                    ),
                 }
             )
 
@@ -69,7 +74,9 @@ class ConflictDetectorService:
                 {
                     "type": "AMBIGUOUS_CLASSIFICATION_ZONE",
                     "rules": [str(first.get("rule_id")), str(second.get("rule_id"))],
-                    "description": f"Input {text!r} matches multiple event types with similar confidence",
+                    "description": (
+                        f"Input {text!r} matches multiple event types with similar confidence"
+                    ),
                 }
             ],
             "severity": "HIGH",
@@ -98,7 +105,8 @@ class ConflictDetectorService:
         return str(rule.get("rule_id") or name)
 
     def _severity(self, conflicts: list[dict[str, Any]]) -> str:
-        if any(conflict["type"] in {"PRIORITY_COLLISION", "MISSING_FALLBACK_COVERAGE"} for conflict in conflicts):
+        high_severity = {"PRIORITY_COLLISION", "MISSING_FALLBACK_COVERAGE"}
+        if any(conflict["type"] in high_severity for conflict in conflicts):
             return "HIGH"
         if conflicts:
             return "MEDIUM"

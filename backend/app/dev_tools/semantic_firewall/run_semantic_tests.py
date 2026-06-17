@@ -64,9 +64,12 @@ def _matches_expected(test_case: dict[str, Any], decision: FirewallDecision) -> 
     event = decision.event
     expected_type = test_case["expected_event_type"]
     expected_entity = test_case.get("expected_entity")
+    expected_action = test_case.get("expected_action")
 
     if event.type.value != expected_type:
         return False, f"expected {expected_type} but got {event.type.value}"
+    if expected_action is not None and event.action != expected_action:
+        return False, f"expected action {expected_action} but got {event.action}"
     if expected_entity is not None and event.entity_name != expected_entity:
         return False, f"expected entity {expected_entity} but got {event.entity_name}"
     if event.type.value == "WORK_EVENT" and event.entity_name is None:
@@ -100,6 +103,7 @@ def _result(
         "expected_event_type": test_case["expected_event_type"],
         "expected_entity": test_case.get("expected_entity"),
         "actual_event_type": final_event.type.value,
+        "actual_action": final_event.action,
         "actual_entity": final_event.entity_name,
         "passed": passed,
         "reason": reason,

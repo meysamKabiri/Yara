@@ -1,7 +1,8 @@
+import os
+import re
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
-import os
 from typing import Any
 
 from app.core.semantic_rules.conflict_detector import ConflictDetectorService
@@ -43,6 +44,9 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
                 "کارفرما",
                 "کارگر",
                 "کارگرها",
+                "کارگرهای پروژه",
+                "کارگر ساده",
+                "به عنوان کارگر ساده",
                 "فروشنده",
                 "پیمانکار",
                 "جوشکار",
@@ -62,8 +66,8 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
         },
         "declarations": ["است", "هست", "هستند"],
         "validation": {"requires_entity": False, "forbidden_fallback": ["NOTE_EVENT"]},
-        "allowed_contexts": ["entity_declaration", "entity_update"],
-        "forbidden_contexts": ["financial", "work"],
+        "allowed_contexts": ["entity_declaration", "entity_update", "role_assignment"],
+        "forbidden_contexts": ["financial"],
         "priority": 1,
         "fallback": "NOTE_EVENT",
     },
@@ -75,8 +79,12 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
                 "دادم",
                 "پرداخت",
                 "خرید",
+                "خرید کردم",
                 "فاکتور",
                 "بدهی",
+                "حساب شد",
+                "نسیه",
+                "چک",
                 "تسویه",
                 "گرفتم",
                 "واریز",
@@ -88,8 +96,11 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
             "patterns": ["money", "cash_movement", "settlement"],
         },
         "actions": {
-            "INVOICE": ["خرید", "فاکتور", "بدهی"],
-            "PAYMENT": [],
+            "PURCHASE_PAID": ["خرید", "خرید کردم"],
+            "DEBT_CREATED": ["فاکتور", "بدهی", "حساب شد", "نسیه", "ندادم"],
+            "CHECK_PAYMENT": ["چک"],
+            "DEFERRED_PAYMENT": ["تاریخ", "ماه دیگه", "برای"],
+            "PAYMENT": ["دادم", "پرداخت", "واریز", "تسویه"],
         },
         "validation": {"requires_entity": False, "forbidden_fallback": ["NOTE_EVENT"]},
         "allowed_contexts": ["financial"],
@@ -152,16 +163,23 @@ class SemanticRuleEngine:
         normalized = self._normalize(text)
         entity = self.resolve_entity(llm_output, text, context)
         rule_traces = self._matching_rule_traces(normalized, entity, llm_output)
-        event_type = self.resolve_conflicts([CanonicalEventType(trace.event_type) for trace in rule_traces])
+        event_type = self.resolve_conflicts(
+            [CanonicalEventType(trace.event_type) for trace in rule_traces]
+        )
         confidence = self._confidence(llm_output)
         action = self.action_for(event_type, normalized)
         delta = Decimal("1") if event_type == CanonicalEventType.WORK else None
-        rejected_rules = self._rejected_rules(normalized, [trace.event_type for trace in rule_traces])
+        rejected_rules = self._rejected_rules(
+            normalized,
+            [trace.event_type for trace in rule_traces],
+        )
         explanation = self.explainability.explain(
             event_type=event_type.value,
             confidence=confidence,
             rule_traces=rule_traces,
             rejected_rules=rejected_rules,
+            semantic_action=action,
+            reasoning_notes=self._reasoning_notes(event_type, action, normalized),
         )
         runtime_conflict_report = self.conflict_detector.audit_text(
             text,
@@ -206,7 +224,11 @@ class SemanticRuleEngine:
         normalized = self._normalize(text)
         expected_type = self.resolve_conflicts(self._matching_event_types(normalized, entity))
         if "semantic_explanation" not in event.metadata:
-            return RuleValidationResult(False, "semantic explanation metadata missing", expected_type)
+            return RuleValidationResult(
+                False,
+                "semantic explanation metadata missing",
+                expected_type,
+            )
         if event.type != expected_type:
             return RuleValidationResult(
                 False,
@@ -238,11 +260,21 @@ class SemanticRuleEngine:
         normalized = self._normalize(text)
         confidence = self._confidence(llm_output or {})
         rule_traces = self._matching_rule_traces(normalized, entity, llm_output or {})
+        action = self.action_for(event_type, normalized)
         explanation = self.explainability.explain(
             event_type=event_type.value,
             confidence=confidence,
             rule_traces=rule_traces,
-            rejected_rules=self._rejected_rules(normalized, [trace.event_type for trace in rule_traces]),
+            rejected_rules=self._rejected_rules(
+                normalized,
+                [trace.event_type for trace in rule_traces],
+            ),
+            semantic_action=action,
+            reasoning_notes=self._reasoning_notes(
+                event_type,
+                action,
+                normalized,
+            ),
         )
         conflict_report = self.conflict_detector.audit_text(
             text,
@@ -260,7 +292,7 @@ class SemanticRuleEngine:
             type=event_type,
             entity_id=entity.id if entity is not None else event.entity_id,
             entity_name=entity.name if entity is not None else event.entity_name,
-            action=self.action_for(event_type, normalized),
+            action=action,
             delta=Decimal("1") if event_type == CanonicalEventType.WORK else None,
             metadata=self.explainability.attach_to_event_metadata(
                 event.metadata,
@@ -273,7 +305,13 @@ class SemanticRuleEngine:
         if event_type == CanonicalEventType.SETUP:
             return "ENTITY_UPDATE" if self.has_entity_update_meaning(normalized_text) else "SETUP"
         if event_type == CanonicalEventType.FINANCIAL:
-            return "INVOICE" if self.has_invoice_meaning(normalized_text) else "PAYMENT"
+            if self.has_check_payment_meaning(normalized_text):
+                return "CHECK_PAYMENT"
+            if self.has_debt_meaning(normalized_text):
+                return "DEBT_CREATED"
+            if self.has_paid_purchase_meaning(normalized_text):
+                return "PURCHASE_PAID"
+            return "PAYMENT"
         if event_type == CanonicalEventType.WORK:
             return "INCREMENT"
         return "NOTE"
@@ -314,9 +352,20 @@ class SemanticRuleEngine:
         )
 
     def has_invoice_meaning(self, normalized_text: str) -> bool:
+        return self.has_debt_meaning(normalized_text)
+
+    def has_debt_meaning(self, normalized_text: str) -> bool:
         return self._contains_any(
             normalized_text,
-            set(EVENT_RULES[CanonicalEventType.FINANCIAL.value]["actions"]["INVOICE"]),
+            set(EVENT_RULES[CanonicalEventType.FINANCIAL.value]["actions"]["DEBT_CREATED"]),
+        ) or self._contains_phrase(normalized_text, ["پرداخت نکردم", "هنوز ندادم", "پولش را ندادم"])
+
+    def has_check_payment_meaning(self, normalized_text: str) -> bool:
+        return "چک" in normalized_text
+
+    def has_paid_purchase_meaning(self, normalized_text: str) -> bool:
+        return self._has_purchase_meaning(normalized_text) and self._has_money_amount(
+            normalized_text
         )
 
     def _matching_event_types(
@@ -374,7 +423,9 @@ class SemanticRuleEngine:
         ]
         if event_type == CanonicalEventType.SETUP:
             signals.extend(
-                declaration for declaration in rule.get("declarations", []) if declaration in normalized_text
+                declaration
+                for declaration in rule.get("declarations", [])
+                if declaration in normalized_text
             )
         if event_type == CanonicalEventType.WORK and entity is not None:
             signals.extend(
@@ -414,18 +465,53 @@ class SemanticRuleEngine:
 
     def _has_setup_meaning(self, normalized_text: str) -> bool:
         rule = EVENT_RULES[CanonicalEventType.SETUP.value]
+        if self._contains_phrase(
+            normalized_text,
+            [
+                "به عنوان کارگر ساده",
+                "کارگر ساده",
+                "کارگرهای پروژه",
+                "در پروژه کار میکنند",
+                "در پروژه کار می کنند",
+                "در پروژه کار می‌کنند",
+            ],
+        ):
+            return True
         return self._contains_any(
             normalized_text,
             set(rule["triggers"]["keywords"]),
         ) and self._contains_any(normalized_text, set(rule["declarations"]))
 
     def _has_financial_meaning(self, normalized_text: str) -> bool:
+        if self._contains_any(normalized_text, {"تسویه"}):
+            return True
+        has_money = self._has_money_amount(normalized_text)
+        if not has_money:
+            return False
         return self._contains_any(
             normalized_text,
-            set(EVENT_RULES[CanonicalEventType.FINANCIAL.value]["triggers"]["keywords"]),
+            {
+                "دادم",
+                "پرداخت",
+                "خرید",
+                "فاکتور",
+                "بدهی",
+                "حساب شد",
+                "نسیه",
+                "چک",
+                "واریز",
+                "پول",
+            },
         )
 
     def _has_work_meaning(self, normalized_text: str) -> bool:
+        if self._has_setup_meaning(normalized_text):
+            return False
+        if self._has_purchase_meaning(normalized_text) and not self._has_money_amount(
+            normalized_text
+        ):
+            work_keywords = set(EVENT_RULES[CanonicalEventType.WORK.value]["triggers"]["keywords"])
+            return self._contains_any(normalized_text, work_keywords - {"متر"})
         return self._contains_any(
             normalized_text,
             set(EVENT_RULES[CanonicalEventType.WORK.value]["triggers"]["keywords"]),
@@ -439,6 +525,38 @@ class SemanticRuleEngine:
 
     def _contains_any(self, normalized_text: str, keywords: set[str]) -> bool:
         return any(keyword in normalized_text for keyword in keywords)
+
+    def _contains_phrase(self, normalized_text: str, phrases: list[str]) -> bool:
+        return any(phrase in normalized_text for phrase in phrases)
+
+    def _has_purchase_meaning(self, normalized_text: str) -> bool:
+        return self._contains_phrase(normalized_text, ["خرید", "خریدم", "خرید کردم"])
+
+    def _has_money_amount(self, normalized_text: str) -> bool:
+        return bool(
+            re.search(
+                r"\d+(?:\.\d+)?\s*(میلیون|میلیونی|میلیارد|میلیاردی|هزار|تومان)",
+                normalized_text,
+            )
+        )
+
+    def _reasoning_notes(
+        self,
+        event_type: CanonicalEventType,
+        action: str,
+        normalized_text: str,
+    ) -> list[str]:
+        if event_type != CanonicalEventType.FINANCIAL:
+            return []
+        if action == "PURCHASE_PAID":
+            return ["money amount + purchase phrase implies paid purchase by default"]
+        if action in {"DEBT_CREATED", "CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
+            return ["unpaid/debt/check terms override paid purchase"]
+        if self._has_purchase_meaning(normalized_text) and not self._has_money_amount(
+            normalized_text
+        ):
+            return ["purchase phrase without money amount is not treated as payment or debt"]
+        return []
 
     def _entity_names(self, llm_output: dict[str, Any]) -> list[str]:
         names: list[str] = []

@@ -9,7 +9,9 @@ from app.models.core import (
     ExtractedEventType,
     HistoryChangeType,
     InvoiceStatus,
+    FinancialDirection,
     PaymentType,
+    PendingInterpretationStatus,
     RawEntryStatus,
     WorkerStateRole,
     WorkerType,
@@ -170,6 +172,8 @@ class PaymentCreate(BaseModel):
     amount: Decimal
     related_invoice_id: int | None = None
     type: PaymentType
+    due_date: str | None = None
+    direction: FinancialDirection = FinancialDirection.OUTGOING
 
 
 class PaymentRead(BaseModel):
@@ -181,6 +185,8 @@ class PaymentRead(BaseModel):
     amount: Decimal
     related_invoice_id: int | None
     type: PaymentType
+    due_date: str | None
+    direction: FinancialDirection
     created_at: datetime
     updated_at: datetime
 
@@ -219,6 +225,48 @@ class HistoryEntryRead(BaseModel):
 
 class NaturalInputCreate(BaseModel):
     text: str
+
+
+class PendingInterpretationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    raw_input_text: str
+    canonical_event_type: str
+    semantic_action: str
+    suggested_entity_id: int | None
+    matched_input_text: str | None
+    extracted_entities: list[dict] | None
+    extracted_amount: Decimal | None
+    extracted_quantity: Decimal | None
+    payment_method: str | None
+    financial_direction: FinancialDirection | None
+    due_date: str | None
+    description: str | None
+    semantic_explanation: dict | None
+    confidence: float | None
+    status: PendingInterpretationStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+class PendingInterpretationUpdate(BaseModel):
+    canonical_event_type: str | None = None
+    semantic_action: str | None = None
+    suggested_entity_id: int | None = None
+    matched_input_text: str | None = None
+    extracted_entities: list[dict] | None = None
+    extracted_amount: Decimal | None = None
+    extracted_quantity: Decimal | None = None
+    payment_method: str | None = None
+    financial_direction: FinancialDirection | None = None
+    due_date: str | None = None
+    description: str | None = None
+
+
+class NaturalInputInterpretationResult(BaseModel):
+    interpretations: list[PendingInterpretationRead]
 
 
 class NaturalInputResult(BaseModel):

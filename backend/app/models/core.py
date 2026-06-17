@@ -35,6 +35,13 @@ class ExtractedEventStatus(StrEnum):
     DISCARDED = "DISCARDED"
 
 
+class PendingInterpretationStatus(StrEnum):
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"
+    EDITED = "EDITED"
+    DISCARDED = "DISCARDED"
+
+
 class WorkerType(StrEnum):
     DAILY_WORKER = "DAILY_WORKER"
     SKILLED_WORKER = "SKILLED_WORKER"
@@ -59,7 +66,15 @@ class InvoiceStatus(StrEnum):
 class PaymentType(StrEnum):
     CASH = "CASH"
     BANK_TRANSFER = "BANK_TRANSFER"
+    CHECK = "CHECK"
     OTHER = "OTHER"
+
+
+class FinancialDirection(StrEnum):
+    INCOMING = "INCOMING"
+    OUTGOING = "OUTGOING"
+    DEBT = "DEBT"
+    DEFERRED = "DEFERRED"
 
 
 class WorkerStateRole(StrEnum):
@@ -90,6 +105,9 @@ class Project(TimestampMixin, Base):
     payments: Mapped[list["Payment"]] = relationship(back_populates="project")
     worker_states: Mapped[list["WorkerState"]] = relationship(back_populates="project")
     history_entries: Mapped[list["HistoryEntry"]] = relationship(back_populates="project")
+    pending_interpretations: Mapped[list["PendingInterpretation"]] = relationship(
+        back_populates="project"
+    )
 
 
 class RawEntry(TimestampMixin, Base):
@@ -219,6 +237,12 @@ class Payment(TimestampMixin, Base):
         SqlEnum(PaymentType, native_enum=False, length=30),
         nullable=False,
     )
+    due_date: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    direction: Mapped[FinancialDirection] = mapped_column(
+        SqlEnum(FinancialDirection, native_enum=False, length=20),
+        default=FinancialDirection.OUTGOING,
+        nullable=False,
+    )
 
     project: Mapped[Project] = relationship(back_populates="payments")
     entity: Mapped[Worker] = relationship(back_populates="payments")
@@ -264,3 +288,32 @@ class HistoryEntry(TimestampMixin, Base):
 
     project: Mapped[Project] = relationship(back_populates="history_entries")
     worker_state: Mapped[WorkerState | None] = relationship(back_populates="history_entries")
+
+
+class PendingInterpretation(TimestampMixin, Base):
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    raw_input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    semantic_action: Mapped[str] = mapped_column(String(100), nullable=False)
+    suggested_entity_id: Mapped[int | None] = mapped_column(ForeignKey("worker.id"), nullable=True)
+    matched_input_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    extracted_entities: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    extracted_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    extracted_quantity: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    payment_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    financial_direction: Mapped[FinancialDirection | None] = mapped_column(
+        SqlEnum(FinancialDirection, native_enum=False, length=20),
+        nullable=True,
+    )
+    due_date: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    semantic_explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[PendingInterpretationStatus] = mapped_column(
+        SqlEnum(PendingInterpretationStatus, native_enum=False, length=20),
+        default=PendingInterpretationStatus.PENDING,
+        nullable=False,
+    )
+
+    project: Mapped[Project] = relationship(back_populates="pending_interpretations")

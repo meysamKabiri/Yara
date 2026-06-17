@@ -1,7 +1,12 @@
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.semantic_rules import EVENT_RULES, CanonicalEvent, CanonicalEventType, SemanticRuleEngine
+from app.core.semantic_rules import (
+    EVENT_RULES,
+    CanonicalEvent,
+    CanonicalEventType,
+    SemanticRuleEngine,
+)
 from app.models.core import Worker
 
 

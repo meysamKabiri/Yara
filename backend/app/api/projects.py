@@ -18,12 +18,15 @@ from app.models.core import (
     ExtractedEvent,
     ExtractedEventStatus,
     ExtractedEventType,
+    FinancialDirection,
     HistoryChangeType,
     HistoryEntry,
     Invoice,
     InvoiceStatus,
     Payment,
     PaymentType,
+    PendingInterpretation,
+    PendingInterpretationStatus,
     Project,
     RawEntry,
     RawEntryStatus,
@@ -41,10 +44,13 @@ from app.schemas.projects import (
     HistoryEntryRead,
     InvoiceCreate,
     InvoiceRead,
+    NaturalInputInterpretationResult,
     NaturalInputCreate,
     NaturalInputResult,
     PaymentCreate,
     PaymentRead,
+    PendingInterpretationRead,
+    PendingInterpretationUpdate,
     ProjectCreate,
     ProjectDetail,
     ProjectRead,
@@ -61,7 +67,11 @@ from app.schemas.projects import (
 from app.services.entity_registry import EntityRegistryService
 from app.services.llm_extraction import extract, extract_graph
 from app.services.persian_money_engine import normalize_text, parse_persian_money
-from app.services.semantic_normalizer import CanonicalEvent, CanonicalEventType, SemanticNormalizerService
+from app.services.semantic_normalizer import (
+    CanonicalEvent,
+    CanonicalEventType,
+    SemanticNormalizerService,
+)
 
 router = APIRouter(tags=["projects"])
 
@@ -176,7 +186,7 @@ def _role_to_state_role(role: str | None, text: str, intent: str | None = None) 
     normalized = normalize_text(text)
     if role == "CLIENT":
         return WorkerStateRole.CLIENT
-    if role == "VENDOR" or intent == "INVOICE":
+    if role == "VENDOR" or intent == "INVOICE" or "خرید" in normalized or "فاکتور" in normalized:
         return WorkerStateRole.VENDOR
     if "کارفرما" in normalized:
         return WorkerStateRole.CLIENT
@@ -318,6 +328,208 @@ def _semantic_history_fields(event: CanonicalEvent) -> dict[str, Any]:
         "explanation": explanation if isinstance(explanation, dict) else None,
         "conflict_warnings": conflict_warnings if isinstance(conflict_warnings, list) else [],
     }
+
+
+def _semantic_history_fields_from_pending(
+    interpretation: PendingInterpretation,
+) -> dict[str, Any]:
+    explanation = interpretation.semantic_explanation
+    return {
+        "rule_id": explanation.get("triggered_rule") if isinstance(explanation, dict) else None,
+        "explanation": explanation if isinstance(explanation, dict) else None,
+        "conflict_warnings": [],
+    }
+
+
+def _build_pending_interpretations(
+    project_id: int,
+    raw_text: str,
+    graph: dict[str, Any],
+    canonical_event: CanonicalEvent,
+    entity_context: list[Worker],
+) -> list[PendingInterpretation]:
+    events = graph.get("events")
+    raw_events = events if isinstance(events, list) and len(events) > 1 else [None]
+    interpretations: list[PendingInterpretation] = []
+    for raw_event in raw_events:
+        event_graph = dict(graph)
+        if isinstance(raw_event, dict):
+            event_graph["events"] = [raw_event]
+            if raw_event.get("amount_text") is not None:
+                event_graph["amount_text"] = raw_event.get("amount_text")
+            if raw_event.get("quantity_text") is not None:
+                event_graph["quantity_text"] = raw_event.get("quantity_text")
+        payment_method = None
+        if canonical_event.action in {"CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
+            payment_method = PaymentType.CHECK.value
+        elif canonical_event.type == CanonicalEventType.FINANCIAL:
+            payment_method = PaymentType.BANK_TRANSFER.value
+        draft_entities = _draft_entities(event_graph, canonical_event, raw_text)
+        raw_entity_name = _draft_entity_name(draft_entities)
+        resolved_entity = _resolve_existing_entity(raw_entity_name, entity_context)
+        financial_direction = _financial_direction(
+            raw_text,
+            canonical_event.type,
+            canonical_event.action,
+            resolved_entity,
+        )
+        if resolved_entity is not None and draft_entities:
+            draft_entities[0] = {
+                **draft_entities[0],
+                "name": resolved_entity.name,
+                "type": resolved_entity.type.value,
+            }
+        interpretations.append(
+            PendingInterpretation(
+                project_id=project_id,
+                raw_input_text=raw_text,
+                canonical_event_type=canonical_event.type.value,
+                semantic_action=canonical_event.action,
+                suggested_entity_id=resolved_entity.id if resolved_entity is not None else None,
+                matched_input_text=(
+                    raw_entity_name
+                    if resolved_entity is not None and raw_entity_name != resolved_entity.name
+                    else None
+                ),
+                extracted_entities=draft_entities,
+                extracted_amount=_graph_amount(event_graph, raw_text),
+                extracted_quantity=_graph_quantity(event_graph),
+                payment_method=payment_method,
+                financial_direction=financial_direction,
+                due_date=_extract_due_date(raw_text),
+                description=_draft_description(event_graph, raw_text),
+                semantic_explanation=canonical_event.metadata.get("semantic_explanation"),
+                confidence=canonical_event.metadata.get("confidence"),
+                status=PendingInterpretationStatus.PENDING,
+            )
+        )
+    return interpretations
+
+
+def _draft_entities(
+    graph: dict[str, Any],
+    canonical_event: CanonicalEvent,
+    raw_text: str,
+) -> list[dict[str, Any]]:
+    setup_entities = _graph_setup_entities(graph)
+    if setup_entities:
+        return setup_entities
+    if canonical_event.type == CanonicalEventType.SETUP:
+        parsed_setup_entities = _parse_setup_entities_from_text(raw_text)
+        if parsed_setup_entities:
+            return parsed_setup_entities
+    entity_name = canonical_event.entity_name or _graph_entity_name(graph)
+    if entity_name is None:
+        return []
+    return [{"name": entity_name, "type": _graph_role_guess(graph) or "WORKER"}]
+
+
+def _parse_setup_entities_from_text(text: str) -> list[dict[str, Any]]:
+    normalized = normalize_text(text)
+    if not _has_worker_setup_phrase(normalized):
+        return []
+    names_part = re.split(r"\s+به عنوان\s+|\s+در پروژه\s+", normalized, maxsplit=1)[0]
+    names_part = re.sub(r"^(کارگرها|کارگرهای پروژه)\s+", "", names_part).strip()
+    raw_names = [part.strip(" ،,") for part in re.split(r"\s+و\s+|،|,", names_part)]
+    entities: list[dict[str, Any]] = []
+    for name in raw_names:
+        if not name or name in {"و", "کارگر", "کارگرها"}:
+            continue
+        entities.append(
+            {
+                "type": "WORKER",
+                "name": name,
+                "phone": None,
+                "account_number": None,
+                "role_detail": "کارگر ساده",
+            }
+        )
+    return entities
+
+
+def _has_worker_setup_phrase(normalized_text: str) -> bool:
+    return any(
+        phrase in normalized_text
+        for phrase in [
+            "به عنوان کارگر ساده",
+            "کارگر ساده",
+            "کارگرهای پروژه",
+            "در پروژه کار میکنند",
+            "در پروژه کار می کنند",
+            "در پروژه کار می‌کنند",
+        ]
+    )
+
+
+def _draft_entity_name(entities: list[dict[str, Any]]) -> str | None:
+    if entities and isinstance(entities[0].get("name"), str):
+        name = entities[0]["name"].strip()
+        return name or None
+    return None
+
+
+def _resolve_existing_entity(name: str | None, entity_context: list[Worker]) -> Worker | None:
+    if name is None:
+        return None
+    normalized = _normalize_entity_match_text(name)
+    if not normalized:
+        return None
+    buckets: list[list[Worker]] = [
+        [worker for worker in entity_context if _normalize_entity_match_text(worker.name) == normalized],
+        [worker for worker in entity_context if _normalize_entity_match_text(worker.name).startswith(normalized)],
+        [
+            worker
+            for worker in entity_context
+            if normalized in _normalize_entity_match_text(worker.name).split()
+        ],
+        [worker for worker in entity_context if normalized in _normalize_entity_match_text(worker.name)],
+    ]
+    for matches in buckets:
+        unique = {worker.id: worker for worker in matches}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        if len(unique) > 1:
+            return None
+    return None
+
+
+def _normalize_entity_match_text(value: str) -> str:
+    normalized = normalize_text(value).replace("\u200c", " ").strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"^(مش|آقای|اقای|خانم)\s+", "", normalized)
+    return normalized
+
+
+def _financial_direction(
+    raw_text: str,
+    event_type: CanonicalEventType,
+    action: str,
+    resolved_entity: Worker | None,
+) -> FinancialDirection | None:
+    if event_type != CanonicalEventType.FINANCIAL:
+        return None
+    normalized = normalize_text(raw_text)
+    if action in {"INVOICE", "DEBT_CREATED"}:
+        return FinancialDirection.DEBT
+    if action in {"CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
+        return FinancialDirection.DEFERRED
+    if "دادم به" in normalized or "پرداخت کردم به" in normalized:
+        return FinancialDirection.OUTGOING
+    if action == "PURCHASE_PAID" or "خرید" in normalized:
+        return FinancialDirection.OUTGOING
+    if resolved_entity is not None and resolved_entity.type == WorkerType.CLIENT:
+        if any(phrase in normalized for phrase in ["پول داد", "پرداخت کرد", "واریز کرد", "داد برای"]):
+            return FinancialDirection.INCOMING
+    return FinancialDirection.OUTGOING
+
+
+def _draft_description(graph: dict[str, Any], raw_text: str) -> str:
+    events = graph.get("events", [])
+    if isinstance(events, list) and events and isinstance(events[0], dict):
+        description = events[0].get("description")
+        if isinstance(description, str) and description.strip():
+            return description.strip()
+    return raw_text
 
 
 def _fallback_note_event(text: str) -> dict[str, Any]:
@@ -470,21 +682,16 @@ def list_raw_entries(project_id: int, db: DbSession) -> list[RawEntry]:
 
 @router.post(
     "/projects/{project_id}/natural-input",
-    response_model=NaturalInputResult,
+    response_model=NaturalInputInterpretationResult,
     status_code=status.HTTP_201_CREATED,
 )
 def process_natural_input(
     project_id: int,
     payload: NaturalInputCreate,
     db: DbSession,
-) -> NaturalInputResult:
+) -> NaturalInputInterpretationResult:
     _get_project(db, project_id)
-    raw_entry = RawEntry(project_id=project_id, text=payload.text, status=RawEntryStatus.PROCESSED)
-    db.add(raw_entry)
-    db.flush()
-
     graph = extract_graph(payload.text)
-    registry = EntityRegistryService(db, project_id)
     entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
     canonical_event = SemanticNormalizerService().normalize(graph, payload.text, entity_context)
     try:
@@ -500,350 +707,433 @@ def process_natural_input(
             detail=str(exc),
         ) from exc
     canonical_event = firewall_decision.event
-    semantic_history = _semantic_history_fields(canonical_event)
-    intent = _execution_intent(graph, canonical_event.type, canonical_event.action)
-    entity_name = canonical_event.entity_name or _graph_entity_name(graph)
-    role_guess = _graph_role_guess(graph)
-    entity_by_name: dict[str, Worker] = {}
+    interpretations = _build_pending_interpretations(
+        project_id,
+        payload.text,
+        graph,
+        canonical_event,
+        entity_context,
+    )
+    for interpretation in interpretations:
+        db.add(interpretation)
+    db.commit()
+    for interpretation in interpretations:
+        db.refresh(interpretation)
+    return NaturalInputInterpretationResult(interpretations=interpretations)
+
+
+@router.get(
+    "/projects/{project_id}/pending-interpretations",
+    response_model=list[PendingInterpretationRead],
+)
+def list_pending_interpretations(
+    project_id: int,
+    db: DbSession,
+) -> list[PendingInterpretation]:
+    _get_project(db, project_id)
+    return list(
+        db.scalars(
+            select(PendingInterpretation)
+            .where(PendingInterpretation.project_id == project_id)
+            .where(
+                PendingInterpretation.status.in_(
+                    [PendingInterpretationStatus.PENDING, PendingInterpretationStatus.EDITED]
+                )
+            )
+            .order_by(PendingInterpretation.created_at.desc(), PendingInterpretation.id.desc())
+        )
+    )
+
+
+@router.patch(
+    "/pending-interpretations/{interpretation_id}",
+    response_model=PendingInterpretationRead,
+)
+def update_pending_interpretation(
+    interpretation_id: int,
+    payload: PendingInterpretationUpdate,
+    db: DbSession,
+) -> PendingInterpretation:
+    interpretation = _get_pending_interpretation(db, interpretation_id)
+    if interpretation.status not in {
+        PendingInterpretationStatus.PENDING,
+        PendingInterpretationStatus.EDITED,
+    }:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(interpretation, key, value)
+    interpretation.status = PendingInterpretationStatus.EDITED
+    db.commit()
+    db.refresh(interpretation)
+    return interpretation
+
+
+@router.post(
+    "/pending-interpretations/{interpretation_id}/discard",
+    response_model=PendingInterpretationRead,
+)
+def discard_pending_interpretation(
+    interpretation_id: int,
+    db: DbSession,
+) -> PendingInterpretation:
+    interpretation = _get_pending_interpretation(db, interpretation_id)
+    if interpretation.status == PendingInterpretationStatus.CONFIRMED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interpretation confirmed")
+    interpretation.status = PendingInterpretationStatus.DISCARDED
+    db.commit()
+    db.refresh(interpretation)
+    return interpretation
+
+
+@router.post(
+    "/pending-interpretations/{interpretation_id}/confirm",
+    response_model=NaturalInputResult,
+)
+def confirm_pending_interpretation(
+    interpretation_id: int,
+    db: DbSession,
+) -> NaturalInputResult:
+    interpretation = _get_pending_interpretation(db, interpretation_id)
+    if interpretation.status not in {
+        PendingInterpretationStatus.PENDING,
+        PendingInterpretationStatus.EDITED,
+    }:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed")
+    result = _execute_pending_interpretation(db, interpretation)
+    interpretation.status = PendingInterpretationStatus.CONFIRMED
+    db.commit()
+    db.refresh(interpretation)
+    return result
+
+
+def _get_pending_interpretation(db: DbSession, interpretation_id: int) -> PendingInterpretation:
+    interpretation = db.get(PendingInterpretation, interpretation_id)
+    if interpretation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interpretation not found")
+    return interpretation
+
+
+def _execute_pending_interpretation(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> NaturalInputResult:
+    raw_entry = RawEntry(
+        project_id=interpretation.project_id,
+        text=interpretation.raw_input_text,
+        status=RawEntryStatus.PROCESSED,
+    )
+    db.add(raw_entry)
+    db.flush()
+    semantic_history = _semantic_history_fields_from_pending(interpretation)
+    workers: list[Worker] = []
     states: list[WorkerState] = []
     history_entries: list[HistoryEntry] = []
-    created_work_logs: list[WorkLog] = []
-    created_invoices: list[Invoice] = []
-    created_payments: list[Payment] = []
+    work_logs: list[WorkLog] = []
+    invoices: list[Invoice] = []
+    payments: list[Payment] = []
+    event_type = interpretation.canonical_event_type
+    action = interpretation.semantic_action
+    entity_name = _pending_entity_name(interpretation)
+    pending_worker = _pending_worker(db, interpretation)
 
-    if canonical_event.type == CanonicalEventType.SETUP and intent == "SETUP":
-        setup_entities = registry.apply_setup(_graph_setup_entities(graph))
-        for entity in setup_entities:
-            entity_by_name[entity.name] = entity
+    if event_type == CanonicalEventType.SETUP.value and action == "SETUP":
+        created = EntityRegistryService(db, interpretation.project_id).apply_setup(
+            interpretation.extracted_entities or []
+        )
+        workers.extend(created)
         history = HistoryEntry(
-            project_id=project_id,
-            input_text=payload.text,
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
             change_type=HistoryChangeType.SETUP,
-            delta={
-                "canonical_event_type": canonical_event.type.value,
-                "semantic_action": canonical_event.action,
-                "entities": [
-                    {
-                        "id": entity.id,
-                        "name": entity.name,
-                        "type": entity.type.value,
-                        "phone": entity.phone,
-                        "account_number": entity.account_number,
-                        "role_detail": entity.role_detail,
-                    }
-                    for entity in setup_entities
-                ]
-            },
-            **semantic_history,
-        )
-        db.add(history)
-        db.flush()
-        history_entries.append(history)
-        db.commit()
-        for item in [raw_entry, *setup_entities, *history_entries]:
-            db.refresh(item)
-        return NaturalInputResult(
-            raw_entry_id=raw_entry.id,
-            intent=canonical_event.type.value,
-            workers=setup_entities,
-            states=[],
-            history_entries=history_entries,
-            work_logs=[],
-            invoices=[],
-            payments=[],
-        )
-
-    if canonical_event.type == CanonicalEventType.SETUP and intent == "ENTITY_UPDATE":
-        updated_entities = registry.update_entities(_graph_setup_entities(graph))
-        if not updated_entities:
-            updated_entities = registry.update_entity_by_partial_match(payload.text)
-        for entity in updated_entities:
-            entity_by_name[entity.name] = entity
-        history = HistoryEntry(
-            project_id=project_id,
-            input_text=payload.text,
-            change_type=HistoryChangeType.ENTITY_UPDATE,
-            delta={
-                "canonical_event_type": canonical_event.type.value,
-                "semantic_action": canonical_event.action,
-                "entities": [_entity_snapshot(entity) for entity in updated_entities],
-            },
-            **semantic_history,
-        )
-        db.add(history)
-        db.flush()
-        history_entries.append(history)
-        db.commit()
-        for item in [raw_entry, *updated_entities, *history_entries]:
-            db.refresh(item)
-        return NaturalInputResult(
-            raw_entry_id=raw_entry.id,
-            intent=canonical_event.type.value,
-            workers=updated_entities,
-            states=[],
-            history_entries=history_entries,
-            work_logs=[],
-            invoices=[],
-            payments=[],
-        )
-
-    context_updates = registry.update_entity_by_partial_match(payload.text)
-    if canonical_event.type == CanonicalEventType.SETUP and context_updates:
-        history = HistoryEntry(
-            project_id=project_id,
-            input_text=payload.text,
-            change_type=HistoryChangeType.ENTITY_UPDATE,
-            delta={
-                "canonical_event_type": canonical_event.type.value,
-                "semantic_action": canonical_event.action,
-                "entities": [_entity_snapshot(entity) for entity in context_updates],
-            },
-            **semantic_history,
-        )
-        db.add(history)
-        db.flush()
-        history_entries.append(history)
-        db.commit()
-        for item in [raw_entry, *context_updates, *history_entries]:
-            db.refresh(item)
-        return NaturalInputResult(
-            raw_entry_id=raw_entry.id,
-            intent=canonical_event.type.value,
-            workers=context_updates,
-            states=[],
-            history_entries=history_entries,
-            work_logs=[],
-            invoices=[],
-            payments=[],
-        )
-
-    if entity_name is None and canonical_event.type == CanonicalEventType.FINANCIAL:
-        entity_name = "طرف حساب نامشخص"
-
-    if entity_name is None:
-        history = HistoryEntry(
-            project_id=project_id,
-            input_text=payload.text,
-            change_type=HistoryChangeType.NOTE,
             delta=_history_delta(
-                canonical_event_type=canonical_event.type.value,
-                semantic_action=canonical_event.action,
-                reason="missing entity",
+                canonical_event_type=event_type,
+                semantic_action=action,
+                entities=[_entity_snapshot(entity) for entity in created],
             ),
             **semantic_history,
         )
         db.add(history)
         db.flush()
         history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=event_type,
+            workers=workers,
+            states=states,
+            history_entries=history_entries,
+            work_logs=work_logs,
+            invoices=invoices,
+            payments=payments,
+        )
+
+    if event_type == CanonicalEventType.SETUP.value:
+        registry = EntityRegistryService(db, interpretation.project_id)
+        entities = interpretation.extracted_entities or []
+        updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
+        if not updated:
+            updated = registry.update_entity_by_partial_match(interpretation.raw_input_text)
+        workers.extend(updated)
+        history = HistoryEntry(
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
+            change_type=HistoryChangeType.ENTITY_UPDATE,
+            delta=_history_delta(
+                canonical_event_type=event_type,
+                semantic_action=action,
+                entities=[_entity_snapshot(entity) for entity in updated],
+            ),
+            **semantic_history,
+        )
+        db.add(history)
+        db.flush()
+        history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=event_type,
+            workers=workers,
+            states=states,
+            history_entries=history_entries,
+            work_logs=work_logs,
+            invoices=invoices,
+            payments=payments,
+        )
+
+    if entity_name is None:
+        history = HistoryEntry(
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
+            change_type=HistoryChangeType.NOTE,
+            delta=_history_delta(canonical_event_type=event_type, semantic_action=action),
+            **semantic_history,
+        )
+        db.add(history)
+        db.flush()
+        history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=event_type,
+            workers=workers,
+            states=states,
+            history_entries=history_entries,
+            work_logs=work_logs,
+            invoices=invoices,
+            payments=payments,
+        )
+
+    if event_type == CanonicalEventType.FINANCIAL.value and pending_worker is None:
+        if not _pending_allows_new_entity(interpretation):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Financial interpretation requires a resolved entity",
+            )
+        pending_worker = _find_or_create_worker(
+            db,
+            interpretation.project_id,
+            entity_name,
+            _state_role_to_worker_type(_pending_role(interpretation)),
+        )
+
+    role = _pending_role(interpretation, pending_worker)
+    if pending_worker is not None:
+        state = _find_or_create_worker_state(db, interpretation.project_id, pending_worker.name, role)
+        if state.worker_id != pending_worker.id:
+            state.worker_id = pending_worker.id
+            state.role = role
+        workers.append(pending_worker)
     else:
-        role = _role_to_state_role(role_guess, payload.text, intent)
-        state = _find_or_create_worker_state(db, project_id, entity_name, role)
+        state = _find_or_create_worker_state(db, interpretation.project_id, entity_name, role)
         worker = db.get(Worker, state.worker_id)
         if worker is not None:
-            entity_by_name[worker.name] = worker
-        states.append(state)
+            workers.append(worker)
+    states.append(state)
 
-        if canonical_event.type == CanonicalEventType.WORK:
-            quantity = (
-                _graph_quantity(graph)
-                or _parse_quantity_from_text(payload.text)
-                or canonical_event.delta
-                or Decimal("1")
-            )
-            if state.role == WorkerStateRole.DAILY:
-                state.total_days_worked += quantity
-                change_type = HistoryChangeType.WORK
-                delta = _history_delta(
-                    canonical_event_type=canonical_event.type.value,
-                    semantic_action=canonical_event.action,
-                    days=quantity,
-                )
-            else:
-                state.total_quantity += quantity
-                state.unit = state.unit or _unit_from_text(payload.text, state.role)
-                change_type = HistoryChangeType.WORK
-                delta = _history_delta(
-                    canonical_event_type=canonical_event.type.value,
-                    semantic_action=canonical_event.action,
-                    quantity=quantity,
-                    unit=state.unit,
-                )
-
-            work_log = WorkLog(
-                project_id=project_id,
-                worker_id=state.worker_id,
-                task_name=payload.text,
-                unit=WorkUnit.DAY if state.role == WorkerStateRole.DAILY else WorkUnit.CUSTOM,
-                quantity=quantity,
-                rate_per_unit=None,
-                total_amount=None,
-                description=payload.text,
-            )
-            db.add(work_log)
-            db.flush()
-            created_work_logs.append(work_log)
-            history_entries.append(
-                _add_history(
-                    db,
-                    project_id,
-                    state,
-                    payload.text,
-                    change_type,
-                    delta,
-                    semantic_history,
-                )
-            )
-        elif canonical_event.type == CanonicalEventType.FINANCIAL and intent == "INVOICE":
-            amount = _graph_amount(graph, payload.text)
-            if amount is not None:
-                state.role = WorkerStateRole.VENDOR
-                state.financial_balance += amount
-                invoice = Invoice(
-                    project_id=project_id,
-                    vendor_id=state.worker_id,
-                    total_amount=amount,
-                    description=payload.text,
-                    status=InvoiceStatus.OPEN,
-                )
-                db.add(invoice)
-                db.flush()
-                created_invoices.append(invoice)
-                history_entries.append(
-                    _add_history(
-                        db,
-                        project_id,
-                        state,
-                        payload.text,
-                        HistoryChangeType.INVOICE,
-                        _history_delta(
-                            canonical_event_type=canonical_event.type.value,
-                            semantic_action=canonical_event.action,
-                            amount=amount,
-                            balance=state.financial_balance,
-                        ),
-                        semantic_history,
-                    )
-                )
-            else:
-                history_entries.append(
-                    _add_history(
-                        db,
-                        project_id,
-                        state,
-                        payload.text,
-                        HistoryChangeType.INVOICE,
-                        _history_delta(
-                            canonical_event_type=canonical_event.type.value,
-                            semantic_action=canonical_event.action,
-                            amount=None,
-                            reason="financial amount missing",
-                        ),
-                        semantic_history,
-                    )
-                )
-        elif canonical_event.type == CanonicalEventType.FINANCIAL and intent == "PAYMENT":
-            amount = _graph_amount(graph, payload.text)
-            if amount is not None:
-                state.financial_balance -= amount
-                payment = Payment(
-                    project_id=project_id,
-                    entity_id=state.worker_id,
-                    amount=amount,
-                    related_invoice_id=None,
-                    type=PaymentType.BANK_TRANSFER,
-                )
-                db.add(payment)
-                db.flush()
-                created_payments.append(payment)
-                history_entries.append(
-                    _add_history(
-                        db,
-                        project_id,
-                        state,
-                        payload.text,
-                        HistoryChangeType.PAYMENT,
-                        _history_delta(
-                            canonical_event_type=canonical_event.type.value,
-                            semantic_action=canonical_event.action,
-                            amount=amount,
-                            balance=state.financial_balance,
-                        ),
-                        semantic_history,
-                    )
-                )
-            else:
-                history_entries.append(
-                    _add_history(
-                        db,
-                        project_id,
-                        state,
-                        payload.text,
-                        HistoryChangeType.PAYMENT,
-                        _history_delta(
-                            canonical_event_type=canonical_event.type.value,
-                            semantic_action=canonical_event.action,
-                            amount=None,
-                            reason="financial amount missing",
-                        ),
-                        semantic_history,
-                    )
-                )
-        elif canonical_event.type == CanonicalEventType.SETUP:
-            history_entries.append(
-                _add_history(
-                    db,
-                    project_id,
-                    state,
-                    payload.text,
-                    HistoryChangeType.SETUP,
-                    _history_delta(
-                        canonical_event_type=canonical_event.type.value,
-                        semantic_action=canonical_event.action,
-                        role=state.role,
-                    ),
-                    semantic_history,
-                )
-            )
+    if event_type == CanonicalEventType.WORK.value:
+        quantity = interpretation.extracted_quantity or Decimal("1")
+        if state.role == WorkerStateRole.DAILY:
+            state.total_days_worked += quantity
+            delta = _history_delta(canonical_event_type=event_type, semantic_action=action, days=quantity)
         else:
-            history_entries.append(
-                _add_history(
-                    db,
-                    project_id,
-                    state,
-                    payload.text,
-                    HistoryChangeType.NOTE,
-                    _history_delta(
-                        canonical_event_type=canonical_event.type.value,
-                        semantic_action=canonical_event.action,
-                        intent=intent,
-                    ),
-                    semantic_history,
-                )
+            state.total_quantity += quantity
+            state.unit = state.unit or _unit_from_text(interpretation.raw_input_text, state.role)
+            delta = _history_delta(
+                canonical_event_type=event_type,
+                semantic_action=action,
+                quantity=quantity,
+                unit=state.unit,
             )
+        work_log = WorkLog(
+            project_id=interpretation.project_id,
+            worker_id=state.worker_id,
+            task_name=interpretation.description or interpretation.raw_input_text,
+            unit=WorkUnit.DAY if state.role == WorkerStateRole.DAILY else WorkUnit.CUSTOM,
+            quantity=quantity,
+            description=interpretation.description,
+        )
+        db.add(work_log)
+        db.flush()
+        work_logs.append(work_log)
+        history_entries.append(
+            _add_history(
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
+                HistoryChangeType.WORK,
+                delta,
+                semantic_history,
+            )
+        )
+    elif event_type == CanonicalEventType.FINANCIAL.value and interpretation.financial_direction == FinancialDirection.DEBT:
+        amount = interpretation.extracted_amount
+        if amount is not None:
+            state.role = WorkerStateRole.VENDOR
+            state.financial_balance += amount
+            invoice = Invoice(
+                project_id=interpretation.project_id,
+                vendor_id=state.worker_id,
+                total_amount=amount,
+                description=interpretation.description,
+                status=InvoiceStatus.OPEN,
+            )
+            db.add(invoice)
+            db.flush()
+            invoices.append(invoice)
+        history_entries.append(
+            _add_history(
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
+                HistoryChangeType.INVOICE,
+                _history_delta(
+                    canonical_event_type=event_type,
+                    semantic_action=action,
+                    amount=amount,
+                    balance=state.financial_balance,
+                ),
+                semantic_history,
+            )
+        )
+    elif event_type == CanonicalEventType.FINANCIAL.value:
+        amount = interpretation.extracted_amount
+        if amount is not None:
+            payment_type = PaymentType(interpretation.payment_method or PaymentType.BANK_TRANSFER.value)
+            direction = interpretation.financial_direction or FinancialDirection.OUTGOING
+            if direction == FinancialDirection.INCOMING:
+                state.role = WorkerStateRole.CLIENT
+                state.financial_balance += amount
+            else:
+                state.financial_balance -= amount
+            payment = Payment(
+                project_id=interpretation.project_id,
+                entity_id=state.worker_id,
+                amount=amount,
+                related_invoice_id=None,
+                type=payment_type,
+                due_date=interpretation.due_date,
+                direction=direction,
+            )
+            db.add(payment)
+            db.flush()
+            payments.append(payment)
+        history_entries.append(
+            _add_history(
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
+                HistoryChangeType.PAYMENT,
+                _history_delta(
+                    canonical_event_type=event_type,
+                    semantic_action=action,
+                    amount=amount,
+                    balance=state.financial_balance,
+                    payment_method=interpretation.payment_method,
+                    due_date=interpretation.due_date,
+                    financial_direction=(
+                        interpretation.financial_direction.value
+                        if interpretation.financial_direction is not None
+                        else None
+                    ),
+                ),
+                semantic_history,
+            )
+        )
+    else:
+        history_entries.append(
+            _add_history(
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
+                HistoryChangeType.NOTE,
+                _history_delta(canonical_event_type=event_type, semantic_action=action),
+                semantic_history,
+            )
+        )
 
-    db.commit()
-    created_records = [
-        raw_entry,
-        *entity_by_name.values(),
-        *states,
-        *history_entries,
-        *created_work_logs,
-        *created_invoices,
-        *created_payments,
-    ]
-    for item in created_records:
+    db.flush()
+    for item in [*workers, *states, *history_entries, *work_logs, *invoices, *payments]:
         db.refresh(item)
 
     return NaturalInputResult(
         raw_entry_id=raw_entry.id,
-        intent=canonical_event.type.value,
-        workers=list(entity_by_name.values()),
+        intent=event_type,
+        workers=workers,
         states=states,
         history_entries=history_entries,
-        work_logs=created_work_logs,
-        invoices=created_invoices,
-        payments=created_payments,
+        work_logs=work_logs,
+        invoices=invoices,
+        payments=payments,
     )
+
+
+def _pending_entity_name(interpretation: PendingInterpretation) -> str | None:
+    entities = interpretation.extracted_entities or []
+    if entities and isinstance(entities[0].get("name"), str):
+        return entities[0]["name"].strip() or None
+    return None
+
+
+def _pending_worker(db: DbSession, interpretation: PendingInterpretation) -> Worker | None:
+    if interpretation.suggested_entity_id is None:
+        return None
+    worker = db.get(Worker, interpretation.suggested_entity_id)
+    if worker is None or worker.project_id != interpretation.project_id:
+        return None
+    return worker
+
+
+def _pending_allows_new_entity(interpretation: PendingInterpretation) -> bool:
+    entities = interpretation.extracted_entities or []
+    return bool(entities and entities[0].get("create_new") is True)
+
+
+def _pending_role(
+    interpretation: PendingInterpretation,
+    worker: Worker | None = None,
+) -> WorkerStateRole:
+    if worker is not None:
+        if worker.type == WorkerType.CLIENT:
+            return WorkerStateRole.CLIENT
+        if worker.type == WorkerType.VENDOR:
+            return WorkerStateRole.VENDOR
+        if worker.type == WorkerType.SKILLED_WORKER:
+            return WorkerStateRole.SKILLED
+        return WorkerStateRole.DAILY
+    if interpretation.canonical_event_type == CanonicalEventType.FINANCIAL.value:
+        if interpretation.financial_direction == FinancialDirection.INCOMING:
+            return WorkerStateRole.CLIENT
+        return WorkerStateRole.VENDOR
+    return _role_to_state_role(None, interpretation.raw_input_text, interpretation.semantic_action)
+
+
+def _has_entity_field_updates(entities: list[dict]) -> bool:
+    for entity in entities:
+        updates = entity.get("field_updates") if isinstance(entity.get("field_updates"), dict) else entity
+        if any(updates.get(key) for key in ["phone", "account_number", "role_detail"]):
+            return True
+    return False
 
 
 def _graph_intent(graph: dict[str, Any]) -> str:
@@ -875,7 +1165,7 @@ def _execution_intent(
     if canonical_type == CanonicalEventType.SETUP:
         return "ENTITY_UPDATE" if semantic_action == "ENTITY_UPDATE" else "SETUP"
     if canonical_type == CanonicalEventType.FINANCIAL:
-        return "INVOICE" if semantic_action == "INVOICE" else "PAYMENT"
+        return "INVOICE" if semantic_action in {"INVOICE", "DEBT_CREATED"} else "PAYMENT"
     if canonical_type == CanonicalEventType.WORK:
         return "WORK"
     return "NOTE"
@@ -972,7 +1262,25 @@ def _graph_amount(graph: dict[str, Any], input_text: str) -> Decimal | None:
         amount = _parse_money_decimal(events[0].get("amount_text"))
         if amount is not None:
             return amount
-    return _parse_money_decimal(input_text)
+    if _has_money_unit(input_text):
+        return _parse_money_decimal(input_text)
+    return None
+
+
+def _has_money_unit(text: str) -> bool:
+    normalized = normalize_text(text)
+    return any(unit in normalized for unit in ["تومان", "میلیون", "میلیارد", "هزار"])
+
+
+def _extract_due_date(text: str) -> str | None:
+    normalized = normalize_text(text)
+    absolute_match = re.search(r"\d{1,2}\s+[آ-ی]+\s+\d{4}", normalized)
+    if absolute_match is not None:
+        return absolute_match.group()
+    relative_match = re.search(r"\d{1,2}\s+ماه\s+دیگه", normalized)
+    if relative_match is not None:
+        return relative_match.group()
+    return None
 
 
 def _add_history(
@@ -1211,17 +1519,28 @@ def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Pa
     db.flush()
     entity = _get_worker(db, project_id, payload.entity_id)
     state_role = (
-        WorkerStateRole.VENDOR if entity.type == WorkerType.VENDOR else WorkerStateRole.DAILY
+        WorkerStateRole.CLIENT
+        if payload.direction == FinancialDirection.INCOMING or entity.type == WorkerType.CLIENT
+        else WorkerStateRole.VENDOR
+        if entity.type == WorkerType.VENDOR
+        else WorkerStateRole.DAILY
     )
     state = _find_or_create_worker_state(db, project_id, entity.name, state_role)
-    state.financial_balance -= payload.amount
+    if payload.direction == FinancialDirection.INCOMING:
+        state.financial_balance += payload.amount
+    else:
+        state.financial_balance -= payload.amount
     _add_history(
         db,
         project_id,
         state,
         "Manual payment",
         HistoryChangeType.PAYMENT,
-        _history_delta(amount=payload.amount, balance=state.financial_balance),
+        _history_delta(
+            amount=payload.amount,
+            balance=state.financial_balance,
+            financial_direction=payload.direction.value,
+        ),
     )
     if invoice is not None:
         _refresh_invoice_status(db, invoice)

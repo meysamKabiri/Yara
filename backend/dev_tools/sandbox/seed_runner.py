@@ -49,18 +49,34 @@ def _run_steps(
             project = _get_or_create_project(db, scenario["project_name"])
             trace = []
             for step in steps:
-                result = project_api.process_natural_input(
+                draft = project_api.process_natural_input(
                     project.id,
                     NaturalInputCreate(text=step["text"]),
                     db,
                 )
+                confirmed_results = [
+                    project_api.confirm_pending_interpretation(interpretation.id, db)
+                    for interpretation in draft.interpretations
+                ]
                 trace.append(
                     {
                         "input_text": step["text"],
-                        "detected_intent": result.intent,
-                        "entities": [worker.name for worker in result.workers],
-                        "states": [state.name for state in result.states],
-                        "history_entries": [entry.id for entry in result.history_entries],
+                        "detected_intents": [result.intent for result in confirmed_results],
+                        "entities": [
+                            worker.name
+                            for result in confirmed_results
+                            for worker in result.workers
+                        ],
+                        "states": [
+                            state.name
+                            for result in confirmed_results
+                            for state in result.states
+                        ],
+                        "history_entries": [
+                            entry.id
+                            for result in confirmed_results
+                            for entry in result.history_entries
+                        ],
                     }
                 )
 
@@ -130,6 +146,7 @@ def _build_status(
                 "entity_id": payment.entity_id,
                 "amount": str(payment.amount),
                 "type": payment.type.value,
+                "direction": payment.direction.value,
             }
             for payment in payments
         ],
