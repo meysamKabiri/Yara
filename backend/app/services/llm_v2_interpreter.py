@@ -52,11 +52,16 @@ class LLMv2Interpreter:
     def _coerce(self, value: dict[str, Any]) -> dict[str, Any]:
         intent = value.get("intent")
         action = value.get("action")
-        financial = value.get("financial") if isinstance(value.get("financial"), dict) else {}
-        work = value.get("work") if isinstance(value.get("work"), dict) else {}
-        note = value.get("note") if isinstance(value.get("note"), dict) else {}
+        financial: dict[str, Any] = (
+            value.get("financial") if isinstance(value.get("financial"), dict) else {}
+        )
+        work: dict[str, Any] = value.get("work") if isinstance(value.get("work"), dict) else {}
+        note: dict[str, Any] = value.get("note") if isinstance(value.get("note"), dict) else {}
         direction = financial.get("direction")
         unit = work.get("unit")
+        due_date_text = financial.get("due_date_text")
+        work_description = work.get("description")
+        note_text = note.get("text")
 
         return {
             "intent": intent if intent in VALID_INTENTS else "NOTE",
@@ -71,8 +76,8 @@ class LLMv2Interpreter:
                     else None
                 ),
                 "due_date_text": (
-                    str(financial["due_date_text"]).strip()
-                    if isinstance(financial.get("due_date_text"), str) and financial["due_date_text"].strip()
+                    due_date_text.strip()
+                    if isinstance(due_date_text, str) and due_date_text.strip()
                     else None
                 ),
             },
@@ -80,22 +85,24 @@ class LLMv2Interpreter:
                 "quantity": self._number_or_none(work.get("quantity")),
                 "unit": unit if unit in VALID_WORK_UNITS else None,
                 "description": (
-                    str(work["description"]).strip()
-                    if isinstance(work.get("description"), str) and work["description"].strip()
+                    work_description.strip()
+                    if isinstance(work_description, str) and work_description.strip()
                     else None
                 ),
             },
             "note": {
                 "text": (
-                    str(note["text"]).strip()
-                    if isinstance(note.get("text"), str) and note["text"].strip()
+                    note_text.strip()
+                    if isinstance(note_text, str) and note_text.strip()
                     else None
                 ),
             },
             "confidence": self._confidence(value.get("confidence")),
             "ambiguity": bool(value.get("ambiguity")),
             "missing_fields": self._missing_fields(value.get("missing_fields")),
-            "reasoning_summary": str(value.get("reasoning_summary") or value.get("reasoning") or ""),
+            "reasoning_summary": str(
+                value.get("reasoning_summary") or value.get("reasoning") or ""
+            ),
         }
 
     def _action_for_intent(self, intent: Any) -> str:
@@ -107,10 +114,10 @@ class LLMv2Interpreter:
             return "PAYMENT_OUT"
         return "NOTE"
 
-    def _entities(self, value: Any) -> list[dict[str, str]]:
+    def _entities(self, value: Any) -> list[dict[str, str | None]]:
         if not isinstance(value, list):
             return []
-        entities: list[dict[str, str]] = []
+        entities: list[dict[str, str | None]] = []
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -124,7 +131,9 @@ class LLMv2Interpreter:
                 {
                     "name": name.strip(),
                     "kind": kind if kind in VALID_ENTITY_KINDS else "UNKNOWN",
-                    "project_role": project_role if project_role in VALID_PROJECT_ROLES else "OTHER",
+                    "project_role": (
+                        project_role if project_role in VALID_PROJECT_ROLES else "OTHER"
+                    ),
                     "role_detail": (
                         str(role_detail).strip()
                         if isinstance(role_detail, str) and role_detail.strip()
