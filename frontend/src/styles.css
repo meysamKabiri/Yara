@@ -562,6 +562,11 @@ mark {
   color: #a72f2f;
 }
 
+.status-neutral {
+  background: #eef3f1;
+  color: #52615b;
+}
+
 .status-pending,
 .project-pill {
   background: #fff1c7;
