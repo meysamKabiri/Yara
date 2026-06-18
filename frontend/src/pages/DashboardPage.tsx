@@ -1,5 +1,5 @@
-import { FormEvent } from "react";
-import { AlertTriangle, ArrowDownCircle, ArrowUpCircle, Plus, Scale, Wallet } from "lucide-react";
+import { FormEvent, useRef } from "react";
+import { ArrowDownCircle, ArrowUpCircle, BriefcaseBusiness, FolderKanban, Plus, Scale, Wallet } from "lucide-react";
 import { Project } from "../api";
 
 type ProjectFinancials = {
@@ -23,29 +23,28 @@ function money(value: string | number | null | undefined): string {
   return `${Number(value ?? 0).toLocaleString("fa-IR")} تومان`;
 }
 
+function projectStatus(financials: ProjectFinancials) {
+  if (financials.net < 0) return { label: "بدهکار", className: "status-negative" };
+  if (financials.debt > 0) return { label: "نیاز به پرداخت", className: "status-pending" };
+  return { label: "سالم", className: "status-positive" };
+}
+
 export function DashboardPage({ projects, projectFinancials, projectName, isLoading, onProjectNameChange, onCreateProject, onOpenProject }: DashboardPageProps) {
-  const openDebtCount = Object.values(projectFinancials).filter((item) => item.debt > 0).length;
+  const projectNameInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className="page-stack home-page">
       <section className="home-hero">
-        <div>
-          <span className="eyebrow">Yara</span>
-          <h1>مدیریت مالی پروژه‌ها بدون شلوغی دفتر و اکسل</h1>
-          <p>پروژه را باز کنید، اتفاقات را به یارا بگویید، تایید کنید و حساب‌ها همیشه مرتب می‌مانند.</p>
-        </div>
-        <div className="notification-card">
-          <AlertTriangle aria-hidden="true" size={22} />
-          <span>هشدارها</span>
-          <strong>{openDebtCount}</strong>
-          <small>پروژه‌های دارای بدهی باز</small>
+        <div className="home-hero-copy">
+          <h1>دفتر مالی هوشمند پروژه‌ها</h1>
+          <p>ثبت کنید، تأیید کنید و همیشه از وضعیت مالی پروژه مطلع باشید.</p>
         </div>
       </section>
 
       <form className="create-project-card" onSubmit={onCreateProject}>
         <label>
-          <span>ایجاد پروژه</span>
-          <input value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} placeholder="نام پروژه جدید" />
+          <span>ایجاد پروژه جدید</span>
+          <input ref={projectNameInputRef} value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} placeholder="نام پروژه" />
         </label>
         <button className="primary-action with-icon" type="submit" disabled={isLoading || !projectName.trim()}><Plus aria-hidden="true" size={18} />ایجاد پروژه</button>
       </form>
@@ -53,18 +52,22 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
       <section className="project-overview-section">
         <div className="section-title">
           <div>
-            <span className="eyebrow">خانه</span>
+            <span className="eyebrow inline-icon"><BriefcaseBusiness aria-hidden="true" size={17} />پروژه‌ها</span>
             <h2>پروژه‌ها</h2>
           </div>
         </div>
         <div className="project-card-grid overview-cards">
           {projects.map((project) => {
             const financials = projectFinancials[project.id] ?? { received: 0, paid: 0, net: 0, debt: 0 };
+            const status = projectStatus(financials);
             return (
               <button className="project-card project-overview-card" key={project.id} type="button" onClick={() => onOpenProject(project.id)}>
-                <div>
-                  <strong>{project.name}</strong>
-                  <span>{new Date(project.updated_at).toLocaleDateString("fa-IR")}</span>
+                <div className="project-card-head">
+                  <div>
+                    <strong>{project.name}</strong>
+                    <span>آخرین بروزرسانی: {new Date(project.updated_at).toLocaleDateString("fa-IR")}</span>
+                  </div>
+                  <mark className={status.className}>{status.label}</mark>
                 </div>
                 <dl>
                   <div><dt><ArrowDownCircle aria-hidden="true" size={15} />دریافتی</dt><dd className="money-positive">{money(financials.received)}</dd></div>
@@ -75,7 +78,14 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
               </button>
             );
           })}
-          {projects.length === 0 && <p className="empty-state">اولین پروژه را ایجاد کنید تا ثبت کار و حساب‌ها شروع شود.</p>}
+          {projects.length === 0 && (
+            <div className="empty-state home-empty-state">
+              <FolderKanban aria-hidden="true" size={36} />
+              <strong>هنوز پروژه‌ای ایجاد نشده است</strong>
+              <span>برای شروع، اولین پروژه خود را ایجاد کنید.</span>
+
+            </div>
+          )}
         </div>
       </section>
     </div>

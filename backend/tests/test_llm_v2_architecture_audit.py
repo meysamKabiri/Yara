@@ -24,28 +24,38 @@ def _valid_llm_v2_setup(name: str = "ریاحی") -> dict:
     }
 
 
-def _valid_llm_v2_financial(action: str, amount: int, direction: str = "OUT") -> dict:
+def _valid_llm_v2_financial(
+    action: str,
+    amount: int,
+    direction: str = "OUT",
+    name: str = "هادی‌پور سیم",
+    project_role: str = "VENDOR",
+    confidence: float = 0.95,
+    ambiguity: bool = False,
+    payment_method: str = "BANK_TRANSFER",
+    due_date_text: str | None = None,
+) -> dict:
     return {
         "intent": "FINANCIAL",
         "action": action,
         "entities": [
             {
-                "name": "هادی‌پور سیم",
-                "kind": "COMPANY",
-                "project_role": "VENDOR",
+                "name": name,
+                "kind": "COMPANY" if project_role == "VENDOR" else "PERSON",
+                "project_role": project_role,
                 "role_detail": "سیم فروش",
             }
         ],
         "financial": {
             "amount": amount,
             "direction": direction,
-            "payment_method": "BANK_TRANSFER",
-            "due_date_text": None,
+            "payment_method": payment_method,
+            "due_date_text": due_date_text,
         },
         "work": {"quantity": None, "unit": None, "description": None},
         "note": {"text": None},
-        "confidence": 0.95,
-        "ambiguity": False,
+        "confidence": confidence,
+        "ambiguity": ambiguity,
         "missing_fields": [],
         "reasoning_summary": "برداشت مالی ساختاریافته",
     }
@@ -98,6 +108,54 @@ def test_legacy_is_not_called_when_llm_v2_returns_valid_output(
         f"/projects/{project['id']}/natural-input",
         json={"text": "ریاحی سرامیک کار به پروژه اضافه شد"},
     )
+
+
+def test_llm_v2_setup_repairs_skilled_role_from_raw_text(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: {
+            **_valid_llm_v2_setup("ریاحی"),
+            "entities": [
+                {
+                    "name": "ریاحی",
+                    "kind": "UNKNOWN",
+                    "project_role": "OTHER",
+                    "role_detail": "سرمایه سرامیک",
+                }
+            ],
+            "confidence": 1,
+        },
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "ریاحی سرامیک کار به پروژه اضافه شد"},
+    )
+
+    assert response.status_code == 201
+    draft = response.json()["interpretations"][0]
+    assert draft["canonical_event_type"] == "SETUP_EVENT"
+    assert draft["semantic_action"] == "SETUP"
+    assert draft["payment_method"] is None
+    assert draft["extracted_entities"] == [
+        {
+            "name": "ریاحی",
+            "kind": "UNKNOWN",
+            "project_role": "SKILLED_WORKER",
+            "role_detail": "سرامیک کار",
+            "type": "SKILLED_WORKER",
+        }
+    ]
+    assert draft["structured_interpretation"]["entities"][0]["project_role"] == "SKILLED_WORKER"
+    assert draft["structured_interpretation"]["entities"][0]["role_detail"] == "سرامیک کار"
 
 
 def test_legacy_is_called_when_llm_v2_fails_validation(
@@ -282,6 +340,207 @@ def test_llm_v2_financial_missing_direction_must_block_confirmation(
 
     response = client.post(f"/pending-interpretations/{draft['id']}/confirm")
     assert response.status_code == 409
+
+
+def test_llm_v2_new_vendor_paid_purchase_auto_creates_vendor_after_confirm(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PURCHASE_PAID",
+            5_000_000,
+            name="هادیپور",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
+    ).json()["interpretations"][0]
+
+    assert draft["suggested_entity_id"] is None
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+
+    confirmed = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    assert confirmed.status_code == 200
+    body = confirmed.json()
+    assert body["workers"][0]["name"] == "هادیپور"
+    assert body["workers"][0]["type"] == "VENDOR"
+    assert body["payments"][0]["entity_id"] == body["workers"][0]["id"]
+    assert body["payments"][0]["amount"] == "5000000.00"
+    assert body["invoices"] == []
+    assert len(client.get(f"/projects/{project['id']}/workers").json()) == 1
+
+
+def test_llm_v2_new_vendor_unpaid_purchase_auto_creates_payable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "DEBT_CREATED",
+            10_000_000,
+            name="هادیپور",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۱۰ میلیون سیم خریدم ولی پولش را ندادم"},
+    ).json()["interpretations"][0]
+
+    confirmed = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    assert confirmed.status_code == 200
+    body = confirmed.json()
+    assert body["workers"][0]["type"] == "VENDOR"
+    assert body["invoices"][0]["vendor_id"] == body["workers"][0]["id"]
+    assert body["invoices"][0]["total_amount"] == "10000000.00"
+    assert body["payments"] == []
+
+
+def test_llm_v2_new_vendor_check_purchase_auto_creates_check_payment_with_due_date(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "CHECK_PAYMENT",
+            50_000_000,
+            name="هادیپور",
+            payment_method="CHECK",
+            due_date_text="۱۴ مهر",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۵۰ میلیون سیم خریدم و برای ۱۴ مهر چک دادم"},
+    ).json()["interpretations"][0]
+
+    confirmed = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    assert confirmed.status_code == 200
+    payment = confirmed.json()["payments"][0]
+    assert payment["type"] == "CHECK"
+    assert payment["due_date"] == "۱۴ مهر"
+
+
+def test_llm_v2_existing_vendor_reused_for_compact_purchase_name(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PURCHASE_PAID",
+            5_000_000,
+            name="هادیپور",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    vendor = client.post(
+        f"/projects/{project['id']}/workers",
+        json={"name": "هادی‌پور سیم", "type": "VENDOR"},
+    ).json()
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
+    ).json()["interpretations"][0]
+
+    assert draft["suggested_entity_id"] == vendor["id"]
+    confirmed = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    assert confirmed.status_code == 200
+    assert confirmed.json()["payments"][0]["entity_id"] == vendor["id"]
+    assert len(client.get(f"/projects/{project['id']}/workers").json()) == 1
+
+
+def test_llm_v2_ambiguous_vendor_purchase_requires_selection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PURCHASE_PAID",
+            5_000_000,
+            name="هادیپور",
+            ambiguity=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    client.post(f"/projects/{project['id']}/workers", json={"name": "هادیپور سیم", "type": "VENDOR"})
+    client.post(f"/projects/{project['id']}/workers", json={"name": "هادیپور ابزار", "type": "VENDOR"})
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
+    ).json()["interpretations"][0]
+
+    assert draft["suggested_entity_id"] is None
+    response = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    assert response.status_code == 409
+    assert len(client.get(f"/projects/{project['id']}/workers").json()) == 2
+
+
+@pytest.mark.parametrize("project_role", ["DAILY_WORKER", "SKILLED_WORKER", "CLIENT"])
+def test_llm_v2_non_vendor_financial_entity_is_not_auto_created(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    project_role: str,
+) -> None:
+    action = "PAYMENT_IN" if project_role == "CLIENT" else "PAYMENT_OUT"
+    direction = "IN" if project_role == "CLIENT" else "OUT"
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            action,
+            5_000_000,
+            direction=direction,
+            name="نادری",
+            project_role=project_role,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "۵ میلیون به نادری دادم"},
+    ).json()["interpretations"][0]
+
+    response = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    assert response.status_code == 409
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
 
 
 @pytest.mark.parametrize(

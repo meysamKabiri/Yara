@@ -4,13 +4,14 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.models.core import Worker
+from app.models.core import Worker, WorkerType
 from app.schemas.llm_v2 import (
     LLMv2Action,
     LLMv2FinancialDirection,
     LLMv2Intent,
     LLMv2Interpretation,
     LLMv2PaymentMethod,
+    LLMv2ProjectRole,
 )
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 
@@ -29,19 +30,32 @@ def _normalize_match(value: str) -> str:
     return normalized
 
 
-def _resolve_entity(name: str, entity_context: list[Worker]) -> Worker | None:
+def _compact_match(value: str) -> str:
+    return _normalize_match(value).replace(" ", "")
+
+
+def _resolve_entity(
+    name: str,
+    entity_context: list[Worker],
+    expected_role: LLMv2ProjectRole | None = None,
+) -> Worker | None:
     normalized = _normalize_match(name)
     if not normalized:
         return None
+    candidates = entity_context
+    if expected_role == LLMv2ProjectRole.VENDOR:
+        candidates = [worker for worker in entity_context if worker.type == WorkerType.VENDOR]
     buckets: list[list[Worker]] = [
-        [w for w in entity_context if _normalize_match(w.name) == normalized],
-        [w for w in entity_context if _normalize_match(w.name).startswith(normalized)],
+        [w for w in candidates if _normalize_match(w.name) == normalized],
+        [w for w in candidates if _compact_match(w.name) == _compact_match(name)],
+        [w for w in candidates if _normalize_match(w.name).startswith(normalized)],
+        [w for w in candidates if _compact_match(w.name).startswith(_compact_match(name))],
         [
             w
-            for w in entity_context
+            for w in candidates
             if normalized in _normalize_match(w.name).split()
         ],
-        [w for w in entity_context if normalized in _normalize_match(w.name)],
+        [w for w in candidates if normalized in _normalize_match(w.name)],
     ]
     for matches in buckets:
         unique = {worker.id: worker for worker in matches}
@@ -67,6 +81,7 @@ class LLMv2Validator:
             ) from exc
 
         self._validate_action_intent_consistency(interpretation)
+        self._apply_financial_safety_defaults(interpretation)
         self._validate_financial_fields(interpretation)
         self._validate_work_fields(interpretation, raw)
 
@@ -78,25 +93,27 @@ class LLMv2Validator:
         entity_context: list[Worker],
     ) -> dict[int, Worker | None]:
         return {
-            i: _resolve_entity(entity.name, entity_context)
+            i: _resolve_entity(entity.name, entity_context, entity.project_role)
             for i, entity in enumerate(interpretation.entities)
         }
 
     def normalize_amount(self, raw_value: Any, raw_text: str | None = None) -> Decimal | None:
+        if raw_text:
+            parsed_text_amount = parse_persian_money(raw_text)
+            if parsed_text_amount is not None:
+                return Decimal(parsed_text_amount)
         if isinstance(raw_value, int | float) and not isinstance(raw_value, bool):
             return Decimal(str(raw_value))
         if isinstance(raw_value, str):
             try:
                 raw_clean = raw_value.replace(",", "").replace("،", "")
                 if raw_clean.isdigit() or (raw_clean.startswith("-") and raw_clean[1:].isdigit()):
-                    return Decimal(raw_clean)
+                    return None
                 amount = parse_persian_money(raw_value)
                 if amount is not None:
                     return Decimal(amount)
             except (InvalidOperation, ValueError):
                 pass
-        if raw_text:
-            return self._extract_amount_from_text(raw_text)
         return None
 
     def normalize_quantity(self, raw_value: Any) -> Decimal | None:
@@ -142,6 +159,18 @@ class LLMv2Validator:
             if "direction" not in interpretation.missing_fields:
                 interpretation.missing_fields.append("direction")
 
+    def _apply_financial_safety_defaults(self, interpretation: LLMv2Interpretation) -> None:
+        if interpretation.intent != LLMv2Intent.FINANCIAL:
+            return
+        if interpretation.action == LLMv2Action.PURCHASE_PAID:
+            interpretation.financial.direction = LLMv2FinancialDirection.OUT
+            if interpretation.financial.payment_method is None:
+                interpretation.financial.payment_method = LLMv2PaymentMethod.CASH
+        if interpretation.action in {LLMv2Action.PURCHASE_PAID, LLMv2Action.DEBT_CREATED}:
+            for entity in interpretation.entities:
+                if entity.project_role == LLMv2ProjectRole.OTHER:
+                    entity.project_role = LLMv2ProjectRole.VENDOR
+
     def _validate_work_fields(self, interpretation: LLMv2Interpretation, raw: dict[str, Any]) -> None:
         if interpretation.intent != LLMv2Intent.WORK:
             return
@@ -156,16 +185,5 @@ class LLMv2Validator:
                     pass
 
     def _extract_amount_from_text(self, text: str) -> Decimal | None:
-        normalized = normalize_text(text)
-        patterns = [
-            r"(\d+(?:\.\d+)?)\s*(?:میلیون|ملیون|میلیارد|هزار|تومان)",
-            r"(?:میلیون|ملیون|میلیارد|هزار|تومان)\s*(\d+(?:\.\d+)?)",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, normalized)
-            if match is not None:
-                try:
-                    return Decimal(match.group(1))
-                except (InvalidOperation, ValueError):
-                    pass
-        return None
+        amount = parse_persian_money(text)
+        return Decimal(amount) if amount is not None else None

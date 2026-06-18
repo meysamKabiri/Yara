@@ -65,7 +65,10 @@ from app.services.entity_registry import EntityRegistryService
 from app.services.financial_summary import invoice_paid_amount, project_operating_summary
 from app.services.llm_extraction import extract, extract_graph  # noqa: F401
 from app.services.llm_v2_interpreter import LLMv2Interpreter  # noqa: F401
-from app.services.persian_money_engine import normalize_text, parse_persian_money
+from app.services.persian_money_engine import (
+    normalize_text,
+    parse_persian_money,
+)
 from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
@@ -260,10 +263,20 @@ def _find_or_create_worker(
 ) -> Worker:
     normalized_name = name.strip()
     worker = db.scalar(
-        select(Worker).where(Worker.project_id == project_id, Worker.name == normalized_name)
+        select(Worker).where(
+            Worker.project_id == project_id,
+            Worker.name == normalized_name,
+            Worker.type == worker_type,
+        )
     )
     if worker is not None:
         return worker
+    if worker_type != WorkerType.VENDOR:
+        worker = db.scalar(
+            select(Worker).where(Worker.project_id == project_id, Worker.name == normalized_name)
+        )
+        if worker is not None:
+            return worker
     worker = Worker(project_id=project_id, name=normalized_name, type=worker_type)
     db.add(worker)
     db.flush()
@@ -291,10 +304,20 @@ def _find_or_create_worker_state(
         select(WorkerState).where(
             WorkerState.project_id == project_id,
             WorkerState.name == normalized_name,
+            WorkerState.role == role,
         )
     )
     if state is not None:
         return state
+    if role != WorkerStateRole.VENDOR:
+        state = db.scalar(
+            select(WorkerState).where(
+                WorkerState.project_id == project_id,
+                WorkerState.name == normalized_name,
+            )
+        )
+        if state is not None:
+            return state
 
     worker = _find_or_create_worker(
         db,
@@ -419,11 +442,17 @@ def _build_pending_interpretations(
         payment_method = None
         if canonical_event.action in {"CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
             payment_method = PaymentType.CHECK.value
+        elif canonical_event.action == "PURCHASE_PAID":
+            payment_method = PaymentType.CASH.value
         elif canonical_event.type == CanonicalEventType.FINANCIAL:
             payment_method = PaymentType.BANK_TRANSFER.value
         draft_entities = _draft_entities(event_graph, canonical_event, raw_text)
         raw_entity_name = _draft_entity_name(draft_entities)
-        resolved_entity = _resolve_existing_entity(raw_entity_name, entity_context)
+        resolved_entity = _resolve_existing_entity(
+            raw_entity_name,
+            entity_context,
+            _draft_expected_role(draft_entities),
+        )
         financial_direction = _financial_direction(
             raw_text,
             canonical_event.type,
@@ -478,7 +507,28 @@ def _draft_entities(
     entity_name = canonical_event.entity_name or _graph_entity_name(graph)
     if entity_name is None:
         return []
-    return [{"name": entity_name, "type": _graph_role_guess(graph) or "DAILY_WORKER"}]
+    role_guess = _graph_role_guess(graph)
+    if role_guess is None and canonical_event.type == CanonicalEventType.FINANCIAL:
+        role_guess = _pending_financial_role_guess(raw_text, canonical_event.action)
+    return [_pending_entity_dict(entity_name, role_guess or "DAILY_WORKER")]
+
+
+def _pending_financial_role_guess(raw_text: str, action: str) -> str | None:
+    normalized = normalize_text(raw_text)
+    if action in {"PURCHASE_PAID", "DEBT_CREATED", "CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
+        return "VENDOR"
+    if "خرید" in normalized or "فاکتور" in normalized:
+        return "VENDOR"
+    return None
+
+
+def _pending_entity_dict(name: str, role: str) -> dict[str, Any]:
+    entity_type = _role_to_worker_type(role).value
+    return {
+        "name": name,
+        "type": entity_type,
+        "project_role": entity_type,
+    }
 
 
 def _parse_setup_entities_from_text(text: str) -> list[dict[str, Any]]:
@@ -525,31 +575,58 @@ def _draft_entity_name(entities: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _resolve_existing_entity(name: str | None, entity_context: list[Worker]) -> Worker | None:
+def _draft_expected_role(entities: list[dict[str, Any]]) -> str | None:
+    if not entities:
+        return None
+    role = entities[0].get("project_role") or entities[0].get("type") or entities[0].get("role_guess")
+    if hasattr(role, "value"):
+        role = role.value
+    return role if isinstance(role, str) else None
+
+
+def _resolve_existing_entity(
+    name: str | None,
+    entity_context: list[Worker],
+    expected_role: str | None = None,
+) -> Worker | None:
     if name is None:
         return None
     normalized = _normalize_entity_match_text(name)
     if not normalized:
         return None
+    compact = _compact_entity_match_text(name)
+    candidates = entity_context
+    if expected_role == "VENDOR":
+        candidates = [worker for worker in entity_context if worker.type == WorkerType.VENDOR]
     buckets: list[list[Worker]] = [
         [
             worker
-            for worker in entity_context
+            for worker in candidates
             if _normalize_entity_match_text(worker.name) == normalized
         ],
         [
             worker
-            for worker in entity_context
+            for worker in candidates
+            if _compact_entity_match_text(worker.name) == compact
+        ],
+        [
+            worker
+            for worker in candidates
             if _normalize_entity_match_text(worker.name).startswith(normalized)
         ],
         [
             worker
-            for worker in entity_context
+            for worker in candidates
+            if _compact_entity_match_text(worker.name).startswith(compact)
+        ],
+        [
+            worker
+            for worker in candidates
             if normalized in _normalize_entity_match_text(worker.name).split()
         ],
         [
             worker
-            for worker in entity_context
+            for worker in candidates
             if normalized in _normalize_entity_match_text(worker.name)
         ],
     ]
@@ -567,6 +644,10 @@ def _normalize_entity_match_text(value: str) -> str:
     normalized = re.sub(r"\s+", " ", normalized)
     normalized = re.sub(r"^(مش|آقای|اقای|خانم)\s+", "", normalized)
     return normalized
+
+
+def _compact_entity_match_text(value: str) -> str:
+    return _normalize_entity_match_text(value).replace(" ", "")
 
 
 def _financial_direction(
@@ -657,7 +738,9 @@ def _parse_llm_amount_text(value: Any) -> Decimal | None:
     if not isinstance(value, str):
         return None
     amount = parse_persian_money(value)
-    return Decimal(amount) if amount is not None else None
+    if amount is not None:
+        return Decimal(amount)
+    return None
 
 
 def _validate_confidence(value: Any) -> Decimal:
@@ -873,11 +956,21 @@ def _validate_llm_v2_confirmation_safety(
     db: DbSession,
     interpretation: PendingInterpretation,
 ) -> None:
-    from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2Intent, LLMv2Interpretation
+    from app.schemas.llm_v2 import (
+        LLMv2Action,
+        LLMv2FinancialDirection,
+        LLMv2Intent,
+        LLMv2Interpretation,
+        LLMv2ProjectRole,
+    )
 
     si = LLMv2Interpretation(**interpretation.structured_interpretation)
     if si.intent != LLMv2Intent.FINANCIAL:
         return
+
+    if si.action == LLMv2Action.PURCHASE_PAID:
+        si.financial.direction = LLMv2FinancialDirection.OUT
+        interpretation.financial_direction = FinancialDirection.OUTGOING
 
     amount = (
         interpretation.extracted_amount
@@ -901,7 +994,17 @@ def _validate_llm_v2_confirmation_safety(
         )
 
     worker = _pending_worker(db, interpretation)
-    if worker is None and not _pending_allows_new_entity(interpretation):
+    expected_role = si.entities[0].project_role if si.entities else None
+    if (
+        worker is not None
+        and expected_role == LLMv2ProjectRole.VENDOR
+        and worker.type != WorkerType.VENDOR
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Matched entity role conflicts with expected vendor role",
+        )
+    if worker is None and not _pending_allows_new_llm_v2_vendor(interpretation, si):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Financial interpretation requires a resolved entity",
@@ -1020,7 +1123,7 @@ def _execute_llm_v2_interpretation(
             work_logs=work_logs, invoices=invoices, payments=payments,
         )
 
-    if pending_worker is None and entity_name:
+    if pending_worker is None and entity_name and _pending_allows_new_llm_v2_vendor(interpretation, si):
         pending_worker = _find_or_create_worker(
             db,
             interpretation.project_id,
@@ -1101,9 +1204,9 @@ def _execute_llm_v2_interpretation(
         and action == LLMv2Action.DEBT_CREATED
         and state is not None
     ):
-        amount = si.financial.amount
+        amount = interpretation.extracted_amount
         if amount is None:
-            amount = interpretation.extracted_amount
+            amount = si.financial.amount
         if amount is not None and state is not None:
             amount = Decimal(str(amount))
             state.role = WorkerStateRole.VENDOR
@@ -1136,11 +1239,13 @@ def _execute_llm_v2_interpretation(
         )
 
     elif intent == LLMv2Intent.FINANCIAL and state is not None:
-        amount = si.financial.amount
+        amount = interpretation.extracted_amount
         if amount is None:
-            amount = interpretation.extracted_amount
+            amount = si.financial.amount
         fd = si.financial.direction
         fd_val = fd.value if hasattr(fd, "value") else (fd or "OUT")
+        if action == LLMv2Action.PURCHASE_PAID:
+            fd_val = "OUT"
         if fd_val == "NONE":
             fd_val = "OUT"
         if amount is not None:
@@ -1383,7 +1488,10 @@ def _execute_legacy_interpretation(
         )
 
     if event_type == CanonicalEventType.FINANCIAL.value and pending_worker is None:
-        if not _pending_allows_new_entity(interpretation):
+        if not (
+            _pending_allows_new_entity(interpretation)
+            or _pending_allows_new_legacy_vendor(interpretation)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Financial interpretation requires a resolved entity",
@@ -1583,6 +1691,60 @@ def _pending_worker(db: DbSession, interpretation: PendingInterpretation) -> Wor
 def _pending_allows_new_entity(interpretation: PendingInterpretation) -> bool:
     entities = interpretation.extracted_entities or []
     return bool(entities and entities[0].get("create_new") is True)
+
+
+def _pending_allows_new_llm_v2_vendor(
+    interpretation: PendingInterpretation,
+    si: Any,
+) -> bool:
+    entities = interpretation.extracted_entities or []
+    entity = entities[0] if entities else {}
+    project_role = entity.get("project_role") or entity.get("type")
+    if hasattr(project_role, "value"):
+        project_role = project_role.value
+    if project_role != "VENDOR":
+        return False
+    name = entity.get("name")
+    if not isinstance(name, str) or name.strip() in {"نامشخص", "طرف حساب نامشخص", "unknown", "ناشناس"}:
+        return False
+    if interpretation.suggested_entity_id is not None:
+        return False
+    if bool(getattr(si, "ambiguity", False)):
+        return False
+    confidence = interpretation.confidence
+    if confidence is None:
+        confidence = getattr(si, "confidence", 0)
+    return float(confidence or 0) >= 0.85
+
+
+def _pending_allows_new_legacy_vendor(interpretation: PendingInterpretation) -> bool:
+    if interpretation.structured_interpretation is not None:
+        return False
+    if interpretation.canonical_event_type != CanonicalEventType.FINANCIAL.value:
+        return False
+    if interpretation.suggested_entity_id is not None:
+        return False
+    if not _pending_entity_is_vendor(interpretation):
+        return False
+    if _pending_entity_name_is_unknown(interpretation):
+        return False
+    if interpretation.confidence is None:
+        return False
+    return float(interpretation.confidence) >= 0.85
+
+
+def _pending_entity_is_vendor(interpretation: PendingInterpretation) -> bool:
+    entities = interpretation.extracted_entities or []
+    entity = entities[0] if entities else {}
+    role = entity.get("project_role") or entity.get("type") or entity.get("role_guess")
+    if hasattr(role, "value"):
+        role = role.value
+    return role == "VENDOR"
+
+
+def _pending_entity_name_is_unknown(interpretation: PendingInterpretation) -> bool:
+    name = _pending_entity_name(interpretation)
+    return name is None or name in {"نامشخص", "طرف حساب نامشخص", "unknown", "ناشناس"}
 
 
 def _pending_role(

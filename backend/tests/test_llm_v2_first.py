@@ -172,6 +172,165 @@ def test_llm_v2_financial_debt(client: TestClient, monkeypatch: pytest.MonkeyPat
     assert confirm["invoices"][0]["total_amount"] == "5000000.00"
 
 
+def test_llm_v2_resolves_compact_vendor_name(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = client.post("/projects", json={"name": "compact vendor"}).json()
+    vendor = _make_worker(client, "هادی‌پور سیم", "VENDOR", project["id"])
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "هادیپور", "kind": "COMPANY", "project_role": "VENDOR", "role_detail": "سیم فروش"}],
+            "financial": {"amount": 5000000, "direction": "OUT", "payment_method": "BANK_TRANSFER", "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.92,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "۵ میلیون خرید سیم از هادیپور",
+        }),
+    )
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
+    )
+    assert response.status_code == 201
+    pi = response.json()["interpretations"][0]
+    assert pi["suggested_entity_id"] == vendor["id"]
+    assert pi["matched_input_text"] == "هادیپور"
+
+
+def test_llm_v2_named_vendor_auto_create_allows_unknown_kind(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = client.post("/projects", json={"name": "vendor auto create"}).json()
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "هادیپور", "kind": "UNKNOWN", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 5000000, "direction": "OUT", "payment_method": "BANK_TRANSFER", "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.92,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "۵ میلیون خرید سیم از هادیپور",
+        }),
+    )
+
+    pi = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
+    ).json()["interpretations"][0]
+
+    assert pi["suggested_entity_id"] is None
+    assert pi["extracted_entities"][0]["project_role"] == "VENDOR"
+    assert pi["structured_interpretation"]["ambiguity"] is False
+    assert pi["confidence"] >= 0.85
+
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert confirm.status_code == 200
+    result = confirm.json()
+    assert result["workers"][0]["name"] == "هادیپور"
+    assert result["workers"][0]["type"] == "VENDOR"
+
+
+def test_llm_v2_paid_purchase_corrects_amount_direction_and_worker_role_conflict(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "purchase conflict"}).json()
+    daily_worker = _make_worker(client, "هادی پور", "DAILY_WORKER", project["id"])
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "هادی پور", "kind": "PERSON", "project_role": "OTHER", "role_detail": None}],
+            "financial": {"amount": 2500000, "direction": "IN", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "خورطومی",
+        }),
+    )
+
+    pi = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادی پور ۲ ملیون و ۳۵۰ هزار تومن خورطومی خریدم"},
+    ).json()["interpretations"][0]
+
+    assert pi["semantic_action"] == "PURCHASE_PAID"
+    assert pi["extracted_amount"] == "2350000.00"
+    assert pi["financial_direction"] == "OUTGOING"
+    assert pi["payment_method"] == "CASH"
+    assert pi["suggested_entity_id"] is None
+    assert pi["extracted_entities"][0]["name"] == "هادی پور"
+    assert pi["extracted_entities"][0]["project_role"] == "VENDOR"
+    assert pi["extracted_entities"][0]["type"] == "VENDOR"
+    assert pi["description"] == "خورطومی"
+
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert confirm.status_code == 200
+    result = confirm.json()
+    assert result["invoices"] == []
+    assert len(result["payments"]) == 1
+    assert result["payments"][0]["amount"] == "2350000.00"
+    assert result["payments"][0]["direction"] == "OUTGOING"
+    assert result["payments"][0]["type"] == "CASH"
+    assert result["workers"][0]["id"] != daily_worker["id"]
+    assert result["workers"][0]["name"] == "هادی پور"
+    assert result["workers"][0]["type"] == "VENDOR"
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    same_name = [worker for worker in workers if worker["name"] == "هادی پور"]
+    assert {worker["type"] for worker in same_name} == {"DAILY_WORKER", "VENDOR"}
+
+
+def test_llm_v2_purchase_rejects_explicit_daily_worker_vendor_conflict(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "purchase explicit conflict"}).json()
+    daily_worker = _make_worker(client, "هادی پور", "DAILY_WORKER", project["id"])
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "هادی پور", "kind": "PERSON", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 2350000, "direction": "OUT", "payment_method": "CASH", "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "خورطومی",
+        }),
+    )
+
+    pi = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادی پور ۲ میلیون و ۳۵۰ هزار تومن خورطومی خریدم"},
+    ).json()["interpretations"][0]
+    edit = client.patch(
+        f"/pending-interpretations/{pi['id']}",
+        json={"suggested_entity_id": daily_worker["id"]},
+    )
+    assert edit.status_code == 200
+
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert confirm.status_code == 409
+    assert "vendor role" in confirm.json()["detail"]
+
+
 def test_llm_v2_note_creates_no_state(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM v2 NOTE interpretation creates a history entry without side effects."""
     monkeypatch.setattr(

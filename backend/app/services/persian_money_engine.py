@@ -8,11 +8,13 @@ UNIT_MULTIPLIERS = {
     "هزار": 1_000,
     "thousand": 1_000,
     "میلیون": 1_000_000,
+    "ملیون": 1_000_000,
     "میلیونی": 1_000_000,
     "million": 1_000_000,
     "میلیونش را": 1_000_000,
     "میلیونش": 1_000_000,
     "میلیارد": 1_000_000_000,
+    "ملیارد": 1_000_000_000,
     "billion": 1_000_000_000,
 }
 PERSIAN_NUMBER_WORDS = {
@@ -28,7 +30,7 @@ PERSIAN_NUMBER_WORDS = {
     "ده": 10,
     "صد": 100,
 }
-UNIT_PATTERN = r"هزار|thousand|میلیونش را|میلیونش|میلیونی|میلیون|million|میلیارد|billion"
+UNIT_PATTERN = r"هزار|thousand|میلیونش را|میلیونش|میلیونی|میلیون|ملیون|million|میلیارد|ملیارد|billion"
 NUMBER_UNIT_PATTERN = re.compile(rf"(?<!\w)(\d+(?:\.\d+)?)\s*({UNIT_PATTERN})?(?!\w)")
 PERSIAN_HALF_PATTERN = re.compile(
     rf"({'|'.join(PERSIAN_NUMBER_WORDS)})\s+و\s+نیم\s*({UNIT_PATTERN})"
@@ -42,6 +44,7 @@ def normalize_text(text: str) -> str:
     normalized = normalized.replace("ميليون", "میلیون")
     normalized = normalized.replace("ملیون", "میلیون")
     normalized = normalized.replace("ملین", "میلیون")
+    normalized = normalized.replace("ملیارد", "میلیارد")
     normalized = normalized.replace("billion", "میلیارد")
     normalized = normalized.replace("thousand", "هزار")
     normalized = normalized.replace("million", "میلیون")
@@ -79,6 +82,10 @@ def parse_persian_money(text: str) -> int | None:
 
 
 def _parse_normalized_money(text: str) -> int | None:
+    compound_value = _parse_compound_money(text)
+    if compound_value is not None:
+        return compound_value
+
     half_match = PERSIAN_HALF_PATTERN.search(text)
     if half_match is not None:
         number = PERSIAN_NUMBER_WORDS[half_match.group(1)] + 0.5
@@ -100,6 +107,30 @@ def _parse_normalized_money(text: str) -> int | None:
         if unit is not None:
             return int(float(match.group(1)) * UNIT_MULTIPLIERS[unit])
 
-    if len(matches) == 1 and matches[0].group(2) is None:
-        return int(float(matches[0].group(1)))
     return None
+
+
+def _parse_compound_money(text: str) -> int | None:
+    parts: list[tuple[int, int, int]] = []
+    for match in NUMBER_UNIT_PATTERN.finditer(text):
+        unit = match.group(2)
+        if unit is None:
+            continue
+        multiplier = UNIT_MULTIPLIERS[unit]
+        value = int(float(match.group(1)) * multiplier)
+        parts.append((match.start(), multiplier, value))
+    for match in PERSIAN_WORD_UNIT_PATTERN.finditer(text):
+        multiplier = UNIT_MULTIPLIERS[match.group(2)]
+        value = PERSIAN_NUMBER_WORDS[match.group(1)] * multiplier
+        parts.append((match.start(), multiplier, value))
+
+    if not parts:
+        return None
+
+    ordered = sorted(parts, key=lambda part: part[0])
+    multipliers = [part[1] for part in ordered]
+    if len(ordered) == 1:
+        return ordered[0][2]
+    if any(left <= right for left, right in zip(multipliers, multipliers[1:])):
+        return None
+    return sum(part[2] for part in ordered)

@@ -173,4 +173,5 @@ class LLMv2Interpreter:
             "ambiguity": True,
             "missing_fields": [],
             "reasoning_summary": f"{reason}: {raw_text}",
+            "_llm_v2_failed": True,
         }

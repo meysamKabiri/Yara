@@ -33,6 +33,9 @@ from app.models.core import (
 from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2PaymentMethod
 from app.services.llm_v2_interpreter import LLMv2Interpreter
 from app.services.llm_v2_validator import LLMv2Validator, LLMv2ValidationError
+from app.services.persian_money_engine import normalize_text
+from app.services.persian_money_engine import parse_persian_money
+from app.services.persian_role_extractor import PersianRoleExtractor
 from app.services.semantic_normalizer import CanonicalEventType, SemanticNormalizerService
 
 
@@ -205,6 +208,7 @@ def _build_llm_v2_interpretations(
 
     intent_str = interpretation.intent.value
     action_str = interpretation.action.value
+    _repair_llm_v2_setup_role_from_text(interpretation, raw_text)
 
     entities_json = []
     suggested_entity_id = None
@@ -224,12 +228,19 @@ def _build_llm_v2_interpretations(
                 suggested_entity_id = resolved.id
 
     financial_direction = _llm_v2_financial_direction(interpretation.financial.direction, interpretation.action, raw_text)
-    payment_method = _llm_v2_payment_method(interpretation.financial.payment_method, action_str)
-
     canonical_type = _llm_v2_intent_to_canonical(intent_str)
     semantic_action = _llm_v2_action_to_semantic(action_str)
+    payment_method = (
+        _llm_v2_payment_method(interpretation.financial.payment_method, action_str)
+        if canonical_type == "FINANCIAL_EVENT"
+        else None
+    )
 
     amount = interpretation.financial.amount
+    parsed_text_amount = parse_persian_money(raw_text) if intent_str == "FINANCIAL" else None
+    if parsed_text_amount is not None:
+        amount = parsed_text_amount
+        interpretation.financial.amount = Decimal(str(parsed_text_amount))
     if amount is not None:
         amount = Decimal(str(amount))
 
@@ -267,6 +278,28 @@ def _build_llm_v2_interpretations(
             status=PendingInterpretationStatus.PENDING,
         )
     ]
+
+
+def _repair_llm_v2_setup_role_from_text(interpretation: Any, raw_text: str) -> None:
+    from app.schemas.llm_v2 import LLMv2Action, LLMv2Intent, LLMv2ProjectRole
+
+    if interpretation.intent != LLMv2Intent.SETUP or interpretation.action != LLMv2Action.ADD_ENTITY:
+        return
+    if not interpretation.entities:
+        return
+    extracted = PersianRoleExtractor().extract(raw_text)
+    if extracted is None:
+        return
+
+    entity = interpretation.entities[0]
+    normalized_entity = normalize_text(entity.name).replace("\u200c", " ")
+    normalized_extracted = normalize_text(extracted.name).replace("\u200c", " ")
+    if normalized_entity and normalized_entity not in normalized_extracted and normalized_extracted not in normalized_entity:
+        return
+
+    if extracted.worker_type.value in LLMv2ProjectRole.__members__:
+        entity.project_role = LLMv2ProjectRole(extracted.worker_type.value)
+        entity.role_detail = extracted.role_phrase
 
 
 def _llm_v2_intent_to_canonical(intent: str) -> str:
@@ -312,6 +345,8 @@ def _llm_v2_financial_direction(
     raw_text: str,
 ) -> FinancialDirection | None:
     action_str = action.value if hasattr(action, "value") else (action or "")
+    if action_str == "PURCHASE_PAID":
+        return FinancialDirection.OUTGOING
     if action_str == "DEBT_CREATED":
         return FinancialDirection.DEBT
     if action_str in {"CHECK_PAYMENT"}:
@@ -332,6 +367,8 @@ def _llm_v2_payment_method(method: Any, action: str) -> str | None:
         return method
     if action == "CHECK_PAYMENT":
         return PaymentType.CHECK.value
+    if action == "PURCHASE_PAID":
+        return PaymentType.CASH.value
     return PaymentType.BANK_TRANSFER.value
 
 

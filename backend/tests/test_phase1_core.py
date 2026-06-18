@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.api.projects import _parse_llm_amount_text
 from app.core.semantic_rules import EVENT_RULES, ConflictDetectorService, SemanticRuleEngine
 from app.dev_tools.semantic_firewall.firewall import (
     SemanticFirewallError,
@@ -9,7 +10,12 @@ from app.dev_tools.semantic_firewall.firewall import (
 )
 from app.models.core import EventCorrection, HistoryEntry, Worker, WorkerType
 from app.services.llm_extraction import extract
-from app.services.persian_money_engine import normalize_text, parse_persian_money
+from app.services.llm_v2_validator import LLMv2Validator
+from app.services.persian_money_engine import (
+    UNIT_MULTIPLIERS,
+    normalize_text,
+    parse_persian_money,
+)
 from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
@@ -215,28 +221,28 @@ def test_valid_llm_json_creates_multiple_pending_events(
     raw_entry = create_raw_entry(
         client,
         project["id"],
-        "Client paid 1200 and I bought paint for 75",
+        "Client paid ۱ میلیون and I bought paint for ۲ هزار",
     )
 
     monkeypatch.setattr(
         "app.api.projects.extract",
         lambda text: [
-            {
-                "type": "MONEY_IN",
-                "amount_text": "1200",
-                "counterparty_name": "Client",
-                "counterparty_type": "CLIENT",
-                "description": "Client paid 1200",
-                "confidence": 0.9,
-            },
-            {
-                "type": "PURCHASE",
-                "amount_text": "75",
-                "counterparty_name": None,
-                "counterparty_type": "UNKNOWN",
-                "description": "Bought paint for 75",
-                "confidence": 0.8,
-            },
+                {
+                    "type": "MONEY_IN",
+                    "amount_text": "۱ میلیون",
+                    "counterparty_name": "Client",
+                    "counterparty_type": "CLIENT",
+                    "description": "Client paid ۱ میلیون",
+                    "confidence": 0.9,
+                },
+                {
+                    "type": "PURCHASE",
+                    "amount_text": "۲ هزار",
+                    "counterparty_name": None,
+                    "counterparty_type": "UNKNOWN",
+                    "description": "Bought paint for ۲ هزار",
+                    "confidence": 0.8,
+                },
         ],
     )
 
@@ -246,8 +252,8 @@ def test_valid_llm_json_creates_multiple_pending_events(
     events = response.json()
     assert [event["type"] for event in events] == ["MONEY_IN", "PURCHASE"]
     assert [event["status"] for event in events] == ["PENDING", "PENDING"]
-    assert events[0]["amount"] == "1200.00"
-    assert events[1]["amount"] == "75.00"
+    assert events[0]["amount"] == "1000000.00"
+    assert events[1]["amount"] == "2000.00"
 
 
 def test_invalid_llm_json_falls_back_to_note(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,14 +336,17 @@ def test_llm_numeric_amount_is_ignored_without_amount_text(
     ("amount_text", "expected"),
     [
         ("۱۰۰ میلیون", 100000000),
+        ("۱۰ میلیون", 10000000),
         ("100 million", 100000000),
         ("۱۰۰ ملیون", 100000000),
         ("100 ملیون", 100000000),
         ("۱۰۰ ملین", 100000000),
         ("۱۰۰ملیون", 100000000),
         ("۱۰۰ ملیونشا", 100000000),
-        ("۱۰۰,۰۰۰,۰۰۰", 100000000),
+        ("۱۰۰,۰۰۰,۰۰۰", None),
         ("صد میلیون", 100000000),
+        ("۱ میلیارد", 1000000000),
+        ("۱ ملیارد", 1000000000),
         ("۲ میلیارد", 2000000000),
         ("2 billion", 2000000000),
         ("۲ میلیاردش", 2000000000),
@@ -346,16 +355,56 @@ def test_llm_numeric_amount_is_ignored_without_amount_text(
         ("دو و نیم میلیارد", 2500000000),
         ("۲ و نیم میلیارد", 2500000000),
         ("۵۰۰ هزار", 500000),
+        ("۱۰۰ هزار", 100000),
         ("500 thousand", 500000),
         ("۵۰۰هزار", 500000),
         ("۱ هزار", 1000),
-        ("1000000", 1000000),
+        ("1000000", None),
         ("امروز ۱۰۰ میلیون از کارفرما گرفتم", 100000000),
         ("invalid text", None),
     ],
 )
 def test_parse_persian_money(amount_text: str, expected: int | None) -> None:
     assert parse_persian_money(amount_text) == expected
+
+
+def test_persian_money_unit_multipliers_are_exact() -> None:
+    assert UNIT_MULTIPLIERS["هزار"] == 1_000
+    assert UNIT_MULTIPLIERS["thousand"] == 1_000
+    assert UNIT_MULTIPLIERS["میلیون"] == 1_000_000
+    assert UNIT_MULTIPLIERS["ملیون"] == 1_000_000
+    assert UNIT_MULTIPLIERS["million"] == 1_000_000
+    assert UNIT_MULTIPLIERS["میلیارد"] == 1_000_000_000
+    assert UNIT_MULTIPLIERS["ملیارد"] == 1_000_000_000
+    assert UNIT_MULTIPLIERS["billion"] == 1_000_000_000
+
+
+@pytest.mark.parametrize(
+    ("amount_text", "expected"),
+    [
+        ("۱۰۰ میلیون", 100000000),
+        ("۱۰ میلیون", 10000000),
+        ("۱ میلیارد", 1000000000),
+        ("۱۰۰ هزار", 100000),
+        ("۲ میلیون و ۳۵۰ هزار", 2350000),
+        ("۲ ملیون و ۳۵۰ هزار تومن", 2350000),
+        ("۱ میلیون و ۲۰۰ هزار", 1200000),
+        ("۱۰ میلیون و ۵۰۰ هزار", 10500000),
+        ("۳۵۰ هزار", 350000),
+        ("۲ میلیون", 2000000),
+    ],
+)
+def test_persian_money_requested_regressions(amount_text: str, expected: int) -> None:
+    assert parse_persian_money(amount_text) == expected
+
+
+def test_llm_v2_amount_normalization_prefers_unit_scaled_text() -> None:
+    assert LLMv2Validator().normalize_amount(100, "۱۰۰ میلیون") == 100000000
+
+
+def test_llm_amount_text_does_not_fallback_to_raw_number() -> None:
+    assert _parse_llm_amount_text("۱۰۰ میلیون") == 100000000
+    assert _parse_llm_amount_text("100000000") is None
 
 
 def test_normalize_text_handles_suffix_and_spelling_noise() -> None:
@@ -367,16 +416,16 @@ def test_extracted_events_do_not_affect_totals_until_confirmation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_project(client)
-    raw_entry = create_raw_entry(client, project["id"], "Client paid 1200")
+    raw_entry = create_raw_entry(client, project["id"], "Client paid ۱ میلیون")
     monkeypatch.setattr(
         "app.api.projects.extract",
         lambda text: [
             {
                 "type": "MONEY_IN",
-                "amount_text": "1200",
+                "amount_text": "۱ میلیون",
                 "counterparty_name": "Client",
                 "counterparty_type": "CLIENT",
-                "description": "Client paid 1200",
+                "description": "Client paid ۱ میلیون",
                 "confidence": 0.9,
             }
         ],
@@ -398,9 +447,9 @@ def test_extracted_events_do_not_affect_totals_until_confirmation(
     assert client.post(f"/extracted-events/{event['id']}/confirm").status_code == 200
     confirmed_response = client.get(f"/projects/{project['id']}")
     assert confirmed_response.json()["totals"] == {
-        "money_in": "1200.00",
+        "money_in": "1000000.00",
         "money_out": "0",
-        "net": "1200.00",
+        "net": "1000000.00",
     }
 
 
@@ -409,16 +458,16 @@ def test_confirmed_llm_purchase_updates_totals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_project(client)
-    raw_entry = create_raw_entry(client, project["id"], "Bought supplies for 75")
+    raw_entry = create_raw_entry(client, project["id"], "Bought supplies for ۲ هزار")
     monkeypatch.setattr(
         "app.api.projects.extract",
         lambda text: [
             {
                 "type": "PURCHASE",
-                "amount_text": "75",
+                "amount_text": "۲ هزار",
                 "counterparty_name": None,
                 "counterparty_type": "UNKNOWN",
-                "description": "Bought supplies for 75",
+                "description": "Bought supplies for ۲ هزار",
                 "confidence": 0.8,
             }
         ],
@@ -433,8 +482,8 @@ def test_confirmed_llm_purchase_updates_totals(
 
     assert response.json()["totals"] == {
         "money_in": "0",
-        "money_out": "75.00",
-        "net": "-75.00",
+        "money_out": "2000.00",
+        "net": "-2000.00",
     }
 
 
@@ -1271,7 +1320,7 @@ def test_purchase_with_money_defaults_to_paid_purchase(
     summary = client.get(f"/projects/{project['id']}/operating-summary").json()
 
     assert response["payments"][0]["amount"] == "5000000.00"
-    assert response["payments"][0]["type"] == "BANK_TRANSFER"
+    assert response["payments"][0]["type"] == "CASH"
     assert response["payments"][0]["direction"] == "OUTGOING"
     assert response["invoices"] == []
     explanation = response["history_entries"][0]["explanation"]
@@ -1280,6 +1329,28 @@ def test_purchase_with_money_defaults_to_paid_purchase(
     assert summary["total_paid_out"] == "5000000.00"
     assert summary["total_received"] == "0.00"
     assert sum(float(debt["debt"]) for debt in summary["vendor_debts"]) == 0
+
+
+def test_legacy_resolves_compact_vendor_name(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    vendor = create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {
+            "intent": "INVOICE",
+            "entity": "هادیپور",
+            "action": "INVOICE",
+            "confidence": 0.9,
+        },
+    )
+
+    interpretation = create_interpretation(client, project["id"], "از هادیپور ۵ میلیون سیم خریدم")
+
+    assert interpretation["suggested_entity_id"] == vendor["id"]
+    assert interpretation["matched_input_text"] == "هادیپور"
 
 
 def test_material_purchase_without_money_does_not_create_payment_or_debt(

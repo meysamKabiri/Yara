@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { BarChart3, Home, Users } from "lucide-react";
+import { BarChart3, Bell, Home, Users } from "lucide-react";
 import {
   api,
   HistoryEntry,
@@ -85,20 +85,45 @@ function entityName(interpretation: PendingInterpretation): string {
 
 function isUnknownEntity(interpretation: PendingInterpretation): boolean {
   const name = entityName(interpretation);
-  return name === "نامشخص" || name === "طرف حساب نامشخص" || name.toLowerCase() === "unknown";
+  return name === "نامشخص" || name === "طرف حساب نامشخص" || name === "ناشناس" || name.toLowerCase() === "unknown";
 }
 
 function hasExplicitCreateNew(interpretation: PendingInterpretation): boolean {
   return firstEntity(interpretation).create_new === true;
 }
 
+function structuredConfidence(interpretation: PendingInterpretation): number {
+  const si = interpretation.structured_interpretation as Record<string, unknown> | null;
+  const value = interpretation.confidence ?? si?.confidence ?? 0;
+  return Number(value || 0);
+}
+
+function isAmbiguousInterpretation(interpretation: PendingInterpretation): boolean {
+  const si = interpretation.structured_interpretation as Record<string, unknown> | null;
+  return si?.ambiguity === true;
+}
+
+function allowsVendorAutoCreate(interpretation: PendingInterpretation): boolean {
+  const entity = firstEntity(interpretation);
+  return (
+    interpretation.canonical_event_type === "FINANCIAL_EVENT"
+    && preferredEntityType(interpretation) === "VENDOR"
+    && typeof entity.name === "string"
+    && entity.name.trim().length > 0
+    && !interpretation.suggested_entity_id
+    && !isUnknownEntity(interpretation)
+    && !isAmbiguousInterpretation(interpretation)
+    && structuredConfidence(interpretation) >= 0.85
+  );
+}
+
 function needsFinancialEntityResolution(interpretation: PendingInterpretation): boolean {
-  return interpretation.canonical_event_type === "FINANCIAL_EVENT" && !interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation);
+  return interpretation.canonical_event_type === "FINANCIAL_EVENT" && !interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation) && !allowsVendorAutoCreate(interpretation);
 }
 
 function unsafeFinancialReason(interpretation: PendingInterpretation): string | null {
   if (interpretation.canonical_event_type !== "FINANCIAL_EVENT") return null;
-  if (!interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation)) return "طرف حساب باید مشخص شود.";
+  if (!interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation) && !allowsVendorAutoCreate(interpretation)) return "طرف حساب باید مشخص شود.";
   if (!interpretation.extracted_amount) return "مبلغ باید مشخص شود.";
   const si = interpretation.structured_interpretation as Record<string, unknown> | null;
   const financial = si?.financial as Record<string, unknown> | undefined;
@@ -111,24 +136,54 @@ function roleLabelFromType(type: string | undefined): string {
   if (type === "CLIENT") return "کارفرما";
   if (type === "VENDOR") return "فروشنده";
   if (type === "SKILLED_WORKER") return "استادکار";
-  if (type === "DAILY_WORKER") return "کارگر ساده / روزمزد";
+  if (type === "DAILY_WORKER") return "کارگر ساده";
   return "فرد پروژه";
 }
 
-function setupEntities(interpretation: PendingInterpretation): Array<{ name: string; type: string }> {
+function setupEntities(interpretation: PendingInterpretation): Array<{ name: string; type: string; roleDetail: string | null }> {
   return (interpretation.extracted_entities ?? [])
     .map((entity) => ({
       name: typeof entity.name === "string" ? entity.name : "",
-      type: typeof entity.type === "string" ? entity.type : "DAILY_WORKER",
+      type: entityTypeFromRecord(entity),
+      roleDetail: typeof entity.role_detail === "string" && entity.role_detail.trim() ? entity.role_detail.trim() : null,
     }))
     .filter((entity) => entity.name.trim());
 }
 
 function setupRoleLabel(type: string): string {
-  if (type === "CLIENT") return "کارفرما";
-  if (type === "VENDOR") return "فروشنده";
-  if (type === "SKILLED_WORKER") return "استادکار";
-  return "کارگر ساده / روزمزد";
+  return roleLabelFromType(type);
+}
+
+function entityTypeFromRecord(entity: Record<string, unknown>): string {
+  const projectRole = typeof entity.project_role === "string" ? entity.project_role : undefined;
+  const type = typeof entity.type === "string" ? entity.type : undefined;
+  const roleGuess = typeof entity.role_guess === "string" ? entity.role_guess : undefined;
+  const candidate = projectRole ?? type ?? roleGuess;
+  if (candidate === "CLIENT") return "CLIENT";
+  if (candidate === "VENDOR") return "VENDOR";
+  if (candidate === "SKILLED" || candidate === "SKILLED_WORKER") return "SKILLED_WORKER";
+  if (candidate === "DAILY_WORKER" || candidate === "WORKER") return "DAILY_WORKER";
+  return "OTHER";
+}
+
+function preferredEntityType(interpretation: PendingInterpretation): string {
+  return entityTypeFromRecord(firstEntity(interpretation));
+}
+
+function unresolvedEntityTitle(interpretation: PendingInterpretation): string {
+  const name = entityName(interpretation);
+  const role = setupRoleLabel(preferredEntityType(interpretation));
+  if (name === "نامشخص" || name === "طرف حساب نامشخص") return "طرف حساب در پروژه پیدا نشد.";
+  return `${role} «${name}» در پروژه پیدا نشد.`;
+}
+
+function unresolvedEntityHelp(interpretation: PendingInterpretation): string {
+  const role = setupRoleLabel(preferredEntityType(interpretation));
+  return `یک ${role} موجود را انتخاب کنید یا ${role} جدید ایجاد کنید.`;
+}
+
+function isUnresolvedVendorAutoCreate(interpretation: PendingInterpretation): boolean {
+  return allowsVendorAutoCreate(interpretation);
 }
 
 function StructuredDetails({ interpretation }: { interpretation: PendingInterpretation }) {
@@ -171,6 +226,11 @@ function actionSummary(interpretation: PendingInterpretation, workers: Worker[])
   return "یادداشت پروژه";
 }
 
+function approvalCategory(interpretation: PendingInterpretation): string {
+  if (interpretation.canonical_event_type === "SETUP_EVENT") return "افزودن فرد به پروژه";
+  return "برداشت یارا";
+}
+
 function structuredInterpretationRows(interpretation: PendingInterpretation): Array<{ label: string; value: string }> {
   const raw = interpretation.structured_interpretation;
   if (!raw) return [];
@@ -210,7 +270,13 @@ function understoodRows(interpretation: PendingInterpretation, workers: Worker[]
     if (entities.length > 1) {
       return [{ label: "افراد", value: entities.map((item) => `${item.name} - ${setupRoleLabel(item.type)}`).join("\n") }];
     }
-    return [{ label: entities[0]?.type === "CLIENT" ? "کارفرما" : "فرد پروژه", value: entity }];
+    const setupEntity = entities[0];
+    const role = setupRoleLabel(setupEntity?.type ?? "OTHER");
+    return [
+      { label: "نقش", value: role },
+      { label: "نام", value: entity },
+      ...(setupEntity?.type === "SKILLED_WORKER" && setupEntity.roleDetail ? [{ label: "تخصص", value: setupEntity.roleDetail }] : []),
+    ];
   }
   if (interpretation.canonical_event_type === "WORK_EVENT") {
     const entityType = resolvedWorker(interpretation, workers)?.type ?? (typeof firstEntity(interpretation).type === "string" ? firstEntity(interpretation).type : undefined);
@@ -222,8 +288,16 @@ function understoodRows(interpretation: PendingInterpretation, workers: Worker[]
     ];
   }
   if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
+    if (interpretation.semantic_action === "PURCHASE_PAID") {
+      return [
+        { label: "عملیات", value: "خرید پرداخت‌شده" },
+        { label: "مبلغ", value: amount ?? "مبلغ نامشخص" },
+        { label: "فروشنده", value: entity },
+        ...(interpretation.due_date ? [{ label: "تاریخ سررسید", value: interpretation.due_date }] : []),
+      ];
+    }
     return [
-      { label: financialDirection(interpretation, workers) === "debt" ? "فروشنده" : "فرد", value: entity },
+      { label: preferredEntityType(interpretation) === "VENDOR" ? "فروشنده" : financialDirection(interpretation, workers) === "debt" ? "فروشنده" : "فرد", value: entity },
       { label: "عملیات", value: actionSummary(interpretation, workers) },
       { label: "مبلغ", value: amount ?? "مبلغ نامشخص" },
       ...(interpretation.due_date ? [{ label: "تاریخ سررسید", value: interpretation.due_date }] : []),
@@ -238,10 +312,15 @@ function outcomeSummary(interpretation: PendingInterpretation, workers: Worker[]
   if (interpretation.canonical_event_type === "SETUP_EVENT") {
     const entities = setupEntities(interpretation);
     if (entities.length > 1) return [`${entities.length} نفر به این پروژه اضافه می‌شوند.`];
-    return [`${entity} به عنوان فرد پروژه اضافه می‌شود.`];
+    const setupEntity = entities[0];
+    const role = setupRoleLabel(setupEntity?.type ?? "OTHER");
+    const specialty = setupEntity?.type === "SKILLED_WORKER" && setupEntity.roleDetail ? ` ${setupEntity.roleDetail}` : "";
+    return [`${entity} به عنوان ${role}${specialty} به پروژه اضافه می‌شود.`];
   }
   if (interpretation.canonical_event_type === "WORK_EVENT") return [`${interpretation.extracted_quantity ?? "۱"} واحد کار برای ${entity} ثبت می‌شود.`];
   if (interpretation.semantic_action === "DEBT_CREATED" || interpretation.semantic_action === "INVOICE") return [`بدهی فروشنده${amount ? ` به اندازه ${amount}` : ""} افزایش پیدا می‌کند.`];
+  if (interpretation.semantic_action === "PURCHASE_PAID") return [`یارا ثبت می‌کند که از ${entity} به مبلغ ${amount ?? "نامشخص"} خرید انجام شده و پرداخت شده است.`];
+  if (isUnresolvedVendorAutoCreate(interpretation)) return [`فروشنده «${entity}» ایجاد می‌شود و خرید${amount ? ` به مبلغ ${amount}` : ""} ثبت می‌شود.`];
   if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
     if (financialDirection(interpretation, workers) === "incoming") return [`یارا ثبت می‌کند که ${entity} مبلغ ${amount ?? "نامشخص"} به پروژه پرداخت کرده است.`];
     return [`یارا ثبت می‌کند که پروژه مبلغ ${amount ?? "نامشخص"} به ${entity} پرداخت کرده است.`];
@@ -285,6 +364,7 @@ function App() {
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
   const activeProjectId = routeProjectId ?? selectedProjectId ?? projects[0]?.id ?? null;
+  const openDebtCount = Object.values(projectFinancials).filter((item) => item.debt > 0).length;
 
   const navItems = useMemo(
     () => [
@@ -543,7 +623,6 @@ function App() {
       <aside className="sidebar">
         <div className="brand-block">
           <strong>Yara</strong>
-          <span>دفتر مالی هوشمند پیمانکار</span>
         </div>
         <nav className="main-nav" aria-label="Primary navigation">
           {navItems.map((item) => (
@@ -553,6 +632,10 @@ function App() {
             </button>
           ))}
         </nav>
+        <button className={openDebtCount > 0 ? "header-bell has-alerts" : "header-bell"} type="button" aria-label="هشدارها">
+          <Bell aria-hidden="true" size={17} />
+          <span>{openDebtCount.toLocaleString("fa-IR")}</span>
+        </button>
       </aside>
 
       <section className="workspace">
@@ -567,7 +650,7 @@ function App() {
             <div className="modal-header">
               <div>
                 <span className="eyebrow">تایید</span>
-                <h2 id="interpretation-title">برداشت یارا را قبل از ثبت بررسی کنید</h2>
+                <h2 id="interpretation-title">مورد پیشنهادی را قبل از ثبت بررسی کنید</h2>
                 <p>هیچ چیزی بدون تایید شما در دفتر پروژه ثبت نمی‌شود.</p>
               </div>
             </div>
@@ -576,13 +659,36 @@ function App() {
               {pendingInterpretations.map((interpretation) => {
                 const isEditing = editingId === interpretation.id;
                 const candidates = ambiguousEntityCandidates(interpretation, workers);
+                if (candidates.length <= 1 && isUnresolvedVendorAutoCreate(interpretation)) {
+                  return (
+                    <article className="interpretation-card" key={interpretation.id}>
+                      <section className="approval-section vendor-create-notice">
+                        <h3>فروشنده: {entityName(interpretation)}</h3>
+                        <p className="muted">فروشنده «{entityName(interpretation)}» در پروژه وجود ندارد.</p>
+                        <p className="muted">در صورت تایید، فروشنده جدید ایجاد خواهد شد.</p>
+                      </section>
+                      <section className="approval-section">
+                        <dl className="approval-fields">
+                          {understoodRows(interpretation, workers).filter((row) => row.label !== "فروشنده").map((row) => <div key={`${row.label}-${row.value}`}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
+                        </dl>
+                      </section>
+                      {interpretation.structured_interpretation && <StructuredDetails interpretation={interpretation} />}
+                      {unsafeFinancialReason(interpretation) && <p className="warning-text">{unsafeFinancialReason(interpretation)}</p>}
+                      <div className="modal-actions">
+                        <button className="primary-action" type="button" onClick={() => confirmInterpretation(interpretation)} disabled={isLoading || Boolean(unsafeFinancialReason(interpretation))}>تایید</button>
+                        <button type="button" onClick={() => startEdit(interpretation)} disabled={isLoading}>اصلاح</button>
+                        <button className="danger-action" type="button" onClick={() => discardInterpretation(interpretation)} disabled={isLoading}>لغو</button>
+                      </div>
+                    </article>
+                  );
+                }
                 if (candidates.length <= 1 && (isUnknownEntity(interpretation) || needsFinancialEntityResolution(interpretation))) {
-                  const form = unknownEntityForms[interpretation.id] ?? { workerId: "", name: "", type: "VENDOR" };
+                  const form = unknownEntityForms[interpretation.id] ?? { workerId: "", name: entityName(interpretation) === "نامشخص" ? "" : entityName(interpretation), type: preferredEntityType(interpretation) };
                   const canContinue = Boolean(form.workerId || form.name.trim());
                   return (
                     <article className="interpretation-card" key={interpretation.id}>
-                      <h3>طرف حساب چه کسی است؟</h3>
-                      <p className="muted">طرف حساب مشخص نیست. قبل از تایید، یک فرد موجود را انتخاب کنید یا فرد جدید بسازید.</p>
+                      <h3>{unresolvedEntityTitle(interpretation)}</h3>
+                      <p className="muted">{unresolvedEntityHelp(interpretation)}</p>
                       <div className="edit-grid">
                         <label>انتخاب از افراد پروژه<select value={form.workerId} onChange={(event) => setUnknownEntityForms({ ...unknownEntityForms, [interpretation.id]: { ...form, workerId: event.target.value } })}><option value="">انتخاب کنید...</option>{workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name} - {roleLabelFromType(worker.type)}</option>)}</select></label>
                         <label>نام<input value={form.name} onChange={(event) => setUnknownEntityForms({ ...unknownEntityForms, [interpretation.id]: { ...form, name: event.target.value } })} /></label>
@@ -601,7 +707,7 @@ function App() {
                   const selectedCandidate = candidates.find((worker) => worker.id === ambiguitySelections[interpretation.id]);
                   return (
                     <article className="interpretation-card" key={interpretation.id}>
-                      <h3>«{entityName(interpretation)}» کدام فرد است؟</h3>
+                      <h3>{preferredEntityType(interpretation) === "VENDOR" ? "کدام فروشنده مدنظر است؟" : `«${entityName(interpretation)}» کدام فرد است؟`}</h3>
                       <div className="entity-choice-list">
                         {candidates.map((worker) => (
                           <label key={worker.id} className="entity-choice">
@@ -622,7 +728,7 @@ function App() {
                 return (
                   <article className="interpretation-card" key={interpretation.id}>
                     <section className="approval-section">
-                      <span className="eyebrow">برداشت یارا</span>
+                      <span className="eyebrow">{approvalCategory(interpretation)}</span>
                       <dl className="approval-fields">
                         {understoodRows(interpretation, workers).map((row) => <div key={`${row.label}-${row.value}`}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
                       </dl>
