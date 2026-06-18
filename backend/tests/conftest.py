@@ -11,6 +11,31 @@ from app.db.session import get_db_session
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def _mock_llm_v2_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LLM v2 interpreter falls back to legacy for all tests by default.
+
+    Tests that want to test LLM v2 behavior should explicitly mock
+    LLMv2Interpreter.interpret with their expected output.
+    """
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, raw_text, project_id: {
+            "intent": "NOTE",
+            "action": "NOTE",
+            "entities": [],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": raw_text},
+            "confidence": 0.0,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "LLM v2 mocked fallback for testing",
+            "_llm_v2_failed": True,
+        },
+    )
+
+
 @pytest.fixture
 def client() -> Generator[TestClient, None, None]:
     engine = create_engine(

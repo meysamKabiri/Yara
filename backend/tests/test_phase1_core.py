@@ -78,10 +78,19 @@ def create_pending_event(
     return response.json()[0]
 
 
-def create_worker(client: TestClient, project_id: int, name: str, worker_type: str) -> dict:
+def create_worker(
+    client: TestClient,
+    project_id: int,
+    name: str,
+    worker_type: str,
+    role_detail: str | None = None,
+) -> dict:
+    payload = {"name": name, "type": worker_type}
+    if role_detail is not None:
+        payload["role_detail"] = role_detail
     response = client.post(
         f"/projects/{project_id}/workers",
-        json={"name": name, "type": worker_type},
+        json=payload,
     )
     assert response.status_code == 201
     return response.json()
@@ -632,6 +641,50 @@ def test_skilled_worker_progress_updates_accumulate_over_time(client: TestClient
     assert sum(float(log["total_amount"] or 0) for log in logs) == 10000000
 
 
+def test_skilled_worker_type_and_state_are_preserved(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(
+        client,
+        project["id"],
+        "نادری جوشکار",
+        "SKILLED_WORKER",
+        role_detail="جوشکار",
+    )
+
+    response = client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": worker["id"], "amount": "1000000", "type": "CASH"},
+    )
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    states = client.get(f"/projects/{project['id']}/worker-states").json()
+
+    assert response.status_code == 201
+    assert workers[0]["type"] == "SKILLED_WORKER"
+    assert states[0]["role"] == "SKILLED"
+
+
+def test_legacy_daily_worker_with_skilled_detail_displays_as_skilled(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(
+        client,
+        project["id"],
+        "برقکار کیانی",
+        "DAILY_WORKER",
+        role_detail="برقکار",
+    )
+    response = client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": worker["id"], "amount": "1000000", "type": "CASH"},
+    )
+
+    assert response.status_code == 201
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    states = client.get(f"/projects/{project['id']}/worker-states").json()
+
+    assert workers[0]["type"] == "SKILLED_WORKER"
+    assert states[0]["role"] == "SKILLED"
+
+
 def test_invoice_partial_payment_updates_invoice_status(client: TestClient) -> None:
     project = create_project(client)
     vendor = create_worker(client, project["id"], "Paint Store", "VENDOR")
@@ -906,7 +959,7 @@ def test_setup_sentence_with_multiple_daily_workers_creates_one_pending_draft(
         "مش رحیم",
         "آقای صابری",
     ]
-    assert all(entity["type"] == "WORKER" for entity in interpretation["extracted_entities"])
+    assert all(entity["type"] == "DAILY_WORKER" for entity in interpretation["extracted_entities"])
     assert client.get(f"/projects/{project['id']}/workers").json() == []
 
 
@@ -1113,6 +1166,7 @@ def test_confirming_client_payment_is_incoming_without_duplicate_entity(
     )
     response = confirm_interpretation(client, interpretation)
     workers = client.get(f"/projects/{project['id']}/workers").json()
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
 
     assert response["payments"][0]["entity_id"] == client_worker["id"]
     assert response["payments"][0]["amount"] == "200000000.00"
@@ -1120,6 +1174,8 @@ def test_confirming_client_payment_is_incoming_without_duplicate_entity(
     assert response["states"][0]["role"] == "CLIENT"
     assert response["states"][0]["financial_balance"] == "200000000.00"
     assert [worker["name"] for worker in workers] == ["میثم کبیری"]
+    assert summary["total_received"] == "200000000.00"
+    assert summary["total_paid_out"] == "0.00"
 
 
 def test_multiple_partial_entity_matches_require_selection(
@@ -1212,6 +1268,7 @@ def test_purchase_with_money_defaults_to_paid_purchase(
     interpretation = create_interpretation(client, project["id"], "از هادی‌پور سیم ۵ میلیون خرید کردم")
     assert client.get(f"/projects/{project['id']}/payments").json() == []
     response = confirm_interpretation(client, interpretation)
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
 
     assert response["payments"][0]["amount"] == "5000000.00"
     assert response["payments"][0]["type"] == "BANK_TRANSFER"
@@ -1219,7 +1276,10 @@ def test_purchase_with_money_defaults_to_paid_purchase(
     assert response["invoices"] == []
     explanation = response["history_entries"][0]["explanation"]
     assert explanation["semantic_action"] == "PURCHASE_PAID"
-    assert response["states"][0]["financial_balance"] == "-5000000.00"
+    assert response["states"][0]["financial_balance"] == "0.00"
+    assert summary["total_paid_out"] == "5000000.00"
+    assert summary["total_received"] == "0.00"
+    assert sum(float(debt["debt"]) for debt in summary["vendor_debts"]) == 0
 
 
 def test_material_purchase_without_money_does_not_create_payment_or_debt(
@@ -1259,11 +1319,119 @@ def test_unpaid_purchase_creates_debt(
     )
 
     response = submit_and_confirm(client, project["id"], "۵ میلیون خرید کردم ولی پولش را هنوز ندادم")
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
 
     assert response["invoices"][0]["total_amount"] == "5000000.00"
     assert response["payments"] == []
     assert response["history_entries"][0]["explanation"]["semantic_action"] == "DEBT_CREATED"
     assert response["states"][0]["financial_balance"] == "5000000.00"
+    assert summary["vendor_debts"][0]["debt"] == "5000000.00"
+    assert summary["total_paid_out"] == "0.00"
+
+
+def test_payment_against_existing_invoice_reduces_payables(client: TestClient) -> None:
+    project = create_project(client)
+    vendor = create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    invoice = client.post(
+        f"/projects/{project['id']}/invoices",
+        json={"vendor_id": vendor["id"], "total_amount": "5000000", "description": "wire"},
+    ).json()
+
+    before = client.get(f"/projects/{project['id']}/operating-summary").json()
+    payment = client.post(
+        f"/projects/{project['id']}/payments",
+        json={
+            "entity_id": vendor["id"],
+            "amount": "5000000",
+            "related_invoice_id": invoice["id"],
+            "type": "BANK_TRANSFER",
+            "direction": "OUTGOING",
+        },
+    )
+    after = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert payment.status_code == 201
+    assert before["vendor_debts"][0]["debt"] == "5000000.00"
+    assert after["vendor_debts"][0]["debt"] == "0.00"
+    assert after["total_paid_out"] == "5000000.00"
+
+
+def test_client_receivable_equals_paid_out_when_client_paid_nothing(client: TestClient) -> None:
+    project = create_project(client)
+    vendor = create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": vendor["id"], "amount": "105000000", "type": "BANK_TRANSFER"},
+    )
+
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert summary["total_received_from_client"] == "0.00"
+    assert summary["total_paid_out"] == "105000000.00"
+    assert summary["open_payables"] == "0"
+    assert summary["project_balance"] == "-105000000.00"
+    assert summary["client_receivable"] == "105000000.00"
+    assert summary["available_balance"] == "0"
+
+
+def test_client_receivable_accounts_for_partial_client_payment(client: TestClient) -> None:
+    project = create_project(client)
+    owner = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    vendor = create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": owner["id"], "amount": "50000000", "type": "BANK_TRANSFER", "direction": "INCOMING"},
+    )
+    client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": vendor["id"], "amount": "105000000", "type": "BANK_TRANSFER"},
+    )
+
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert summary["project_balance"] == "-55000000.00"
+    assert summary["client_receivable"] == "55000000.00"
+    assert summary["available_balance"] == "0"
+
+
+def test_available_balance_when_client_overfunds_project(client: TestClient) -> None:
+    project = create_project(client)
+    owner = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    vendor = create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": owner["id"], "amount": "120000000", "type": "BANK_TRANSFER", "direction": "INCOMING"},
+    )
+    client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": vendor["id"], "amount": "105000000", "type": "BANK_TRANSFER"},
+    )
+
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert summary["project_balance"] == "15000000.00"
+    assert summary["client_receivable"] == "0"
+    assert summary["available_balance"] == "15000000.00"
+
+
+def test_open_payables_increase_client_receivable_separately(client: TestClient) -> None:
+    project = create_project(client)
+    vendor = create_worker(client, project["id"], "هادی‌پور سیم", "VENDOR")
+    client.post(
+        f"/projects/{project['id']}/payments",
+        json={"entity_id": vendor["id"], "amount": "50000000", "type": "BANK_TRANSFER"},
+    )
+    client.post(
+        f"/projects/{project['id']}/invoices",
+        json={"vendor_id": vendor["id"], "total_amount": "25000000", "description": "unpaid materials"},
+    )
+
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert summary["total_paid_out"] == "50000000.00"
+    assert summary["open_payables"] == "25000000.00"
+    assert summary["client_receivable"] == "75000000.00"
+    assert summary["vendor_debts"][0]["debt"] == "25000000.00"
 
 
 def test_check_purchase_records_deferred_payment_due_date(
@@ -1388,10 +1556,13 @@ def test_natural_input_skilled_work_defaults_to_one_unit(
     )
 
     response = submit_and_confirm(client, project["id"], "نادری جوشکار امروز اومد و جوش زد")
+    workers = client.get(f"/projects/{project['id']}/workers").json()
 
+    assert response["workers"][0]["type"] == "SKILLED_WORKER"
     assert response["states"][0]["role"] == "SKILLED"
     assert response["states"][0]["total_quantity"] == "1.00"
     assert response["history_entries"][0]["change_type"] == "WORK"
+    assert workers[0]["type"] == "SKILLED_WORKER"
 
 
 def test_semantic_normalizer_classifies_implicit_work() -> None:

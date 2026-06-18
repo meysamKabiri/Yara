@@ -9,6 +9,7 @@ from app.api import projects as project_api
 from app.db.session import SessionLocal
 from app.models.core import HistoryEntry, Invoice, Payment, Project, Worker, WorkerState
 from app.schemas.projects import NaturalInputCreate, ProjectCreate
+from app.services.persian_money_engine import parse_persian_money
 from dev_tools.sandbox.scenarios import get_scenario
 
 STATUS_PATH = Path(__file__).with_name("last_status.json")
@@ -42,7 +43,12 @@ def _run_steps(
     scenario = get_scenario(name)
     graphs_by_text = {step["text"]: step["graph"] for step in steps}
     original_extract_graph = project_api.extract_graph
+    original_llm_v2_interpret = project_api.LLMv2Interpreter.interpret
     project_api.extract_graph = lambda text: graphs_by_text[text]
+    project_api.LLMv2Interpreter.interpret = lambda self, text, project_id: _llm_v2_from_graph(
+        text,
+        graphs_by_text[text],
+    )
 
     try:
         with SessionLocal() as db:
@@ -89,6 +95,121 @@ def _run_steps(
             return status
     finally:
         project_api.extract_graph = original_extract_graph
+        project_api.LLMv2Interpreter.interpret = original_llm_v2_interpret
+
+
+def _llm_v2_from_graph(text: str, graph: dict[str, Any]) -> dict[str, Any]:
+    intent = graph.get("intent")
+    entities = _llm_v2_entities(graph)
+    amount = parse_persian_money(text)
+    if intent == "SETUP":
+        return _llm_v2_payload(
+            intent="SETUP",
+            action="ADD_ENTITY",
+            entities=entities,
+            reasoning_summary="sandbox setup",
+        )
+    if intent == "WORK":
+        entity_name = graph.get("entity") if isinstance(graph.get("entity"), str) else None
+        return _llm_v2_payload(
+            intent="WORK",
+            action="WORK_LOG",
+            entities=entities or [_llm_v2_entity(entity_name or "طرف حساب نامشخص", "DAILY_WORKER", None)],
+            work={"quantity": _quantity_from_text(text), "unit": "meter" if "متر" in text else None, "description": text},
+            reasoning_summary="sandbox work",
+        )
+    if intent in {"PAYMENT", "INVOICE"}:
+        entity_name = graph.get("entity") if isinstance(graph.get("entity"), str) else None
+        action = "PURCHASE_PAID" if "خرید" in text else "PAYMENT_OUT"
+        if "چک" in text:
+            action = "CHECK_PAYMENT"
+        return _llm_v2_payload(
+            intent="FINANCIAL",
+            action=action,
+            entities=entities or [_llm_v2_entity(entity_name or "طرف حساب نامشخص", "VENDOR", None)],
+            financial={
+                "amount": amount,
+                "direction": "OUT",
+                "payment_method": "CHECK" if "چک" in text else "BANK_TRANSFER",
+                "due_date_text": None,
+            },
+            reasoning_summary="sandbox financial",
+        )
+    return _llm_v2_payload(
+        intent="NOTE",
+        action="NOTE",
+        entities=entities,
+        note={"text": text},
+        reasoning_summary="sandbox note",
+    )
+
+
+def _llm_v2_payload(
+    *,
+    intent: str,
+    action: str,
+    entities: list[dict[str, Any]],
+    financial: dict[str, Any] | None = None,
+    work: dict[str, Any] | None = None,
+    note: dict[str, Any] | None = None,
+    reasoning_summary: str,
+) -> dict[str, Any]:
+    return {
+        "intent": intent,
+        "action": action,
+        "entities": entities,
+        "financial": financial or {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+        "work": work or {"quantity": None, "unit": None, "description": None},
+        "note": note or {"text": None},
+        "confidence": 1,
+        "ambiguity": False,
+        "missing_fields": [],
+        "reasoning_summary": reasoning_summary,
+    }
+
+
+def _llm_v2_entities(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    entities = graph.get("entities")
+    if isinstance(entities, list):
+        return [
+            _llm_v2_entity(
+                str(entity.get("name")),
+                _graph_role_to_llm_role(entity.get("type")),
+                entity.get("role_detail") if isinstance(entity.get("role_detail"), str) else None,
+            )
+            for entity in entities
+            if isinstance(entity, dict) and entity.get("name")
+        ]
+    entity_name = graph.get("entity")
+    if isinstance(entity_name, str) and entity_name.strip():
+        return [_llm_v2_entity(entity_name.strip(), "DAILY_WORKER", None)]
+    return []
+
+
+def _llm_v2_entity(name: str, project_role: str, role_detail: str | None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "kind": "PERSON" if project_role != "VENDOR" else "COMPANY",
+        "project_role": project_role,
+        "role_detail": role_detail,
+    }
+
+
+def _graph_role_to_llm_role(value: Any) -> str:
+    if value == "CLIENT":
+        return "CLIENT"
+    if value == "VENDOR":
+        return "VENDOR"
+    return "SKILLED_WORKER" if value == "SKILLED_WORKER" else "DAILY_WORKER"
+
+
+def _quantity_from_text(text: str) -> int | None:
+    for token in text.split():
+        if token.isdigit():
+            return int(token)
+    if "۲۰" in text:
+        return 20
+    return None
 
 
 def _get_or_create_project(db, project_name: str) -> Project:

@@ -246,6 +246,7 @@ class PendingInterpretationRead(BaseModel):
     description: str | None
     semantic_explanation: dict | None
     confidence: float | None
+    structured_interpretation: dict | None = None
     status: PendingInterpretationStatus
     created_at: datetime
     updated_at: datetime
@@ -263,6 +264,7 @@ class PendingInterpretationUpdate(BaseModel):
     financial_direction: FinancialDirection | None = None
     due_date: str | None = None
     description: str | None = None
+    structured_interpretation: dict | None = None
 
 
 class NaturalInputInterpretationResult(BaseModel):

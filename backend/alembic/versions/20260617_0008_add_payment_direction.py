@@ -18,17 +18,25 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "payment",
-        sa.Column(
-            "direction",
-            sa.Enum("INCOMING", "OUTGOING", "DEBT", "DEFERRED", native_enum=False, length=20),
-            nullable=False,
-            server_default="OUTGOING",
-        ),
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {column["name"] for column in inspector.get_columns("payment")}
+    if "direction" not in columns:
+        op.add_column(
+            "payment",
+            sa.Column(
+                "direction",
+                sa.Enum("INCOMING", "OUTGOING", "DEBT", "DEFERRED", native_enum=False, length=20),
+                nullable=False,
+                server_default="OUTGOING",
+            ),
+        )
     op.alter_column("payment", "direction", server_default=None)
 
 
 def downgrade() -> None:
-    op.drop_column("payment", "direction")
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {column["name"] for column in inspector.get_columns("payment")}
+    if "direction" in columns:
+        op.drop_column("payment", "direction")

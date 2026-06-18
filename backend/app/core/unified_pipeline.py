@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from time import perf_counter
 from typing import Any
 
@@ -29,7 +30,9 @@ from app.models.core import (
     Project,
     Worker,
 )
+from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2PaymentMethod
 from app.services.llm_v2_interpreter import LLMv2Interpreter
+from app.services.llm_v2_validator import LLMv2Validator, LLMv2ValidationError
 from app.services.semantic_normalizer import CanonicalEventType, SemanticNormalizerService
 
 
@@ -45,9 +48,66 @@ def process_input(
     if db.get(Project, project_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
+
+    llm_v2_start = perf_counter()
+    llm_v2_result = _safe_llm_v2_result(text, project_id)
+    cache.set_timing("llm_v2_duration_ms", _elapsed_ms(llm_v2_start))
+
+    llm_v2_valid = False
+    validated_interpretation = None
+    entity_resolutions: dict[int, Worker | None] = {}
+    if not llm_v2_result.get("_llm_v2_failed"):
+        try:
+            validator = LLMv2Validator()
+            validated_interpretation = validator.validate(llm_v2_result, entity_context)
+            entity_resolutions = validator.resolve_entities(validated_interpretation, entity_context)
+            llm_v2_valid = True
+        except LLMv2ValidationError:
+            llm_v2_valid = False
+
+    if llm_v2_valid and validated_interpretation is not None:
+        interpretations = _build_llm_v2_interpretations(
+            project_id,
+            text,
+            validated_interpretation,
+            entity_resolutions,
+        )
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _debug_print(
+            "llm_v2_primary",
+            {
+                "intent": validated_interpretation.intent.value,
+                "action": validated_interpretation.action.value,
+                "entities": [e.name for e in validated_interpretation.entities],
+                "entity_resolutions": {
+                    str(i): w.name if w else None
+                    for i, w in entity_resolutions.items()
+                },
+            },
+        )
+        for interpretation in interpretations:
+            db.add(interpretation)
+        db.commit()
+        for interpretation in interpretations:
+            db.refresh(interpretation)
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=cache.timings_ms.get("llm_v2_duration_ms", 0.0),
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return interpretations
+
+    fallback_required = True
+    _debug_print("llm_v2_fallback", {"reason": "LLM v2 invalid or failed"})
+
     legacy_start = perf_counter()
     graph = _extract_graph(text)
-    entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
     canonical_event = SemanticNormalizerService().normalize(graph, text, entity_context)
     try:
         firewall_decision = SemanticFirewallService().validate(
@@ -63,27 +123,24 @@ def process_input(
         ) from exc
 
     canonical_event = firewall_decision.event
-    interpretations = cache.set_legacy_result(
-        _build_legacy_pending_interpretations(
-            project_id,
-            text,
-            graph,
-            canonical_event,
-            entity_context,
-        )
+    legacy_interpretations = _build_legacy_pending_interpretations(
+        project_id,
+        text,
+        graph,
+        canonical_event,
+        entity_context,
     )
-    legacy_shadow_payload = _shadow_legacy_payload(interpretations)
+    cache.set_legacy_result(_shadow_legacy_payload(legacy_interpretations))
     cache.set_timing("legacy_duration_ms", _elapsed_ms(legacy_start))
-    shadow_result: dict[str, Any] | None = None
+    interpretations = legacy_interpretations
 
-    if canonical_event.type == CanonicalEventType.FINANCIAL:
-        shadow_start = perf_counter()
-        shadow_result = _cached_shadow_result(cache, text, project_id)
-        cache.set_timing("shadow_duration_ms", _elapsed_ms(shadow_start))
+    shadow_result: dict[str, Any] | None = llm_v2_result if not llm_v2_result.get("_llm_v2_failed") else None
+
+    if canonical_event.type == CanonicalEventType.FINANCIAL and shadow_result is not None:
         governance_start = perf_counter()
         governance_context = GovernanceContextBuilder(db).build(
             event_type=canonical_event.type.value,
-            legacy_result=legacy_shadow_payload,
+            legacy_result=_shadow_legacy_payload(legacy_interpretations),
             shadow_result=shadow_result,
             migration_mode=get_financial_migration_mode(),
         )
@@ -93,39 +150,22 @@ def process_input(
                     **governance_context,
                     "event_type": canonical_event.type.value,
                     "shadow_result": shadow_result,
-                    "legacy_result": legacy_shadow_payload,
+                    "legacy_result": _shadow_legacy_payload(legacy_interpretations),
                     "migration_mode": get_financial_migration_mode(),
                 }
             )
         )
         cache.set_timing("governance_duration_ms", _elapsed_ms(governance_start))
-        fallback_required = bool(governance["fallback_required"])
-        _debug_print(
-            "governance",
-            {
-                "event_type": canonical_event.type.value,
-                "governance": governance,
-                "legacy": legacy_shadow_payload,
-                "shadow": shadow_result,
-            },
-        )
-        chosen_system = "SHADOW" if governance["primary_source"] == "LLM" else "LEGACY"
+        chosen_system = "LLM_V2" if llm_v2_valid else "LEGACY"
         queue_financial_decision(
             cache,
             project_id=project_id,
             input_text=text,
-            legacy_json=legacy_shadow_payload,
+            legacy_json=_shadow_legacy_payload(legacy_interpretations),
             shadow_json=shadow_result,
             chosen_system=chosen_system,
-            reason=governance["reason"],
+            reason=governance["reason"] if llm_v2_valid else "LLM v2 primary fallback",
         )
-        if chosen_system == "SHADOW":
-            interpretations = _build_shadow_financial_interpretations(
-                project_id,
-                text,
-                shadow_result,
-                interpretations,
-            )
     else:
         cache.set_timing("shadow_duration_ms", 0.0)
         cache.set_timing("governance_duration_ms", 0.0)
@@ -137,17 +177,162 @@ def process_input(
     for interpretation in interpretations:
         db.refresh(interpretation)
 
-    _run_shadow_interpretation(db, project_id, text, legacy_shadow_payload, cache, shadow_result)
+    _run_shadow_interpretation(db, project_id, text, _shadow_legacy_payload(legacy_interpretations), cache, shadow_result)
     record_pipeline_performance(
         project_id=project_id,
         input_text=text,
         total_duration_ms=_elapsed_ms(total_start),
         legacy_duration_ms=cache.timings_ms.get("legacy_duration_ms", 0.0),
-        shadow_duration_ms=cache.timings_ms.get("shadow_duration_ms", 0.0),
+        shadow_duration_ms=cache.timings_ms.get("llm_v2_duration_ms", 0.0),
         governance_duration_ms=cache.timings_ms.get("governance_duration_ms", 0.0),
         fallback_required=fallback_required,
     )
     return interpretations
+
+
+def _build_llm_v2_interpretations(
+    project_id: int,
+    raw_text: str,
+    interpretation: Any,
+    entity_resolutions: dict[int, Worker | None],
+) -> list[PendingInterpretation]:
+    from app.schemas.llm_v2 import (
+        LLMv2Action,
+        LLMv2FinancialDirection,
+        LLMv2Intent,
+        LLMv2PaymentMethod,
+    )
+
+    intent_str = interpretation.intent.value
+    action_str = interpretation.action.value
+
+    entities_json = []
+    suggested_entity_id = None
+    for i, entity in enumerate(interpretation.entities):
+        project_role_str = entity.project_role.value if hasattr(entity.project_role, "value") else entity.project_role
+        entity_dict = {
+            "name": entity.name,
+            "kind": entity.kind.value if hasattr(entity.kind, "value") else entity.kind,
+            "project_role": project_role_str,
+            "role_detail": entity.role_detail,
+            "type": _llm_v2_project_role_to_worker_type(project_role_str),
+        }
+        entities_json.append(entity_dict)
+        if i == 0:
+            resolved = entity_resolutions.get(i)
+            if resolved is not None:
+                suggested_entity_id = resolved.id
+
+    financial_direction = _llm_v2_financial_direction(interpretation.financial.direction, interpretation.action, raw_text)
+    payment_method = _llm_v2_payment_method(interpretation.financial.payment_method, action_str)
+
+    canonical_type = _llm_v2_intent_to_canonical(intent_str)
+    semantic_action = _llm_v2_action_to_semantic(action_str)
+
+    amount = interpretation.financial.amount
+    if amount is not None:
+        amount = Decimal(str(amount))
+
+    quantity = interpretation.work.quantity
+    if quantity is not None:
+        quantity = Decimal(str(quantity))
+
+    return [
+        PendingInterpretation(
+            project_id=project_id,
+            raw_input_text=raw_text,
+            canonical_event_type=canonical_type,
+            semantic_action=semantic_action,
+            suggested_entity_id=suggested_entity_id,
+            matched_input_text=(
+                interpretation.entities[0].name
+                if interpretation.entities
+                and suggested_entity_id is not None
+                else None
+            ),
+            extracted_entities=entities_json or None,
+            extracted_amount=amount,
+            extracted_quantity=quantity,
+            payment_method=payment_method,
+            financial_direction=financial_direction,
+            due_date=interpretation.financial.due_date_text,
+            description=(
+                interpretation.work.description
+                or interpretation.note.text
+                or interpretation.reasoning_summary
+                or raw_text
+            ),
+            confidence=interpretation.confidence,
+            structured_interpretation=_json_safe(interpretation.model_dump()),
+            status=PendingInterpretationStatus.PENDING,
+        )
+    ]
+
+
+def _llm_v2_intent_to_canonical(intent: str) -> str:
+    mapping = {
+        "SETUP": "SETUP_EVENT",
+        "WORK": "WORK_EVENT",
+        "FINANCIAL": "FINANCIAL_EVENT",
+        "NOTE": "NOTE_EVENT",
+        "DOCUMENT": "NOTE_EVENT",
+    }
+    return mapping.get(intent, "NOTE_EVENT")
+
+
+def _llm_v2_action_to_semantic(action: str) -> str:
+    mapping = {
+        "ADD_ENTITY": "SETUP",
+        "UPDATE_ENTITY": "ENTITY_UPDATE",
+        "WORK_LOG": "INCREMENT",
+        "PAYMENT_IN": "PAYMENT",
+        "PAYMENT_OUT": "PAYMENT",
+        "PURCHASE_PAID": "PURCHASE_PAID",
+        "DEBT_CREATED": "DEBT_CREATED",
+        "CHECK_PAYMENT": "CHECK_PAYMENT",
+        "NOTE": "NOTE",
+    }
+    return mapping.get(action, "NOTE")
+
+
+def _llm_v2_project_role_to_worker_type(project_role: str) -> str:
+    mapping = {
+        "CLIENT": "CLIENT",
+        "DAILY_WORKER": "DAILY_WORKER",
+        "SKILLED_WORKER": "SKILLED_WORKER",
+        "VENDOR": "VENDOR",
+        "OTHER": "DAILY_WORKER",
+    }
+    return mapping.get(project_role, "DAILY_WORKER")
+
+
+def _llm_v2_financial_direction(
+    direction: Any,
+    action: Any,
+    raw_text: str,
+) -> FinancialDirection | None:
+    action_str = action.value if hasattr(action, "value") else (action or "")
+    if action_str == "DEBT_CREATED":
+        return FinancialDirection.DEBT
+    if action_str in {"CHECK_PAYMENT"}:
+        return FinancialDirection.DEFERRED
+    if isinstance(direction, LLMv2FinancialDirection):
+        direction = direction.value
+    if direction == "IN":
+        return FinancialDirection.INCOMING
+    if direction == "OUT":
+        return FinancialDirection.OUTGOING
+    return None
+
+
+def _llm_v2_payment_method(method: Any, action: str) -> str | None:
+    if isinstance(method, LLMv2PaymentMethod):
+        method = method.value
+    if method in {"CASH", "BANK_TRANSFER", "CHECK", "OTHER"}:
+        return method
+    if action == "CHECK_PAYMENT":
+        return PaymentType.CHECK.value
+    return PaymentType.BANK_TRANSFER.value
 
 
 def _build_legacy_pending_interpretations(
@@ -175,32 +360,26 @@ def _llm_v2_interpreter() -> Any:
     return interpreter_class()
 
 
-def _safe_shadow_result(input_text: str, project_id: int) -> dict[str, Any]:
+def _safe_llm_v2_result(input_text: str, project_id: int) -> dict[str, Any]:
     try:
         return _llm_v2_interpreter().interpret(input_text, project_id)
     except Exception:
         return {
             "intent": "NOTE",
+            "action": "NOTE",
             "entities": [],
-            "financial": {"amount": None, "direction": "NONE"},
-            "work": {"quantity": None, "unit": None},
+            "financial": {
+                "amount": None, "direction": "NONE",
+                "payment_method": None, "due_date_text": None,
+            },
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": input_text},
             "confidence": 0.0,
             "ambiguity": True,
             "missing_fields": [],
-            "reasoning": "shadow financial interpreter failed",
-            "_shadow_failed": True,
+            "reasoning_summary": "LLM v2 interpreter failed",
+            "_llm_v2_failed": True,
         }
-
-
-def _cached_shadow_result(
-    cache: RequestCache,
-    input_text: str,
-    project_id: int,
-) -> dict[str, Any]:
-    cached = cache.get_shadow_result()
-    if cached is not None:
-        return cached
-    return cache.set_shadow_result(_safe_shadow_result(input_text, project_id))
 
 
 def _run_shadow_interpretation(
@@ -212,12 +391,12 @@ def _run_shadow_interpretation(
     shadow_result: dict[str, Any] | None = None,
 ) -> None:
     try:
-        if shadow_result is not None and shadow_result.get("_shadow_failed") is True:
+        if shadow_result is not None and shadow_result.get("_llm_v2_failed") is True:
             return
         if shadow_result is None:
-            shadow_start = perf_counter()
-            shadow_result = _cached_shadow_result(cache, input_text, project_id)
-            cache.set_timing("shadow_duration_ms", _elapsed_ms(shadow_start))
+            shadow_result = _safe_llm_v2_result(input_text, project_id)
+            if shadow_result.get("_llm_v2_failed"):
+                return
         queue_shadow_decision(
             cache,
             project_id=project_id,
@@ -228,74 +407,6 @@ def _run_shadow_interpretation(
         flush_decision_logs(db, cache, log_type="shadow")
     except Exception:
         db.rollback()
-
-
-def _build_shadow_financial_interpretations(
-    project_id: int,
-    raw_text: str,
-    shadow_result: dict[str, Any],
-    legacy_interpretations: list[PendingInterpretation],
-) -> list[PendingInterpretation]:
-    base = legacy_interpretations[0] if legacy_interpretations else None
-    financial = (
-        shadow_result.get("financial")
-        if isinstance(shadow_result.get("financial"), dict)
-        else {}
-    )
-    amount = decimal_or_none(financial.get("amount"))
-    direction = _shadow_financial_direction(financial.get("direction"), base)
-    entity = _shadow_entity(shadow_result, base)
-    return [
-        PendingInterpretation(
-            project_id=project_id,
-            raw_input_text=raw_text,
-            canonical_event_type=CanonicalEventType.FINANCIAL.value,
-            semantic_action=base.semantic_action if base is not None else "PAYMENT",
-            suggested_entity_id=base.suggested_entity_id if base is not None else None,
-            matched_input_text=base.matched_input_text if base is not None else None,
-            extracted_entities=[entity] if entity is not None else [],
-            extracted_amount=amount,
-            extracted_quantity=None,
-            payment_method=(
-                base.payment_method if base is not None else PaymentType.BANK_TRANSFER.value
-            ),
-            financial_direction=direction,
-            due_date=base.due_date if base is not None else None,
-            description=shadow_result.get("reasoning") or raw_text,
-            semantic_explanation=base.semantic_explanation if base is not None else None,
-            confidence=shadow_result.get("confidence")
-            if isinstance(shadow_result.get("confidence"), int | float)
-            else None,
-            status=PendingInterpretationStatus.PENDING,
-        )
-    ]
-
-
-def _shadow_entity(
-    shadow_result: dict[str, Any],
-    base: PendingInterpretation | None,
-) -> dict[str, Any] | None:
-    entities = shadow_result.get("entities")
-    if isinstance(entities, list) and entities and isinstance(entities[0], dict):
-        name = entities[0].get("name")
-        if isinstance(name, str) and name.strip():
-            base_entity = (base.extracted_entities or [{}])[0] if base is not None else {}
-            entity_type = base_entity.get("type") if isinstance(base_entity, dict) else None
-            return {"name": name.strip(), "type": entity_type or "VENDOR"}
-    if base is not None and base.extracted_entities:
-        return base.extracted_entities[0]
-    return None
-
-
-def _shadow_financial_direction(
-    value: Any,
-    base: PendingInterpretation | None,
-) -> FinancialDirection:
-    if base is not None and base.financial_direction is not None:
-        return base.financial_direction
-    if value == "IN":
-        return FinancialDirection.INCOMING
-    return FinancialDirection.OUTGOING
 
 
 def _shadow_legacy_payload(
@@ -327,6 +438,18 @@ def _shadow_legacy_payload(
 
 def _elapsed_ms(start: float) -> float:
     return (perf_counter() - start) * 1000
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "value"):
+        return value.value
+    return value
 
 
 def _debug_print(label: str, payload: dict[str, Any]) -> None:

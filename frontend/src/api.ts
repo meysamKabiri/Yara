@@ -106,6 +106,13 @@ export type OperatingSummary = {
   total_work_amount: string;
   total_invoice_amount: string;
   total_payments: string;
+  total_paid_out: string;
+  total_received: string;
+  total_received_from_client: string;
+  open_payables: string;
+  project_balance: string;
+  client_receivable: string;
+  available_balance: string;
   vendor_debts: Array<{
     vendor_id: number;
     vendor_name: string;
@@ -170,12 +177,13 @@ export type PendingInterpretation = {
   description: string | null;
   semantic_explanation: Record<string, unknown> | null;
   confidence: number | null;
+  structured_interpretation: Record<string, unknown> | null;
   status: PendingInterpretationStatus;
   created_at: string;
   updated_at: string;
 };
 
-export type PendingInterpretationUpdate = Partial<Pick<PendingInterpretation, "canonical_event_type" | "semantic_action" | "suggested_entity_id" | "matched_input_text" | "extracted_entities" | "extracted_amount" | "extracted_quantity" | "payment_method" | "financial_direction" | "due_date" | "description">>;
+export type PendingInterpretationUpdate = Partial<Pick<PendingInterpretation, "canonical_event_type" | "semantic_action" | "suggested_entity_id" | "matched_input_text" | "extracted_entities" | "extracted_amount" | "extracted_quantity" | "payment_method" | "financial_direction" | "due_date" | "description" | "structured_interpretation">>;
 
 export type NaturalInputInterpretationResult = {
   interpretations: PendingInterpretation[];

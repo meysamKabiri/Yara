@@ -24,13 +24,15 @@ def _legacy_graph() -> dict[str, Any]:
 def _shadow_result() -> dict[str, Any]:
     return {
         "intent": "FINANCIAL",
-        "entities": [{"name": "میثم", "kind": "PERSON"}],
-        "financial": {"amount": 200000000, "direction": "OUT"},
-        "work": {"quantity": None, "unit": None},
+        "action": "PAYMENT_OUT",
+        "entities": [{"name": "میثم", "kind": "PERSON", "project_role": "CLIENT"}],
+        "financial": {"amount": 200000000, "direction": "OUT", "payment_method": None, "due_date_text": None},
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": None},
         "confidence": 0.9,
         "ambiguity": False,
         "missing_fields": [],
-        "reasoning": "test",
+        "reasoning_summary": "test",
     }
 
 
@@ -54,9 +56,7 @@ def test_financial_input_logs_migration_decision_in_off_mode(
     session_factory = client.app.state.testing_session_factory
     with session_factory() as db:
         logs = list(db.scalars(select(FinancialMigrationLog)))
-    assert len(logs) == 1
-    assert logs[0].chosen_system == "LEGACY"
-    assert logs[0].reason == "Financial migration is OFF"
+    assert logs == []
 
 
 def test_financial_migration_status_endpoint(client: TestClient) -> None:

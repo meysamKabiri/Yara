@@ -151,6 +151,56 @@ def _work_log_total(quantity: Decimal, rate_per_unit: Decimal | None) -> Decimal
     return quantity * rate_per_unit
 
 
+SKILLED_ROLE_TERMS = {
+    "welder",
+    "electrician",
+    "plumber",
+    "painter",
+    "tiler",
+    "جوشکار",
+    "برقکار",
+    "گچ کار",
+    "گچکار",
+    "گچ‌کار",
+    "رنگ کار",
+    "رنگکار",
+    "رنگ‌کار",
+    "سرامیک کار",
+    "سرامیککار",
+    "سرامیک‌کار",
+    "لوله کش",
+    "لولهکش",
+    "لوله‌کش",
+    "سنگ کار",
+    "سنگکار",
+    "سنگ‌کار",
+}
+
+
+def _has_skilled_role(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = normalize_text(value)
+    return any(term in normalized for term in SKILLED_ROLE_TERMS)
+
+
+def _display_worker_type(worker: Worker) -> WorkerType:
+    if worker.type == WorkerType.DAILY_WORKER and (
+        _has_skilled_role(worker.role_detail) or _has_skilled_role(worker.name)
+    ):
+        return WorkerType.SKILLED_WORKER
+    return worker.type
+
+
+def _display_worker_state_role(state: WorkerState, worker: Worker | None = None) -> WorkerStateRole:
+    if state.role == WorkerStateRole.DAILY and (
+        _has_skilled_role(state.name)
+        or (worker is not None and _display_worker_type(worker) == WorkerType.SKILLED_WORKER)
+    ):
+        return WorkerStateRole.SKILLED
+    return state.role
+
+
 def _invoice_paid_amount(db: DbSession, invoice_id: int) -> Decimal:
     return db.scalar(
         select(func.coalesce(func.sum(Payment.amount), 0)).where(
@@ -174,9 +224,18 @@ def _role_to_worker_type(role: str | None, event_type: str | None = None) -> Wor
         return WorkerType.CLIENT
     if role == "VENDOR" or event_type == "INVOICE":
         return WorkerType.VENDOR
+    if role in {"SKILLED", "SKILLED_WORKER"}:
+        return WorkerType.SKILLED_WORKER
     if role == "WORKER" or event_type == "WORK_LOG":
         return WorkerType.DAILY_WORKER
     return WorkerType.DAILY_WORKER
+
+
+def _worker_type_for_entity(name: str, role: str | None, event_type: str | None = None) -> WorkerType:
+    worker_type = _role_to_worker_type(role, event_type)
+    if worker_type == WorkerType.DAILY_WORKER and _has_skilled_role(name):
+        return WorkerType.SKILLED_WORKER
+    return worker_type
 
 
 def _role_to_state_role(role: str | None, text: str, intent: str | None = None) -> WorkerStateRole:
@@ -187,7 +246,7 @@ def _role_to_state_role(role: str | None, text: str, intent: str | None = None) 
         return WorkerStateRole.VENDOR
     if "کارفرما" in normalized:
         return WorkerStateRole.CLIENT
-    if "جوشکار" in normalized or "برقکار" in normalized or role == "SKILLED":
+    if _has_skilled_role(normalized) or role in {"SKILLED", "SKILLED_WORKER"}:
         return WorkerStateRole.SKILLED
     return WorkerStateRole.DAILY
 
@@ -418,7 +477,7 @@ def _draft_entities(
     entity_name = canonical_event.entity_name or _graph_entity_name(graph)
     if entity_name is None:
         return []
-    return [{"name": entity_name, "type": _graph_role_guess(graph) or "WORKER"}]
+    return [{"name": entity_name, "type": _graph_role_guess(graph) or "DAILY_WORKER"}]
 
 
 def _parse_setup_entities_from_text(text: str) -> list[dict[str, Any]]:
@@ -434,7 +493,7 @@ def _parse_setup_entities_from_text(text: str) -> list[dict[str, Any]]:
             continue
         entities.append(
             {
-                "type": "WORKER",
+                "type": "DAILY_WORKER",
                 "name": name,
                 "phone": None,
                 "account_number": None,
@@ -786,6 +845,375 @@ def _execute_pending_interpretation(
     db: DbSession,
     interpretation: PendingInterpretation,
 ) -> NaturalInputResult:
+    if interpretation.structured_interpretation is not None:
+        _validate_llm_v2_confirmation_safety(db, interpretation)
+        return _execute_llm_v2_interpretation(db, interpretation)
+
+    return _execute_legacy_interpretation(db, interpretation)
+
+
+def _validate_llm_v2_confirmation_safety(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> None:
+    from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2Intent, LLMv2Interpretation
+
+    si = LLMv2Interpretation(**interpretation.structured_interpretation)
+    if si.intent != LLMv2Intent.FINANCIAL:
+        return
+
+    amount = interpretation.extracted_amount if interpretation.extracted_amount is not None else si.financial.amount
+    if amount is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Financial interpretation requires an amount before confirmation",
+        )
+
+    structured_direction = si.financial.direction
+    if structured_direction == LLMv2FinancialDirection.NONE and interpretation.financial_direction is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Financial interpretation requires a direction before confirmation",
+        )
+
+    worker = _pending_worker(db, interpretation)
+    if worker is None and not _pending_allows_new_entity(interpretation):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Financial interpretation requires a resolved entity",
+        )
+
+
+def _execute_llm_v2_interpretation(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> NaturalInputResult:
+    from app.schemas.llm_v2 import (
+        LLMv2Action,
+        LLMv2FinancialDirection,
+        LLMv2Intent,
+        LLMv2Interpretation,
+        LLMv2PaymentMethod,
+    )
+
+    si = LLMv2Interpretation(**interpretation.structured_interpretation)
+    raw_entry = RawEntry(
+        project_id=interpretation.project_id,
+        text=interpretation.raw_input_text,
+        status=RawEntryStatus.PROCESSED,
+    )
+    db.add(raw_entry)
+    db.flush()
+    semantic_history = _semantic_history_fields_from_pending(interpretation)
+    workers: list[Worker] = []
+    states: list[WorkerState] = []
+    history_entries: list[HistoryEntry] = []
+    work_logs: list[WorkLog] = []
+    invoices: list[Invoice] = []
+    payments: list[Payment] = []
+
+    intent = si.intent
+    action = si.action
+
+    if intent == LLMv2Intent.SETUP and action == LLMv2Action.ADD_ENTITY:
+        created = EntityRegistryService(db, interpretation.project_id).apply_setup(
+            interpretation.extracted_entities or []
+        )
+        workers.extend(created)
+        history = HistoryEntry(
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
+            change_type=HistoryChangeType.SETUP,
+            delta=_history_delta(
+                intent=intent.value,
+                action=action.value,
+                entities=[_entity_snapshot(entity) for entity in created],
+            ),
+            **semantic_history,
+        )
+        db.add(history)
+        db.flush()
+        history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=interpretation.canonical_event_type,
+            workers=workers, states=states,
+            history_entries=history_entries,
+            work_logs=work_logs, invoices=invoices, payments=payments,
+        )
+
+    if intent == LLMv2Intent.SETUP and action == LLMv2Action.UPDATE_ENTITY:
+        registry = EntityRegistryService(db, interpretation.project_id)
+        entities = interpretation.extracted_entities or []
+        updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
+        if not updated:
+            updated = registry.update_entity_by_partial_match(interpretation.raw_input_text)
+        workers.extend(updated)
+        history = HistoryEntry(
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
+            change_type=HistoryChangeType.ENTITY_UPDATE,
+            delta=_history_delta(
+                intent=intent.value,
+                action=action.value,
+                entities=[_entity_snapshot(entity) for entity in updated],
+            ),
+            **semantic_history,
+        )
+        db.add(history)
+        db.flush()
+        history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=interpretation.canonical_event_type,
+            workers=workers, states=states,
+            history_entries=history_entries,
+            work_logs=work_logs, invoices=invoices, payments=payments,
+        )
+
+    entity_name = _pending_entity_name(interpretation)
+    if entity_name is None and intent != LLMv2Intent.NOTE:
+        entity_name = si.entities[0].name if si.entities else None
+
+    pending_worker = _pending_worker(db, interpretation)
+    project_role = si.entities[0].project_role if si.entities else None
+    role = _llm_v2_role_to_state_role(project_role, pending_worker)
+
+    if intent == LLMv2Intent.NOTE or (entity_name is None and not si.entities):
+        history = HistoryEntry(
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
+            change_type=HistoryChangeType.NOTE,
+            delta=_history_delta(intent=intent.value, action=action.value),
+            **semantic_history,
+        )
+        db.add(history)
+        db.flush()
+        history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=interpretation.canonical_event_type,
+            workers=workers, states=states,
+            history_entries=history_entries,
+            work_logs=work_logs, invoices=invoices, payments=payments,
+        )
+
+    if pending_worker is None and entity_name:
+        pending_worker = _find_or_create_worker(
+            db,
+            interpretation.project_id,
+            entity_name,
+            _llm_v2_role_to_worker_type(project_role),
+        )
+    if pending_worker is not None:
+        state = _find_or_create_worker_state(db, interpretation.project_id, pending_worker.name, role)
+        if state.worker_id != pending_worker.id:
+            state.worker_id = pending_worker.id
+            state.role = role
+        workers.append(pending_worker)
+    elif entity_name:
+        state = _find_or_create_worker_state(db, interpretation.project_id, entity_name, role)
+        worker = db.get(Worker, state.worker_id)
+        if worker is not None:
+            workers.append(worker)
+    else:
+        state = None
+    if state is not None:
+        states.append(state)
+
+    if intent == LLMv2Intent.WORK and state is not None:
+        quantity = si.work.quantity
+        if quantity is None:
+            quantity = interpretation.extracted_quantity or Decimal("1")
+        quantity = Decimal(str(quantity))
+        if state.role == WorkerStateRole.DAILY:
+            state.total_days_worked += quantity
+            delta = _history_delta(intent=intent.value, action=action.value, days=str(quantity))
+        else:
+            state.total_quantity += quantity
+            state.unit = state.unit or (si.work.unit.value if si.work.unit else None) or _unit_from_text(interpretation.raw_input_text, state.role)
+            delta = _history_delta(
+                intent=intent.value, action=action.value,
+                quantity=str(quantity), unit=state.unit,
+            )
+        work_log = WorkLog(
+            project_id=interpretation.project_id,
+            worker_id=state.worker_id,
+            task_name=si.work.description or interpretation.description or interpretation.raw_input_text,
+            unit=WorkUnit.DAY if state.role == WorkerStateRole.DAILY else WorkUnit.CUSTOM,
+            quantity=quantity,
+            description=si.work.description,
+        )
+        db.add(work_log)
+        db.flush()
+        work_logs.append(work_log)
+        history_entries.append(
+            _add_history(db, interpretation.project_id, state, interpretation.raw_input_text, HistoryChangeType.WORK, delta, semantic_history)
+        )
+
+    elif intent == LLMv2Intent.FINANCIAL and action == LLMv2Action.DEBT_CREATED and state is not None:
+        amount = si.financial.amount
+        if amount is None:
+            amount = interpretation.extracted_amount
+        if amount is not None and state is not None:
+            amount = Decimal(str(amount))
+            state.role = WorkerStateRole.VENDOR
+            state.financial_balance += amount
+            invoice = Invoice(
+                project_id=interpretation.project_id,
+                vendor_id=state.worker_id,
+                total_amount=amount,
+                description=interpretation.description or si.reasoning_summary,
+                status=InvoiceStatus.OPEN,
+            )
+            db.add(invoice)
+            db.flush()
+            invoices.append(invoice)
+        history_entries.append(
+            _add_history(
+                db, interpretation.project_id, state, interpretation.raw_input_text,
+                HistoryChangeType.INVOICE,
+                _history_delta(intent=intent.value, action=action.value, amount=str(amount) if amount else None, balance=str(state.financial_balance) if state else None),
+                semantic_history,
+            )
+        )
+
+    elif intent == LLMv2Intent.FINANCIAL and state is not None:
+        amount = si.financial.amount
+        if amount is None:
+            amount = interpretation.extracted_amount
+        fd = si.financial.direction
+        fd_val = fd.value if hasattr(fd, "value") else (fd or "OUT")
+        if fd_val == "NONE":
+            fd_val = "OUT"
+        if amount is not None:
+            amount = Decimal(str(amount))
+            payment_type = PaymentType.OTHER
+            if si.financial.payment_method:
+                pm = si.financial.payment_method
+                pm_val = pm.value if hasattr(pm, "value") else pm
+                if pm_val == "CASH":
+                    payment_type = PaymentType.CASH
+                elif pm_val == "BANK_TRANSFER":
+                    payment_type = PaymentType.BANK_TRANSFER
+                elif pm_val == "CHECK":
+                    payment_type = PaymentType.CHECK
+            elif action in {LLMv2Action.CHECK_PAYMENT}:
+                payment_type = PaymentType.CHECK
+            else:
+                payment_type = PaymentType(
+                    interpretation.payment_method or PaymentType.BANK_TRANSFER.value
+                )
+
+            if fd_val == "IN" or action == LLMv2Action.PAYMENT_IN:
+                direction = FinancialDirection.INCOMING
+                state.role = WorkerStateRole.CLIENT
+                state.financial_balance += amount
+            else:
+                direction = FinancialDirection.OUTGOING
+                if state.role != WorkerStateRole.VENDOR and state.role != WorkerStateRole.CLIENT:
+                    state.financial_balance -= amount
+
+            payment = Payment(
+                project_id=interpretation.project_id,
+                entity_id=state.worker_id,
+                amount=amount,
+                related_invoice_id=None,
+                type=payment_type,
+                due_date=si.financial.due_date_text or interpretation.due_date,
+                direction=direction,
+            )
+            db.add(payment)
+            db.flush()
+            payments.append(payment)
+        history_entries.append(
+            _add_history(
+                db, interpretation.project_id, state, interpretation.raw_input_text,
+                HistoryChangeType.PAYMENT,
+                _history_delta(
+                    intent=intent.value, action=action.value,
+                    amount=str(amount) if amount else None,
+                    balance=str(state.financial_balance) if state else None,
+                    payment_method=si.financial.payment_method.value if si.financial.payment_method else None,
+                    financial_direction=fd_val,
+                ),
+                semantic_history,
+            )
+        )
+
+    elif state is not None:
+        history_entries.append(
+            _add_history(
+                db, interpretation.project_id, state, interpretation.raw_input_text,
+                HistoryChangeType.NOTE,
+                _history_delta(intent=intent.value, action=action.value),
+                semantic_history,
+            )
+        )
+
+    if state is not None:
+        db.flush()
+        for item in [*workers, *states, *history_entries, *work_logs, *invoices, *payments]:
+            db.refresh(item)
+
+    return NaturalInputResult(
+        raw_entry_id=raw_entry.id,
+        intent=interpretation.canonical_event_type,
+        workers=workers, states=states,
+        history_entries=history_entries,
+        work_logs=work_logs, invoices=invoices, payments=payments,
+    )
+
+
+def _llm_v2_role_to_state_role(
+    project_role: Any,
+    worker: Worker | None = None,
+) -> WorkerStateRole:
+    if worker is not None:
+        if worker.type.value == "CLIENT":
+            return WorkerStateRole.CLIENT
+        if worker.type.value in ("VENDOR",):
+            return WorkerStateRole.VENDOR
+        if worker.type.value in ("SKILLED_WORKER",):
+            return WorkerStateRole.SKILLED
+        return WorkerStateRole.DAILY
+    if isinstance(project_role, str):
+        role_val = project_role
+    elif hasattr(project_role, "value"):
+        role_val = project_role.value
+    else:
+        role_val = "OTHER"
+    mapping = {
+        "CLIENT": WorkerStateRole.CLIENT,
+        "DAILY_WORKER": WorkerStateRole.DAILY,
+        "SKILLED_WORKER": WorkerStateRole.SKILLED,
+        "VENDOR": WorkerStateRole.VENDOR,
+        "OTHER": WorkerStateRole.DAILY,
+    }
+    return mapping.get(role_val, WorkerStateRole.DAILY)
+
+
+def _llm_v2_role_to_worker_type(project_role: Any) -> WorkerType:
+    if isinstance(project_role, str):
+        role_val = project_role
+    elif hasattr(project_role, "value"):
+        role_val = project_role.value
+    else:
+        role_val = "OTHER"
+    mapping = {
+        "CLIENT": WorkerType.CLIENT,
+        "DAILY_WORKER": WorkerType.DAILY_WORKER,
+        "SKILLED_WORKER": WorkerType.SKILLED_WORKER,
+        "VENDOR": WorkerType.VENDOR,
+        "OTHER": WorkerType.DAILY_WORKER,
+    }
+    return mapping.get(role_val, WorkerType.DAILY_WORKER)
+
+
+def _execute_legacy_interpretation(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> NaturalInputResult:
     raw_entry = RawEntry(
         project_id=interpretation.project_id,
         text=interpretation.raw_input_text,
@@ -991,7 +1419,7 @@ def _execute_pending_interpretation(
             if direction == FinancialDirection.INCOMING:
                 state.role = WorkerStateRole.CLIENT
                 state.financial_balance += amount
-            else:
+            elif state.role != WorkerStateRole.VENDOR:
                 state.financial_balance -= amount
             payment = Payment(
                 project_id=interpretation.project_id,
@@ -1182,7 +1610,7 @@ def _graph_setup_entities(graph: dict[str, Any]) -> list[dict[str, Any]]:
         for entity in entities:
             if not isinstance(entity, dict) or not isinstance(entity.get("name"), str):
                 continue
-            entity_type = entity.get("type") or entity.get("role_guess") or "WORKER"
+            entity_type = entity.get("type") or entity.get("role_guess") or "DAILY_WORKER"
             field_updates = entity.get("field_updates")
             updates = field_updates if isinstance(field_updates, dict) else entity
             setup_entities.append(
@@ -1199,8 +1627,8 @@ def _graph_setup_entities(graph: dict[str, Any]) -> list[dict[str, Any]]:
     entity_name = graph.get("entity")
     if not setup_entities and isinstance(entity_name, str) and entity_name.strip():
         setup_entities.append(
-            {
-                "type": graph.get("role_guess") or "WORKER",
+                {
+                "type": graph.get("role_guess") or "DAILY_WORKER",
                 "name": entity_name.strip(),
                 "phone": graph.get("phone"),
                 "account_number": graph.get("account_number"),
@@ -1290,7 +1718,8 @@ def _resolve_event_entity(
             db,
             project_id,
             entity_name,
-            _role_to_worker_type(
+            _worker_type_for_entity(
+                entity_name,
                 None,
                 raw_event.get("type") if isinstance(raw_event.get("type"), str) else None,
             ),
@@ -1309,7 +1738,8 @@ def _resolve_event_entity(
                 db,
                 project_id,
                 first["name"],
-                _role_to_worker_type(
+                _worker_type_for_entity(
+                    first["name"],
                     first.get("role_guess") if isinstance(first.get("role_guess"), str) else None,
                     raw_event.get("type") if isinstance(raw_event.get("type"), str) else None,
                 ),
@@ -1333,6 +1763,16 @@ def _parse_money_decimal(value: Any) -> Decimal | None:
     return Decimal(amount) if amount is not None else None
 
 
+def _worker_read(worker: Worker) -> WorkerRead:
+    return WorkerRead.model_validate(worker).model_copy(update={"type": _display_worker_type(worker)})
+
+
+def _worker_state_read(state: WorkerState, worker: Worker | None = None) -> WorkerStateRead:
+    return WorkerStateRead.model_validate(state).model_copy(
+        update={"role": _display_worker_state_role(state, worker)}
+    )
+
+
 @router.post(
     "/projects/{project_id}/workers",
     response_model=WorkerRead,
@@ -1348,27 +1788,34 @@ def create_worker(project_id: int, payload: WorkerCreate, db: DbSession) -> Work
 
 
 @router.get("/projects/{project_id}/workers", response_model=list[WorkerRead])
-def list_workers(project_id: int, db: DbSession) -> list[Worker]:
+def list_workers(project_id: int, db: DbSession) -> list[WorkerRead]:
     _get_project(db, project_id)
-    return list(
+    workers = list(
         db.scalars(
             select(Worker)
             .where(Worker.project_id == project_id)
             .order_by(Worker.created_at.desc(), Worker.id.desc())
         )
     )
+    return [_worker_read(worker) for worker in workers]
 
 
 @router.get("/projects/{project_id}/worker-states", response_model=list[WorkerStateRead])
-def list_worker_states(project_id: int, db: DbSession) -> list[WorkerState]:
+def list_worker_states(project_id: int, db: DbSession) -> list[WorkerStateRead]:
     _get_project(db, project_id)
-    return list(
+    states = list(
         db.scalars(
             select(WorkerState)
             .where(WorkerState.project_id == project_id)
             .order_by(WorkerState.updated_at.desc(), WorkerState.id.desc())
         )
     )
+    worker_ids = {state.worker_id for state in states}
+    workers_by_id = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.id.in_(worker_ids)))
+    } if worker_ids else {}
+    return [_worker_state_read(state, workers_by_id.get(state.worker_id)) for state in states]
 
 
 @router.get("/projects/{project_id}/history", response_model=list[HistoryEntryRead])
@@ -1497,7 +1944,9 @@ def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Pa
     state = _find_or_create_worker_state(db, project_id, entity.name, state_role)
     if payload.direction == FinancialDirection.INCOMING:
         state.financial_balance += payload.amount
-    else:
+    elif invoice is not None:
+        state.financial_balance -= payload.amount
+    elif state.role != WorkerStateRole.VENDOR:
         state.financial_balance -= payload.amount
     _add_history(
         db,
@@ -1546,6 +1995,18 @@ def get_operating_summary(project_id: int, db: DbSession) -> dict[str, Any]:
     total_payments = db.scalar(
         select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.project_id == project_id)
     )
+    total_paid_out = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.direction.in_([FinancialDirection.OUTGOING, FinancialDirection.DEFERRED]),
+        )
+    )
+    total_received = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.direction == FinancialDirection.INCOMING,
+        )
+    )
     vendor_states = db.scalars(
         select(WorkerState).where(
             WorkerState.project_id == project_id,
@@ -1554,32 +2015,42 @@ def get_operating_summary(project_id: int, db: DbSession) -> dict[str, Any]:
     )
     vendor_debts = []
     for state in vendor_states:
-        invoice_total = db.scalar(
-            select(func.coalesce(func.sum(Invoice.total_amount), 0)).where(
-                Invoice.project_id == project_id,
-                Invoice.vendor_id == state.worker_id,
+        vendor_invoices = list(
+            db.scalars(
+                select(Invoice).where(
+                    Invoice.project_id == project_id,
+                    Invoice.vendor_id == state.worker_id,
+                )
             )
         )
-        paid_total = db.scalar(
-            select(func.coalesce(func.sum(Payment.amount), 0)).where(
-                Payment.project_id == project_id,
-                Payment.entity_id == state.worker_id,
-            )
-        )
+        invoice_total = sum((invoice.total_amount for invoice in vendor_invoices), Decimal("0"))
+        paid_total = sum((_invoice_paid_amount(db, invoice.id) for invoice in vendor_invoices), Decimal("0"))
+        open_debt = max(invoice_total - paid_total, Decimal("0"))
         vendor_debts.append(
             {
                 "vendor_id": state.worker_id,
                 "vendor_name": state.name,
                 "invoice_total": str(invoice_total),
                 "paid_total": str(paid_total),
-                "debt": str(state.financial_balance),
+                "debt": str(open_debt),
             }
         )
+    open_payables = sum((Decimal(debt["debt"]) for debt in vendor_debts), Decimal("0"))
+    project_balance = total_received - total_paid_out - open_payables
+    client_receivable = max(Decimal("0"), total_paid_out + open_payables - total_received)
+    available_balance = max(Decimal("0"), project_balance)
 
     return {
         "total_work_amount": str(total_work_amount),
         "total_invoice_amount": str(total_invoice_amount),
         "total_payments": str(total_payments),
+        "total_paid_out": str(total_paid_out),
+        "total_received": str(total_received),
+        "total_received_from_client": str(total_received),
+        "open_payables": str(open_payables),
+        "project_balance": str(project_balance),
+        "client_receivable": str(client_receivable),
+        "available_balance": str(available_balance),
         "vendor_debts": vendor_debts,
     }
 

@@ -316,6 +316,7 @@ class PendingInterpretation(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     semantic_explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    structured_interpretation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[PendingInterpretationStatus] = mapped_column(
         SqlEnum(PendingInterpretationStatus, native_enum=False, length=20),
         default=PendingInterpretationStatus.PENDING,

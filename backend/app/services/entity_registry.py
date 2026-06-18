@@ -132,6 +132,8 @@ class EntityRegistryService:
             return WorkerType.CLIENT
         if value == "VENDOR":
             return WorkerType.VENDOR
+        if value in {"SKILLED", "SKILLED_WORKER"}:
+            return WorkerType.SKILLED_WORKER
         return WorkerType.DAILY_WORKER
 
     def _update_if_present(self, worker: Worker, field: str, value: Any) -> None:
