@@ -351,8 +351,8 @@ function App() {
             api.listPayments(project.id),
             api.getOperatingSummary(project.id),
           ]);
-          const received = Number(summary.total_received_from_client ?? summary.total_received ?? 0) || projectPayments.filter((payment) => payment.direction === "INCOMING").reduce((total, payment) => total + Number(payment.amount || 0), 0);
-          const paid = Number(summary.total_paid_out ?? 0) || projectPayments.filter((payment) => payment.direction === "OUTGOING" || payment.direction === "DEFERRED").reduce((total, payment) => total + Number(payment.amount || 0), 0);
+          const received = Number(summary.total_received_from_client ?? summary.total_received ?? 0);
+          const paid = Number(summary.total_paid_out ?? 0);
           const debt = Number(summary.open_payables ?? 0);
           return [project.id, { received, paid, debt, net: Number(summary.project_balance ?? received - paid - debt) }] as const;
         }),

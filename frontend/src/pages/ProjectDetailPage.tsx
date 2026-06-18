@@ -29,8 +29,8 @@ function date(value: string): string {
 }
 
 export function ProjectDetailPage({ project, summary, workLogs, payments, invoices, history, rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit, onVoicePlaceholder, onAttachPlaceholder }: ProjectDetailPageProps) {
-  const paidOut = Number(summary?.total_paid_out ?? 0) || payments.filter((payment) => payment.direction === "OUTGOING" || payment.direction === "DEFERRED").reduce((total, payment) => total + Number(payment.amount || 0), 0);
-  const received = Number(summary?.total_received_from_client ?? summary?.total_received ?? 0) || payments.filter((payment) => payment.direction === "INCOMING").reduce((total, payment) => total + Number(payment.amount || 0), 0);
+  const paidOut = summary ? Number(summary.total_paid_out) : payments.filter((payment) => payment.direction === "OUTGOING" || payment.direction === "DEFERRED").reduce((total, payment) => total + Number(payment.amount || 0), 0);
+  const received = summary ? Number(summary.total_received_from_client ?? summary.total_received) : payments.filter((payment) => payment.direction === "INCOMING").reduce((total, payment) => total + Number(payment.amount || 0), 0);
   const payables = Number(summary?.open_payables ?? 0);
   const totalCost = Number(summary?.total_work_amount ?? 0) + Number(summary?.total_invoice_amount ?? 0) + paidOut;
   const receivables = Number(summary?.client_receivable ?? Math.max(paidOut + payables - received, 0));
@@ -56,8 +56,8 @@ export function ProjectDetailPage({ project, summary, workLogs, payments, invoic
         <article className="metric-card negative"><Coins aria-hidden="true" /><span>هزینه کل</span><strong>{money(totalCost)}</strong><small>کار، فاکتور و پرداختی</small></article>
         <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>دریافتی از کارفرما</span><strong>{money(received)}</strong><small>ورودی تاییدشده</small></article>
         <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداختی‌ها</span><strong>{money(paidOut)}</strong><small>کارگر، فروشنده و خرید</small></article>
-        <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>طلب‌ها</span><strong>{money(receivables)}</strong><small>طلب از کارفرما بابت کسری پروژه</small></article>
-        <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی‌ها</span><strong>{money(payables)}</strong><small>فقط فاکتورهای پرداخت‌نشده</small></article>
+        <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>طلب از کارفرما</span><strong>{money(receivables)}</strong><small>کسری تامین مالی پروژه</small></article>
+        <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی باز</span><strong>{money(payables)}</strong><small>فقط فاکتورهای پرداخت‌نشده</small></article>
         <article className={netBalance >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>مانده پروژه</span><strong>{money(netBalance >= 0 ? availableBalance : netBalance)}</strong><small>{netBalance >= 0 ? "موجودی قابل خرج" : "کسری تامین مالی"}</small></article>
       </section>
 

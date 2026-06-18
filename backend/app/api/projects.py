@@ -62,8 +62,9 @@ from app.schemas.projects import (
     WorkLogUpdate,
 )
 from app.services.entity_registry import EntityRegistryService
-from app.services.llm_extraction import extract, extract_graph
-from app.services.llm_v2_interpreter import LLMv2Interpreter
+from app.services.financial_summary import invoice_paid_amount, project_operating_summary
+from app.services.llm_extraction import extract, extract_graph  # noqa: F401
+from app.services.llm_v2_interpreter import LLMv2Interpreter  # noqa: F401
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.semantic_normalizer import (
     CanonicalEvent,
@@ -202,11 +203,7 @@ def _display_worker_state_role(state: WorkerState, worker: Worker | None = None)
 
 
 def _invoice_paid_amount(db: DbSession, invoice_id: int) -> Decimal:
-    return db.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0)).where(
-            Payment.related_invoice_id == invoice_id
-        )
-    )
+    return invoice_paid_amount(db, invoice_id)
 
 
 def _refresh_invoice_status(db: DbSession, invoice: Invoice) -> None:
@@ -231,7 +228,11 @@ def _role_to_worker_type(role: str | None, event_type: str | None = None) -> Wor
     return WorkerType.DAILY_WORKER
 
 
-def _worker_type_for_entity(name: str, role: str | None, event_type: str | None = None) -> WorkerType:
+def _worker_type_for_entity(
+    name: str,
+    role: str | None,
+    event_type: str | None = None,
+) -> WorkerType:
     worker_type = _role_to_worker_type(role, event_type)
     if worker_type == WorkerType.DAILY_WORKER and _has_skilled_role(name):
         return WorkerType.SKILLED_WORKER
@@ -531,14 +532,26 @@ def _resolve_existing_entity(name: str | None, entity_context: list[Worker]) -> 
     if not normalized:
         return None
     buckets: list[list[Worker]] = [
-        [worker for worker in entity_context if _normalize_entity_match_text(worker.name) == normalized],
-        [worker for worker in entity_context if _normalize_entity_match_text(worker.name).startswith(normalized)],
+        [
+            worker
+            for worker in entity_context
+            if _normalize_entity_match_text(worker.name) == normalized
+        ],
+        [
+            worker
+            for worker in entity_context
+            if _normalize_entity_match_text(worker.name).startswith(normalized)
+        ],
         [
             worker
             for worker in entity_context
             if normalized in _normalize_entity_match_text(worker.name).split()
         ],
-        [worker for worker in entity_context if normalized in _normalize_entity_match_text(worker.name)],
+        [
+            worker
+            for worker in entity_context
+            if normalized in _normalize_entity_match_text(worker.name)
+        ],
     ]
     for matches in buckets:
         unique = {worker.id: worker for worker in matches}
@@ -574,7 +587,8 @@ def _financial_direction(
     if action == "PURCHASE_PAID" or "خرید" in normalized:
         return FinancialDirection.OUTGOING
     if resolved_entity is not None and resolved_entity.type == WorkerType.CLIENT:
-        if any(phrase in normalized for phrase in ["پول داد", "پرداخت کرد", "واریز کرد", "داد برای"]):
+        incoming_phrases = ["پول داد", "پرداخت کرد", "واریز کرد", "داد برای"]
+        if any(phrase in normalized for phrase in incoming_phrases):
             return FinancialDirection.INCOMING
     return FinancialDirection.OUTGOING
 
@@ -837,7 +851,10 @@ def confirm_pending_interpretation(
 def _get_pending_interpretation(db: DbSession, interpretation_id: int) -> PendingInterpretation:
     interpretation = db.get(PendingInterpretation, interpretation_id)
     if interpretation is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interpretation not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Interpretation not found",
+        )
     return interpretation
 
 
@@ -862,7 +879,11 @@ def _validate_llm_v2_confirmation_safety(
     if si.intent != LLMv2Intent.FINANCIAL:
         return
 
-    amount = interpretation.extracted_amount if interpretation.extracted_amount is not None else si.financial.amount
+    amount = (
+        interpretation.extracted_amount
+        if interpretation.extracted_amount is not None
+        else si.financial.amount
+    )
     if amount is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -870,7 +891,10 @@ def _validate_llm_v2_confirmation_safety(
         )
 
     structured_direction = si.financial.direction
-    if structured_direction == LLMv2FinancialDirection.NONE and interpretation.financial_direction is None:
+    if (
+        structured_direction == LLMv2FinancialDirection.NONE
+        and interpretation.financial_direction is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Financial interpretation requires a direction before confirmation",
@@ -890,10 +914,8 @@ def _execute_llm_v2_interpretation(
 ) -> NaturalInputResult:
     from app.schemas.llm_v2 import (
         LLMv2Action,
-        LLMv2FinancialDirection,
         LLMv2Intent,
         LLMv2Interpretation,
-        LLMv2PaymentMethod,
     )
 
     si = LLMv2Interpretation(**interpretation.structured_interpretation)
@@ -1006,7 +1028,12 @@ def _execute_llm_v2_interpretation(
             _llm_v2_role_to_worker_type(project_role),
         )
     if pending_worker is not None:
-        state = _find_or_create_worker_state(db, interpretation.project_id, pending_worker.name, role)
+        state = _find_or_create_worker_state(
+            db,
+            interpretation.project_id,
+            pending_worker.name,
+            role,
+        )
         if state.worker_id != pending_worker.id:
             state.worker_id = pending_worker.id
             state.role = role
@@ -1031,15 +1058,25 @@ def _execute_llm_v2_interpretation(
             delta = _history_delta(intent=intent.value, action=action.value, days=str(quantity))
         else:
             state.total_quantity += quantity
-            state.unit = state.unit or (si.work.unit.value if si.work.unit else None) or _unit_from_text(interpretation.raw_input_text, state.role)
+            state.unit = (
+                state.unit
+                or (si.work.unit.value if si.work.unit else None)
+                or _unit_from_text(interpretation.raw_input_text, state.role)
+            )
             delta = _history_delta(
-                intent=intent.value, action=action.value,
-                quantity=str(quantity), unit=state.unit,
+                intent=intent.value,
+                action=action.value,
+                quantity=str(quantity),
+                unit=state.unit,
             )
         work_log = WorkLog(
             project_id=interpretation.project_id,
             worker_id=state.worker_id,
-            task_name=si.work.description or interpretation.description or interpretation.raw_input_text,
+            task_name=(
+                si.work.description
+                or interpretation.description
+                or interpretation.raw_input_text
+            ),
             unit=WorkUnit.DAY if state.role == WorkerStateRole.DAILY else WorkUnit.CUSTOM,
             quantity=quantity,
             description=si.work.description,
@@ -1048,10 +1085,22 @@ def _execute_llm_v2_interpretation(
         db.flush()
         work_logs.append(work_log)
         history_entries.append(
-            _add_history(db, interpretation.project_id, state, interpretation.raw_input_text, HistoryChangeType.WORK, delta, semantic_history)
+            _add_history(
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
+                HistoryChangeType.WORK,
+                delta,
+                semantic_history,
+            )
         )
 
-    elif intent == LLMv2Intent.FINANCIAL and action == LLMv2Action.DEBT_CREATED and state is not None:
+    elif (
+        intent == LLMv2Intent.FINANCIAL
+        and action == LLMv2Action.DEBT_CREATED
+        and state is not None
+    ):
         amount = si.financial.amount
         if amount is None:
             amount = interpretation.extracted_amount
@@ -1071,9 +1120,17 @@ def _execute_llm_v2_interpretation(
             invoices.append(invoice)
         history_entries.append(
             _add_history(
-                db, interpretation.project_id, state, interpretation.raw_input_text,
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
                 HistoryChangeType.INVOICE,
-                _history_delta(intent=intent.value, action=action.value, amount=str(amount) if amount else None, balance=str(state.financial_balance) if state else None),
+                _history_delta(
+                    intent=intent.value,
+                    action=action.value,
+                    amount=str(amount) if amount else None,
+                    balance=str(state.financial_balance) if state else None,
+                ),
                 semantic_history,
             )
         )
@@ -1128,13 +1185,21 @@ def _execute_llm_v2_interpretation(
             payments.append(payment)
         history_entries.append(
             _add_history(
-                db, interpretation.project_id, state, interpretation.raw_input_text,
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
                 HistoryChangeType.PAYMENT,
                 _history_delta(
-                    intent=intent.value, action=action.value,
+                    intent=intent.value,
+                    action=action.value,
                     amount=str(amount) if amount else None,
                     balance=str(state.financial_balance) if state else None,
-                    payment_method=si.financial.payment_method.value if si.financial.payment_method else None,
+                    payment_method=(
+                        si.financial.payment_method.value
+                        if si.financial.payment_method
+                        else None
+                    ),
                     financial_direction=fd_val,
                 ),
                 semantic_history,
@@ -1332,7 +1397,12 @@ def _execute_legacy_interpretation(
 
     role = _pending_role(interpretation, pending_worker)
     if pending_worker is not None:
-        state = _find_or_create_worker_state(db, interpretation.project_id, pending_worker.name, role)
+        state = _find_or_create_worker_state(
+            db,
+            interpretation.project_id,
+            pending_worker.name,
+            role,
+        )
         if state.worker_id != pending_worker.id:
             state.worker_id = pending_worker.id
             state.role = role
@@ -1348,7 +1418,11 @@ def _execute_legacy_interpretation(
         quantity = interpretation.extracted_quantity or Decimal("1")
         if state.role == WorkerStateRole.DAILY:
             state.total_days_worked += quantity
-            delta = _history_delta(canonical_event_type=event_type, semantic_action=action, days=quantity)
+            delta = _history_delta(
+                canonical_event_type=event_type,
+                semantic_action=action,
+                days=quantity,
+            )
         else:
             state.total_quantity += quantity
             state.unit = state.unit or _unit_from_text(interpretation.raw_input_text, state.role)
@@ -1380,7 +1454,10 @@ def _execute_legacy_interpretation(
                 semantic_history,
             )
         )
-    elif event_type == CanonicalEventType.FINANCIAL.value and interpretation.financial_direction == FinancialDirection.DEBT:
+    elif (
+        event_type == CanonicalEventType.FINANCIAL.value
+        and interpretation.financial_direction == FinancialDirection.DEBT
+    ):
         amount = interpretation.extracted_amount
         if amount is not None:
             state.role = WorkerStateRole.VENDOR
@@ -1414,7 +1491,9 @@ def _execute_legacy_interpretation(
     elif event_type == CanonicalEventType.FINANCIAL.value:
         amount = interpretation.extracted_amount
         if amount is not None:
-            payment_type = PaymentType(interpretation.payment_method or PaymentType.BANK_TRANSFER.value)
+            payment_type = PaymentType(
+                interpretation.payment_method or PaymentType.BANK_TRANSFER.value
+            )
             direction = interpretation.financial_direction or FinancialDirection.OUTGOING
             if direction == FinancialDirection.INCOMING:
                 state.role = WorkerStateRole.CLIENT
@@ -1527,7 +1606,11 @@ def _pending_role(
 
 def _has_entity_field_updates(entities: list[dict]) -> bool:
     for entity in entities:
-        updates = entity.get("field_updates") if isinstance(entity.get("field_updates"), dict) else entity
+        updates = (
+            entity.get("field_updates")
+            if isinstance(entity.get("field_updates"), dict)
+            else entity
+        )
         if any(updates.get(key) for key in ["phone", "account_number", "role_detail"]):
             return True
     return False
@@ -1764,7 +1847,9 @@ def _parse_money_decimal(value: Any) -> Decimal | None:
 
 
 def _worker_read(worker: Worker) -> WorkerRead:
-    return WorkerRead.model_validate(worker).model_copy(update={"type": _display_worker_type(worker)})
+    return WorkerRead.model_validate(worker).model_copy(
+        update={"type": _display_worker_type(worker)}
+    )
 
 
 def _worker_state_read(state: WorkerState, worker: Worker | None = None) -> WorkerStateRead:
@@ -1982,77 +2067,7 @@ def list_payments(project_id: int, db: DbSession) -> list[Payment]:
 @router.get("/projects/{project_id}/operating-summary")
 def get_operating_summary(project_id: int, db: DbSession) -> dict[str, Any]:
     _get_project(db, project_id)
-    total_work_amount = db.scalar(
-        select(func.coalesce(func.sum(WorkLog.total_amount), 0)).where(
-            WorkLog.project_id == project_id
-        )
-    )
-    total_invoice_amount = db.scalar(
-        select(func.coalesce(func.sum(Invoice.total_amount), 0)).where(
-            Invoice.project_id == project_id
-        )
-    )
-    total_payments = db.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.project_id == project_id)
-    )
-    total_paid_out = db.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0)).where(
-            Payment.project_id == project_id,
-            Payment.direction.in_([FinancialDirection.OUTGOING, FinancialDirection.DEFERRED]),
-        )
-    )
-    total_received = db.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0)).where(
-            Payment.project_id == project_id,
-            Payment.direction == FinancialDirection.INCOMING,
-        )
-    )
-    vendor_states = db.scalars(
-        select(WorkerState).where(
-            WorkerState.project_id == project_id,
-            WorkerState.role == WorkerStateRole.VENDOR,
-        )
-    )
-    vendor_debts = []
-    for state in vendor_states:
-        vendor_invoices = list(
-            db.scalars(
-                select(Invoice).where(
-                    Invoice.project_id == project_id,
-                    Invoice.vendor_id == state.worker_id,
-                )
-            )
-        )
-        invoice_total = sum((invoice.total_amount for invoice in vendor_invoices), Decimal("0"))
-        paid_total = sum((_invoice_paid_amount(db, invoice.id) for invoice in vendor_invoices), Decimal("0"))
-        open_debt = max(invoice_total - paid_total, Decimal("0"))
-        vendor_debts.append(
-            {
-                "vendor_id": state.worker_id,
-                "vendor_name": state.name,
-                "invoice_total": str(invoice_total),
-                "paid_total": str(paid_total),
-                "debt": str(open_debt),
-            }
-        )
-    open_payables = sum((Decimal(debt["debt"]) for debt in vendor_debts), Decimal("0"))
-    project_balance = total_received - total_paid_out - open_payables
-    client_receivable = max(Decimal("0"), total_paid_out + open_payables - total_received)
-    available_balance = max(Decimal("0"), project_balance)
-
-    return {
-        "total_work_amount": str(total_work_amount),
-        "total_invoice_amount": str(total_invoice_amount),
-        "total_payments": str(total_payments),
-        "total_paid_out": str(total_paid_out),
-        "total_received": str(total_received),
-        "total_received_from_client": str(total_received),
-        "open_payables": str(open_payables),
-        "project_balance": str(project_balance),
-        "client_receivable": str(client_receivable),
-        "available_balance": str(available_balance),
-        "vendor_debts": vendor_debts,
-    }
+    return project_operating_summary(db, project_id)
 
 
 @router.post(

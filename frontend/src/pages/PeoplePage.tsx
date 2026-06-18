@@ -90,8 +90,9 @@ export function PeoplePage({ workers, workerStates, payments, workLogs, invoices
     const vendorDebt = Number(summary?.vendor_debts.find((debt) => debt.vendor_id === selected.id)?.debt ?? 0);
     const clientPaid = clientPayments.reduce((total, payment) => total + Number(payment.amount || 0), 0);
     const fundingNeed = Number(summary?.total_paid_out ?? 0) + Number(summary?.open_payables ?? 0);
-    const clientStatus = clientFinancialStatus(fundingNeed, clientPaid);
-    const availableBalance = Math.max(0, clientPaid - fundingNeed);
+    const clientReceivable = Number(summary?.client_receivable ?? Math.max(0, fundingNeed - clientPaid));
+    const availableBalance = Number(summary?.available_balance ?? Math.max(0, clientPaid - fundingNeed));
+    const clientStatus = clientFinancialStatus(fundingNeed, fundingNeed + availableBalance - clientReceivable);
 
     return (
       <div className="page-stack">
@@ -207,7 +208,9 @@ export function PeoplePage({ workers, workerStates, payments, workLogs, invoices
               const clientPaid = payments
                 .filter((payment) => payment.entity_id === worker.id && payment.direction === "INCOMING")
                 .reduce((total, payment) => total + Number(payment.amount || 0), 0);
-              const clientStatus = clientFinancialStatus(fundingNeed, clientPaid);
+              const clientReceivable = Number(summary?.client_receivable ?? Math.max(0, fundingNeed - clientPaid));
+              const availableBalance = Number(summary?.available_balance ?? Math.max(0, clientPaid - fundingNeed));
+              const clientStatus = clientFinancialStatus(fundingNeed, fundingNeed + availableBalance - clientReceivable);
               const personStatus = isClient ? clientStatus : workerFinancialStatus(balance);
               return (
                 <button className="person-card clickable-card" key={worker.id} type="button" onClick={() => onOpenPerson(worker.id)}>

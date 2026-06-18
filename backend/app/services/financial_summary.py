@@ -1,0 +1,95 @@
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.models.core import FinancialDirection, Invoice, Payment, Worker, WorkLog
+
+
+def invoice_paid_amount(db: Session, invoice_id: int) -> Decimal:
+    return db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.related_invoice_id == invoice_id
+        )
+    )
+
+
+def project_operating_summary(db: Session, project_id: int) -> dict[str, Any]:
+    total_work_amount = db.scalar(
+        select(func.coalesce(func.sum(WorkLog.total_amount), 0)).where(
+            WorkLog.project_id == project_id
+        )
+    )
+    total_invoice_amount = db.scalar(
+        select(func.coalesce(func.sum(Invoice.total_amount), 0)).where(
+            Invoice.project_id == project_id
+        )
+    )
+    total_payments = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.project_id == project_id)
+    )
+    total_paid_out = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.direction.in_([FinancialDirection.OUTGOING, FinancialDirection.DEFERRED]),
+        )
+    )
+    total_received = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.direction == FinancialDirection.INCOMING,
+        )
+    )
+
+    vendor_debts = _vendor_debts(db, project_id)
+    open_payables = sum((Decimal(debt["debt"]) for debt in vendor_debts), Decimal("0"))
+    project_balance = total_received - total_paid_out - open_payables
+    client_receivable = max(Decimal("0"), total_paid_out + open_payables - total_received)
+    available_balance = max(Decimal("0"), project_balance)
+
+    return {
+        "total_work_amount": str(total_work_amount),
+        "total_invoice_amount": str(total_invoice_amount),
+        "total_payments": str(total_payments),
+        "total_paid_out": str(total_paid_out),
+        "total_received": str(total_received),
+        "total_received_from_client": str(total_received),
+        "open_payables": str(open_payables),
+        "project_balance": str(project_balance),
+        "client_receivable": str(client_receivable),
+        "available_balance": str(available_balance),
+        "vendor_debts": vendor_debts,
+    }
+
+
+def _vendor_debts(db: Session, project_id: int) -> list[dict[str, str | int]]:
+    invoices = list(db.scalars(select(Invoice).where(Invoice.project_id == project_id)))
+    vendor_ids = {invoice.vendor_id for invoice in invoices}
+    vendors_by_id = {
+        vendor.id: vendor
+        for vendor in db.scalars(select(Worker).where(Worker.id.in_(vendor_ids)))
+    } if vendor_ids else {}
+    grouped: dict[int, dict[str, Decimal]] = {}
+    for invoice in invoices:
+        paid_amount = invoice_paid_amount(db, invoice.id)
+        entry = grouped.setdefault(
+            invoice.vendor_id,
+            {"invoice_total": Decimal("0"), "paid_total": Decimal("0"), "debt": Decimal("0")},
+        )
+        entry["invoice_total"] += invoice.total_amount
+        entry["paid_total"] += paid_amount
+        entry["debt"] += max(invoice.total_amount - paid_amount, Decimal("0"))
+
+    return [
+        {
+            "vendor_id": vendor_id,
+            "vendor_name": (
+                vendors_by_id[vendor_id].name if vendor_id in vendors_by_id else "Unknown"
+            ),
+            "invoice_total": str(values["invoice_total"]),
+            "paid_total": str(values["paid_total"]),
+            "debt": str(values["debt"]),
+        }
+        for vendor_id, values in grouped.items()
+    ]
