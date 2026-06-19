@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -388,6 +390,139 @@ def test_llm_v2_structured_interpretation_stored(client: TestClient, monkeypatch
     assert si["work"]["quantity"] == 20.0
     assert si["work"]["unit"] == "meter"
     assert si["confidence"] == 0.93
+
+
+def test_llm_v2_add_entity_with_existing_phone_update_is_coerced_to_update(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "profile phone"}).json()
+    existing = _make_worker(client, "میثم", "CLIENT", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "ADD_ENTITY",
+            "entities": [{
+                "name": "میثم",
+                "kind": "PERSON",
+                "project_role": "CLIENT",
+                "role_detail": None,
+                "field_updates": {"phone": "09123456789"},
+                "phone": "09123456789",
+            }],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.94,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "شماره تماس میثم ثبت شد",
+        }),
+    )
+
+    response = client.post(f"/projects/{project['id']}/natural-input", json={"text": "شماره تماس میثم 09123456789"})
+    assert response.status_code == 201
+    pi = response.json()["interpretations"][0]
+
+    assert pi["suggested_entity_id"] == existing["id"]
+    assert pi["semantic_action"] == "ENTITY_UPDATE"
+    assert pi["structured_interpretation"]["action"] == "UPDATE_ENTITY"
+
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert confirm.status_code == 200
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["name"] == "میثم"
+    assert workers[0]["type"] == "CLIENT"
+    assert workers[0]["phone"] == "09123456789"
+
+
+def test_llm_v2_existing_account_number_update_does_not_create_duplicate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "profile account"}).json()
+    _make_worker(client, "میثم", "CLIENT", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "ADD_ENTITY",
+            "entities": [{
+                "name": "میثم",
+                "kind": "PERSON",
+                "project_role": "CLIENT",
+                "role_detail": None,
+                "field_updates": {"account_number": "45734643565444"},
+                "account_number": "45734643565444",
+            }],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.94,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "شماره حساب میثم ثبت شد",
+        }),
+    )
+
+    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "شماره حساب میثم 45734643565444"}).json()["interpretations"][0]
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert confirm.status_code == 200
+    assert pi["structured_interpretation"]["action"] == "UPDATE_ENTITY"
+    assert len(workers) == 1
+    assert workers[0]["account_number"] == "45734643565444"
+
+
+def test_llm_v2_existing_daily_rate_update_does_not_change_role(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "profile rate"}).json()
+    _make_worker(client, "مش رحیم", "DAILY_WORKER", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "ADD_ENTITY",
+            "entities": [{
+                "name": "مش رحیم",
+                "kind": "PERSON",
+                "project_role": "DAILY_WORKER",
+                "role_detail": None,
+                "field_updates": {"daily_rate": 1200000},
+                "daily_rate": 1200000,
+            }],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.94,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "دستمزد روزانه مش رحیم ثبت شد",
+        }),
+    )
+
+    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است"}).json()["interpretations"][0]
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert confirm.status_code == 200
+    assert pi["structured_interpretation"]["action"] == "UPDATE_ENTITY"
+    assert len(workers) == 1
+    assert workers[0]["type"] == "DAILY_WORKER"
+    assert workers[0]["daily_rate"] == "1200000.00"
+
+
+def test_confirmation_modal_phone_update_copy_is_not_add_copy() -> None:
+    source = Path(__file__).resolve().parents[2] / "frontend" / "src" / "App.tsx"
+    app_source = source.read_text()
+
+    assert "شماره تماس ${entity} به ${setupEntity.phone} به‌روزرسانی می‌شود." in app_source
+    assert "به‌روزرسانی اطلاعات فرد" in app_source
 
 
 def _make_worker(client: TestClient, name: str, worker_type: str, project_id: int | None = None) -> dict:

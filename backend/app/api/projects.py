@@ -70,6 +70,7 @@ from app.services.persian_money_engine import (
     normalize_text,
     parse_persian_money,
 )
+from app.services.persian_role_extractor import PersianRoleExtractor
 from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
@@ -543,6 +544,21 @@ def _pending_entity_dict(name: str, role: str) -> dict[str, Any]:
 def _parse_setup_entities_from_text(text: str) -> list[dict[str, Any]]:
     normalized = normalize_text(text)
     if not _has_worker_setup_phrase(normalized):
+        extracted_role = PersianRoleExtractor().extract(text)
+        if extracted_role is not None:
+            return [
+                {
+                    "type": extracted_role.worker_type.value,
+                    "name": extracted_role.name,
+                    "phone": None,
+                    "account_number": None,
+                    "role_detail": (
+                        extracted_role.role_phrase
+                        if extracted_role.worker_type == WorkerType.SKILLED_WORKER
+                        else None
+                    ),
+                }
+            ]
         return []
     names_part = re.split(r"\s+به عنوان\s+|\s+در پروژه\s+", normalized, maxsplit=1)[0]
     names_part = re.sub(r"^(کارگرها|کارگرهای پروژه)\s+", "", names_part).strip()
@@ -958,7 +974,25 @@ def _execute_pending_interpretation(
         _validate_llm_v2_confirmation_safety(db, interpretation)
         return _execute_llm_v2_interpretation(db, interpretation)
 
+    _validate_legacy_confirmation_safety(db, interpretation)
     return _execute_legacy_interpretation(db, interpretation)
+
+
+def _validate_legacy_confirmation_safety(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> None:
+    if (
+        interpretation.canonical_event_type == CanonicalEventType.SETUP.value
+        and interpretation.semantic_action == "ENTITY_UPDATE"
+        and _has_entity_field_updates(interpretation.extracted_entities or [])
+        and _ensure_profile_update_resolved(db, interpretation) is None
+        and not _pending_allows_new_entity(interpretation)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Profile update requires a resolved entity",
+        )
 
 
 def _validate_llm_v2_confirmation_safety(
@@ -974,6 +1008,18 @@ def _validate_llm_v2_confirmation_safety(
     )
 
     si = LLMv2Interpretation(**interpretation.structured_interpretation)
+    if (
+        si.intent == LLMv2Intent.SETUP
+        and si.action == LLMv2Action.UPDATE_ENTITY
+        and _has_entity_field_updates(interpretation.extracted_entities or [])
+        and _ensure_profile_update_resolved(db, interpretation) is None
+        and not _pending_allows_new_entity(interpretation)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Profile update requires a resolved entity",
+        )
+
     if si.intent != LLMv2Intent.FINANCIAL:
         return
 
@@ -1079,7 +1125,17 @@ def _execute_llm_v2_interpretation(
     if intent == LLMv2Intent.SETUP and action == LLMv2Action.UPDATE_ENTITY:
         registry = EntityRegistryService(db, interpretation.project_id)
         entities = interpretation.extracted_entities or []
-        updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
+        updated = []
+        if _pending_allows_new_entity(interpretation):
+            updated = registry.apply_setup(entities)
+        if not updated:
+            updated = (
+                registry.update_entity_by_id(interpretation.suggested_entity_id, entities[0])
+                if interpretation.suggested_entity_id is not None and entities and _has_entity_field_updates(entities)
+                else []
+            )
+        if not updated:
+            updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
         if not updated:
             updated = registry.update_entity_by_partial_match(interpretation.raw_input_text)
         workers.extend(updated)
@@ -1462,7 +1518,9 @@ def _execute_legacy_interpretation(
     if event_type == CanonicalEventType.SETUP.value:
         registry = EntityRegistryService(db, interpretation.project_id)
         entities = interpretation.extracted_entities or []
-        updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
+        updated = registry.apply_setup(entities) if _pending_allows_new_entity(interpretation) else []
+        if not updated:
+            updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
         if not updated:
             updated = registry.update_entity_by_partial_match(interpretation.raw_input_text)
         workers.extend(updated)
@@ -1727,6 +1785,33 @@ def _pending_worker(db: DbSession, interpretation: PendingInterpretation) -> Wor
     return worker
 
 
+def _ensure_profile_update_resolved(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> Worker | None:
+    worker = _pending_worker(db, interpretation)
+    if worker is not None:
+        return worker
+    name = _pending_entity_name(interpretation)
+    if name is None:
+        return None
+    worker = EntityRegistryService(db, interpretation.project_id).find_by_partial_match(name)
+    if worker is None:
+        return None
+    interpretation.suggested_entity_id = worker.id
+    interpretation.matched_input_text = name if name != worker.name else None
+    entities = interpretation.extracted_entities or []
+    if entities:
+        entities[0] = {
+            **entities[0],
+            "name": worker.name,
+            "type": worker.type.value,
+            "project_role": worker.type.value,
+        }
+        interpretation.extracted_entities = entities
+    return worker
+
+
 def _pending_allows_new_entity(interpretation: PendingInterpretation) -> bool:
     entities = interpretation.extracted_entities or []
     return bool(entities and entities[0].get("create_new") is True)
@@ -1812,7 +1897,7 @@ def _has_entity_field_updates(entities: list[dict]) -> bool:
             if isinstance(entity.get("field_updates"), dict)
             else entity
         )
-        if any(updates.get(key) for key in ["phone", "account_number", "role_detail", "daily_rate", "notes"]):
+        if any(updates.get(key) for key in ["phone", "account_number", "role_detail", "daily_rate", "notes", "type", "project_role"]):
             return True
     return False
 

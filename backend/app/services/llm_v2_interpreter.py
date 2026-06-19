@@ -6,7 +6,7 @@ from typing import Any, cast
 from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3"
+OLLAMA_MODEL = "qwen3:8b"
 
 VALID_INTENTS = {"SETUP", "WORK", "FINANCIAL", "NOTE", "DOCUMENT"}
 VALID_ACTIONS = {

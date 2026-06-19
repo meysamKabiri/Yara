@@ -127,6 +127,10 @@ function needsFinancialEntityResolution(interpretation: PendingInterpretation): 
   return interpretation.canonical_event_type === "FINANCIAL_EVENT" && !interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation) && !allowsVendorAutoCreate(interpretation);
 }
 
+function needsProfileEntityResolution(interpretation: PendingInterpretation): boolean {
+  return interpretation.canonical_event_type === "SETUP_EVENT" && isEntityProfileUpdate(interpretation) && !interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation);
+}
+
 function unsafeFinancialReason(interpretation: PendingInterpretation): string | null {
   if (interpretation.canonical_event_type !== "FINANCIAL_EVENT") return null;
   if (!interpretation.suggested_entity_id && !hasExplicitCreateNew(interpretation) && !allowsVendorAutoCreate(interpretation)) return "طرف حساب باید مشخص شود.";
@@ -146,16 +150,38 @@ function roleLabelFromType(type: string | undefined): string {
   return "فرد پروژه";
 }
 
-function setupEntities(interpretation: PendingInterpretation): Array<{ name: string; type: string; roleDetail: string | null; phone: string | null; accountNumber: string | null; dailyRate: string | null }> {
+type SetupEntity = {
+  name: string;
+  type: string;
+  roleDetail: string | null;
+  phone: string | null;
+  accountNumber: string | null;
+  dailyRate: string | null;
+  notes: string | null;
+  roleUpdate: string | null;
+};
+
+function textValue(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number") return String(value);
+  return null;
+}
+
+function setupEntities(interpretation: PendingInterpretation): SetupEntity[] {
   return (interpretation.extracted_entities ?? [])
-    .map((entity) => ({
-      name: typeof entity.name === "string" ? entity.name : "",
-      type: entityTypeFromRecord(entity),
-      roleDetail: typeof entity.role_detail === "string" && entity.role_detail.trim() ? entity.role_detail.trim() : null,
-      phone: typeof entity.phone === "string" && entity.phone.trim() ? entity.phone.trim() : null,
-      accountNumber: typeof entity.account_number === "string" && entity.account_number.trim() ? entity.account_number.trim() : null,
-      dailyRate: typeof entity.daily_rate === "string" || typeof entity.daily_rate === "number" ? String(entity.daily_rate) : null,
-    }))
+    .map((entity) => {
+      const updates = typeof entity.field_updates === "object" && entity.field_updates !== null ? entity.field_updates as Record<string, unknown> : {};
+      return {
+        name: typeof entity.name === "string" ? entity.name : "",
+        type: entityTypeFromRecord(entity),
+        roleDetail: textValue(updates.role_detail ?? entity.role_detail),
+        phone: textValue(updates.phone ?? entity.phone),
+        accountNumber: textValue(updates.account_number ?? entity.account_number),
+        dailyRate: textValue(updates.daily_rate ?? entity.daily_rate),
+        notes: textValue(updates.notes ?? entity.notes),
+        roleUpdate: textValue(updates.project_role ?? updates.type),
+      };
+    })
     .filter((entity) => entity.name.trim());
 }
 
@@ -179,14 +205,21 @@ function preferredEntityType(interpretation: PendingInterpretation): string {
   return entityTypeFromRecord(firstEntity(interpretation));
 }
 
+function isEntityProfileUpdate(interpretation: PendingInterpretation): boolean {
+  const si = interpretation.structured_interpretation as Record<string, unknown> | null;
+  return interpretation.semantic_action === "ENTITY_UPDATE" || si?.action === "UPDATE_ENTITY";
+}
+
 function unresolvedEntityTitle(interpretation: PendingInterpretation): string {
   const name = entityName(interpretation);
+  if (needsProfileEntityResolution(interpretation)) return `${name} در پروژه پیدا نشد.`;
   const role = setupRoleLabel(preferredEntityType(interpretation));
   if (name === "نامشخص" || name === "طرف حساب نامشخص") return "طرف حساب در پروژه پیدا نشد.";
   return `${role} «${name}» در پروژه پیدا نشد.`;
 }
 
 function unresolvedEntityHelp(interpretation: PendingInterpretation): string {
+  if (needsProfileEntityResolution(interpretation)) return "فرد مورد نظر را انتخاب کنید یا فرد جدید بسازید.";
   const role = setupRoleLabel(preferredEntityType(interpretation));
   return `یک ${role} موجود را انتخاب کنید یا ${role} جدید ایجاد کنید.`;
 }
@@ -231,11 +264,12 @@ function actionSummary(interpretation: PendingInterpretation, workers: Worker[])
   if (interpretation.semantic_action === "CHECK_PAYMENT" || interpretation.semantic_action === "DEFERRED_PAYMENT") return "پرداخت چکی یا مدت‌دار";
   if (interpretation.canonical_event_type === "FINANCIAL_EVENT") return financialDirection(interpretation, workers) === "incoming" ? "دریافت پول برای پروژه" : "پرداخت از پروژه";
   if (interpretation.canonical_event_type === "WORK_EVENT") return "ثبت کارکرد";
-  if (interpretation.canonical_event_type === "SETUP_EVENT") return "ثبت فرد پروژه";
+  if (interpretation.canonical_event_type === "SETUP_EVENT") return isEntityProfileUpdate(interpretation) ? "به‌روزرسانی اطلاعات فرد" : "ثبت فرد پروژه";
   return "یادداشت پروژه";
 }
 
 function approvalCategory(interpretation: PendingInterpretation): string {
+  if (interpretation.canonical_event_type === "SETUP_EVENT" && isEntityProfileUpdate(interpretation)) return "به‌روزرسانی اطلاعات فرد";
   if (interpretation.canonical_event_type === "SETUP_EVENT") return "افزودن فرد به پروژه";
   return "برداشت یارا";
 }
@@ -291,6 +325,18 @@ function understoodRows(interpretation: PendingInterpretation, workers: Worker[]
     }
     const setupEntity = entities[0];
     const role = setupRoleLabel(setupEntity?.type ?? "OTHER");
+    if (isEntityProfileUpdate(interpretation)) {
+      return [
+        { label: "فرد", value: entity },
+        { label: "نقش", value: role },
+        ...(setupEntity?.phone ? [{ label: "شماره تماس جدید", value: setupEntity.phone }] : []),
+        ...(setupEntity?.accountNumber ? [{ label: "شماره حساب جدید", value: setupEntity.accountNumber }] : []),
+        ...(setupEntity?.dailyRate ? [{ label: "دستمزد روزانه جدید", value: formatMoney(setupEntity.dailyRate) ?? setupEntity.dailyRate }] : []),
+        ...(setupEntity?.notes ? [{ label: "یادداشت جدید", value: setupEntity.notes }] : []),
+        ...(setupEntity?.roleUpdate ? [{ label: "نقش جدید", value: setupRoleLabel(setupEntity.roleUpdate) }] : []),
+        ...(setupEntity?.roleDetail ? [{ label: "توضیح نقش جدید", value: setupEntity.roleDetail }] : []),
+      ];
+    }
     return [
       { label: "نقش", value: role },
       { label: "نام", value: entity },
@@ -345,6 +391,16 @@ function outcomeSummary(interpretation: PendingInterpretation, workers: Worker[]
   const amount = formatMoney(interpretation.extracted_amount);
   if (interpretation.canonical_event_type === "SETUP_EVENT") {
     const entities = setupEntities(interpretation);
+    if (isEntityProfileUpdate(interpretation)) {
+      const setupEntity = entities[0];
+      if (setupEntity?.phone) return [`شماره تماس ${entity} به ${setupEntity.phone} به‌روزرسانی می‌شود.`];
+      if (setupEntity?.accountNumber) return [`شماره حساب ${entity} به ${setupEntity.accountNumber} به‌روزرسانی می‌شود.`];
+      if (setupEntity?.dailyRate) return [`دستمزد روزانه ${entity} به ${formatMoney(setupEntity.dailyRate) ?? setupEntity.dailyRate} به‌روزرسانی می‌شود.`];
+      if (setupEntity?.notes) return [`یادداشت ${entity} به‌روزرسانی می‌شود.`];
+      if (setupEntity?.roleUpdate) return [`نقش ${entity} به ${setupRoleLabel(setupEntity.roleUpdate)} به‌روزرسانی می‌شود.`];
+      if (setupEntity?.roleDetail) return [`توضیح نقش ${entity} به‌روزرسانی می‌شود.`];
+      return [`اطلاعات ${entity} به‌روزرسانی می‌شود.`];
+    }
     if (entities.length > 1) return [`${entities.length} نفر به این پروژه اضافه می‌شوند.`];
     const setupEntity = entities[0];
     const role = setupRoleLabel(setupEntity?.type ?? "OTHER");
@@ -755,7 +811,7 @@ function App() {
                     </article>
                   );
                 }
-                if (candidates.length <= 1 && (isUnknownEntity(interpretation) || needsFinancialEntityResolution(interpretation))) {
+                if (candidates.length <= 1 && (isUnknownEntity(interpretation) || needsFinancialEntityResolution(interpretation) || needsProfileEntityResolution(interpretation))) {
                   const form = unknownEntityForms[interpretation.id] ?? { workerId: "", name: entityName(interpretation) === "نامشخص" ? "" : entityName(interpretation), type: preferredEntityType(interpretation) };
                   const canContinue = Boolean(form.workerId || form.name.trim());
                   return (

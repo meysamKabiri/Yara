@@ -1854,6 +1854,57 @@ def test_profile_update_account_number_via_natural_input(client: TestClient) -> 
     assert response["work_logs"] == []
 
 
+def test_profile_update_partial_name_updates_existing_client_without_duplicate(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    submit_and_confirm(client, project["id"], "میثم کبیری کارفرمای پروژه است")
+
+    phone_interpretation = create_interpretation(client, project["id"], "شماره تماس میثم 09123456789")
+    assert phone_interpretation["semantic_action"] == "ENTITY_UPDATE"
+    assert phone_interpretation["suggested_entity_id"] is not None
+    phone_response = confirm_interpretation(client, phone_interpretation)
+
+    assert phone_response["workers"][0]["name"] == "میثم کبیری"
+    assert phone_response["workers"][0]["type"] == "CLIENT"
+    assert phone_response["workers"][0]["phone"] == "09123456789"
+
+    account_interpretation = create_interpretation(client, project["id"], "شماره حساب میثم 6037991234567890")
+    assert account_interpretation["suggested_entity_id"] == phone_interpretation["suggested_entity_id"]
+    account_response = confirm_interpretation(client, account_interpretation)
+
+    assert account_response["workers"][0]["name"] == "میثم کبیری"
+    assert account_response["workers"][0]["type"] == "CLIENT"
+    assert account_response["workers"][0]["account_number"] == "6037991234567890"
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["name"] == "میثم کبیری"
+    assert workers[0]["type"] == "CLIENT"
+    assert workers[0]["phone"] == "09123456789"
+    assert workers[0]["account_number"] == "6037991234567890"
+    assert not any(worker["name"] == "میثم" and worker["type"] == "DAILY_WORKER" for worker in workers)
+
+
+def test_profile_update_ambiguous_partial_name_requires_clarification(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    first = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    second = create_worker(client, project["id"], "میثم رضایی", "DAILY_WORKER")
+
+    interpretation = create_interpretation(client, project["id"], "شماره تماس میثم 09123456789")
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm")
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert interpretation["semantic_action"] == "ENTITY_UPDATE"
+    assert interpretation["suggested_entity_id"] is None
+    assert response.status_code == 409
+    assert {worker["id"] for worker in workers} == {first["id"], second["id"]}
+    assert all(worker["phone"] is None for worker in workers)
+    assert not any(worker["name"] == "میثم" for worker in workers)
+
+
 def test_daily_worker_rate_work_accrual_and_payment_reduction(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

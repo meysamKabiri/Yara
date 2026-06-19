@@ -214,8 +214,6 @@ def _build_llm_v2_interpretations(
         LLMv2PaymentMethod,
     )
 
-    intent_str = interpretation.intent.value
-    action_str = interpretation.action.value
     _repair_llm_v2_setup_role_from_text(interpretation, raw_text)
 
     entities_json = []
@@ -244,6 +242,10 @@ def _build_llm_v2_interpretations(
             resolved = entity_resolutions.get(i)
             if resolved is not None:
                 suggested_entity_id = resolved.id
+
+    _coerce_llm_v2_profile_update_action(interpretation, suggested_entity_id)
+    intent_str = interpretation.intent.value
+    action_str = interpretation.action.value
 
     financial_direction = _llm_v2_financial_direction(interpretation.financial.direction, interpretation.action, raw_text)
     canonical_type = _llm_v2_intent_to_canonical(intent_str)
@@ -321,11 +323,12 @@ def _build_profile_update_interpretation(
     if not updates:
         return None
 
-    entity = _best_profile_update_entity(normalized, entity_context)
+    raw_name = _profile_update_name(raw_text, normalized, updates)
+    entity = _best_profile_update_entity(raw_name, entity_context) if raw_name else None
     name = entity.name if entity is not None else _profile_update_name(raw_text, normalized, updates)
     if not name:
         return None
-    entity_type = entity.type.value if entity is not None else "DAILY_WORKER"
+    entity_type = entity.type.value if entity is not None else "OTHER"
     extracted_entity = {
         "name": name,
         "type": entity_type,
@@ -353,13 +356,57 @@ def _build_profile_update_interpretation(
     )
 
 
+def _coerce_llm_v2_profile_update_action(interpretation: Any, suggested_entity_id: int | None) -> None:
+    from app.schemas.llm_v2 import LLMv2Action, LLMv2Intent
+
+    if (
+        interpretation.intent != LLMv2Intent.SETUP
+        or interpretation.action != LLMv2Action.ADD_ENTITY
+        or suggested_entity_id is None
+    ):
+        return
+
+    for entity in interpretation.entities:
+        field_updates = entity.field_updates if isinstance(entity.field_updates, dict) else {}
+        if field_updates or any(
+            getattr(entity, key, None) is not None
+            for key in ["phone", "account_number", "daily_rate", "notes", "role_detail"]
+        ):
+            interpretation.action = LLMv2Action.UPDATE_ENTITY
+            return
+
+
 def _best_profile_update_entity(normalized: str, entity_context: list[Worker]) -> Worker | None:
-    matches = [worker for worker in entity_context if normalize_text(worker.name) in normalized]
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
-        return max(matches, key=lambda worker: len(worker.name))
+    normalized_name = _normalize_profile_match_text(normalized)
+    compact_name = _compact_profile_match_text(normalized)
+    if not normalized_name:
+        return None
+    buckets: list[list[Worker]] = [
+        [worker for worker in entity_context if _normalize_profile_match_text(worker.name) == normalized_name],
+        [worker for worker in entity_context if _compact_profile_match_text(worker.name) == compact_name],
+        [worker for worker in entity_context if _normalize_profile_match_text(worker.name).startswith(normalized_name)],
+        [worker for worker in entity_context if _compact_profile_match_text(worker.name).startswith(compact_name)],
+        [worker for worker in entity_context if normalized_name in _normalize_profile_match_text(worker.name).split()],
+        [worker for worker in entity_context if normalized_name in _normalize_profile_match_text(worker.name)],
+    ]
+    for matches in buckets:
+        unique = {worker.id: worker for worker in matches}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        if len(unique) > 1:
+            return None
     return None
+
+
+def _normalize_profile_match_text(value: str) -> str:
+    normalized = normalize_text(value).replace("\u200c", " ").strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"^(مش|آقای|اقای|خانم)\s+", "", normalized)
+    return normalized
+
+
+def _compact_profile_match_text(value: str) -> str:
+    return _normalize_profile_match_text(value).replace(" ", "")
 
 
 def _profile_update_name(raw_text: str, normalized: str, updates: dict[str, str | int]) -> str | None:
