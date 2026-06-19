@@ -48,7 +48,7 @@ export type EventUpdate = Pick<
   "type" | "counterparty_name" | "counterparty_type" | "amount" | "description" | "event_date"
 >;
 
-export type WorkerType = "DAILY_WORKER" | "SKILLED_WORKER" | "VENDOR" | "CLIENT";
+export type WorkerType = "DAILY_WORKER" | "SKILLED_WORKER" | "VENDOR" | "CLIENT" | "OTHER";
 export type WorkUnit = "meter" | "day" | "item" | "project" | "custom";
 export type PaymentType = "CASH" | "BANK_TRANSFER" | "CHECK" | "OTHER";
 export type FinancialDirection = "INCOMING" | "OUTGOING" | "DEBT" | "DEFERRED";
@@ -61,6 +61,8 @@ export type Worker = {
   role_detail: string | null;
   phone: string | null;
   account_number: string | null;
+  daily_rate: string | null;
+  notes: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -118,6 +120,11 @@ export type OperatingSummary = {
     vendor_name: string;
     invoice_total: string;
     paid_total: string;
+    debt: string;
+  }>;
+  worker_payables?: Array<{
+    worker_id: number;
+    worker_name: string;
     debt: string;
   }>;
 };
@@ -240,8 +247,10 @@ export const api = {
   listWorkers: (projectId: number) => request<Worker[]>(`/projects/${projectId}/workers`),
   listWorkerStates: (projectId: number) => request<WorkerState[]>(`/projects/${projectId}/worker-states`),
   listHistory: (projectId: number) => request<HistoryEntry[]>(`/projects/${projectId}/history`),
-  createWorker: (projectId: number, payload: Pick<Worker, "name" | "type"> & Partial<Pick<Worker, "role_detail" | "phone" | "account_number">>) =>
+  createWorker: (projectId: number, payload: Pick<Worker, "name" | "type"> & Partial<Pick<Worker, "role_detail" | "phone" | "account_number" | "daily_rate" | "notes">>) =>
     request<Worker>(`/projects/${projectId}/workers`, { method: "POST", body: JSON.stringify(payload) }),
+  updateWorker: (workerId: number, payload: Partial<Pick<Worker, "name" | "type" | "role_detail" | "phone" | "account_number" | "daily_rate" | "notes">>) =>
+    request<Worker>(`/workers/${workerId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   listWorkLogs: (projectId: number) => request<WorkLog[]>(`/projects/${projectId}/work-logs`),
   createWorkLog: (projectId: number, payload: { worker_id: number; task_name: string; unit: WorkUnit; quantity: string; rate_per_unit?: string | null; description?: string | null }) =>
     request<WorkLog>(`/projects/${projectId}/work-logs`, { method: "POST", body: JSON.stringify(payload) }),

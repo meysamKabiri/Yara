@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select
@@ -25,6 +26,8 @@ class EntityRegistryService:
             self._update_if_present(worker, "phone", entity.get("phone"))
             self._update_if_present(worker, "account_number", entity.get("account_number"))
             self._update_if_present(worker, "role_detail", entity.get("role_detail"))
+            self._update_decimal_if_present(worker, "daily_rate", entity.get("daily_rate"))
+            self._update_if_present(worker, "notes", entity.get("notes"))
             updated_entities.append(worker)
 
         return updated_entities
@@ -67,6 +70,8 @@ class EntityRegistryService:
             self._update_if_present(worker, "phone", updates.get("phone"))
             self._update_if_present(worker, "account_number", updates.get("account_number"))
             self._update_if_present(worker, "role_detail", updates.get("role_detail"))
+            self._update_decimal_if_present(worker, "daily_rate", updates.get("daily_rate"))
+            self._update_if_present(worker, "notes", updates.get("notes"))
             updated_entities.append(worker)
         return updated_entities
 
@@ -134,11 +139,21 @@ class EntityRegistryService:
             return WorkerType.VENDOR
         if value in {"SKILLED", "SKILLED_WORKER"}:
             return WorkerType.SKILLED_WORKER
+        if value == "OTHER":
+            return WorkerType.OTHER
         return WorkerType.DAILY_WORKER
 
     def _update_if_present(self, worker: Worker, field: str, value: Any) -> None:
         if isinstance(value, str) and value.strip():
             setattr(worker, field, value.strip())
+
+    def _update_decimal_if_present(self, worker: Worker, field: str, value: Any) -> None:
+        if value is None or value == "":
+            return
+        try:
+            setattr(worker, field, Decimal(str(value)))
+        except (InvalidOperation, ValueError):
+            return
 
     def _normalize_name(self, value: str) -> str:
         normalized = value.replace("\u200c", " ").strip()

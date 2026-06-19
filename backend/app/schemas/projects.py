@@ -104,6 +104,18 @@ class WorkerCreate(BaseModel):
     role_detail: str | None = None
     phone: str | None = None
     account_number: str | None = None
+    daily_rate: Decimal | None = None
+    notes: str | None = None
+
+
+class WorkerUpdate(BaseModel):
+    name: str | None = None
+    type: WorkerType | None = None
+    role_detail: str | None = None
+    phone: str | None = None
+    account_number: str | None = None
+    daily_rate: Decimal | None = None
+    notes: str | None = None
 
 
 class WorkerRead(WorkerCreate):

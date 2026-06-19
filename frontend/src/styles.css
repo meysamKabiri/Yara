@@ -5,7 +5,16 @@
 :root {
   color: #16212b;
   background: #f7f8f6;
-  font-family: Vazirmatn, IRANSans, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family:
+    Vazirmatn,
+    IRANSans,
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
 }
 
 body {
@@ -345,7 +354,10 @@ textarea {
   gap: 0.9rem;
   min-height: 0;
   padding: 1rem;
-  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease,
+    background 160ms ease;
 }
 
 .project-overview-card:hover {
@@ -454,6 +466,59 @@ textarea {
   width: 100%;
 }
 
+.project-workspace {
+  gap: 0.85rem;
+}
+
+.project-workspace .ai-work-card {
+  border-color: #dbe8e1;
+  box-shadow: 0 16px 48px rgb(47 143 91 / 0.09);
+  max-width: 100%;
+  padding: 1.25rem;
+}
+
+.project-workspace .chat-composer {
+  background: #ffffff;
+  border-color: #cfded6;
+}
+
+.project-summary-grid {
+  gap: 0.6rem;
+}
+
+.project-summary-grid .metric-card {
+  border-radius: 16px;
+  gap: 0.2rem;
+  min-height: 96px;
+  padding: 0.75rem;
+}
+
+.project-summary-grid .metric-card > svg {
+  height: 18px;
+  width: 18px;
+}
+
+.project-summary-grid .metric-card strong {
+  font-size: clamp(1rem, 1.4vw, 1.28rem);
+}
+
+.project-summary-grid .metric-card small {
+  font-size: 0.72rem;
+}
+
+.success-feedback {
+  align-items: center;
+  background: #edf8f1;
+  border: 1px solid #cce9d6;
+  border-radius: 14px;
+  color: #24643e;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 0.45rem;
+  justify-self: start;
+  padding: 0.55rem 0.8rem;
+}
+
 .compact-title {
   margin-bottom: 0;
 }
@@ -516,8 +581,9 @@ textarea {
 .timeline-card {
   border-inline-start: 3px solid #dbe2df;
   display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 0.25rem;
-  padding: 0.35rem 0.9rem 0.35rem 0;
+  padding: 0.55rem 0.75rem;
 }
 
 .timeline-card span {
@@ -525,8 +591,66 @@ textarea {
   font-size: 0.82rem;
 }
 
+.timeline-card strong,
+.timeline-card small {
+  display: block;
+}
+
+.timeline-card small {
+  color: #65727d;
+  margin-top: 0.1rem;
+}
+
 .timeline-card p {
-  margin: 0;
+  margin: 0.35rem 0 0;
+}
+
+.timeline-icon {
+  align-items: center;
+  background: #f1f6f3;
+  border: 1px solid #dce8e2;
+  border-radius: 999px;
+  color: #47655a;
+  display: inline-flex;
+  height: 32px;
+  justify-content: center;
+  width: 32px;
+}
+
+.timeline-card.setup {
+  border-inline-start-color: #4b7fbd;
+}
+.timeline-card.purchase {
+  border-inline-start-color: #2f8f5b;
+}
+.timeline-card.debt {
+  border-inline-start-color: #d7a528;
+}
+.timeline-card.client-payment {
+  border-inline-start-color: #2f8f5b;
+}
+.timeline-card.worker-payment {
+  border-inline-start-color: #c74343;
+}
+.timeline-card.work {
+  border-inline-start-color: #7b6fc9;
+}
+
+.timeline-card.setup .timeline-icon {
+  color: #315f9d;
+}
+.timeline-card.purchase .timeline-icon,
+.timeline-card.client-payment .timeline-icon {
+  color: #2f8f5b;
+}
+.timeline-card.debt .timeline-icon {
+  color: #9a6d0a;
+}
+.timeline-card.worker-payment .timeline-icon {
+  color: #c74343;
+}
+.timeline-card.work .timeline-icon {
+  color: #6759b7;
 }
 
 .supporting-records {
@@ -707,6 +831,7 @@ mark {
 .project-pill {
   background: #fff1c7;
   color: #85620f;
+  white-space: nowrap;
 }
 
 .detail-list,

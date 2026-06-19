@@ -1,7 +1,7 @@
 import json
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, cast
 
 from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 
@@ -52,11 +52,12 @@ class LLMv2Interpreter:
     def _coerce(self, value: dict[str, Any]) -> dict[str, Any]:
         intent = value.get("intent")
         action = value.get("action")
-        financial: dict[str, Any] = (
-            value.get("financial") if isinstance(value.get("financial"), dict) else {}
-        )
-        work: dict[str, Any] = value.get("work") if isinstance(value.get("work"), dict) else {}
-        note: dict[str, Any] = value.get("note") if isinstance(value.get("note"), dict) else {}
+        raw_financial = value.get("financial")
+        raw_work = value.get("work")
+        raw_note = value.get("note")
+        financial = cast("dict[str, Any]", raw_financial) if isinstance(raw_financial, dict) else {}
+        work = cast("dict[str, Any]", raw_work) if isinstance(raw_work, dict) else {}
+        note = cast("dict[str, Any]", raw_note) if isinstance(raw_note, dict) else {}
         direction = financial.get("direction")
         unit = work.get("unit")
         due_date_text = financial.get("due_date_text")
@@ -114,10 +115,10 @@ class LLMv2Interpreter:
             return "PAYMENT_OUT"
         return "NOTE"
 
-    def _entities(self, value: Any) -> list[dict[str, str | None]]:
+    def _entities(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
-        entities: list[dict[str, str | None]] = []
+        entities: list[dict[str, Any]] = []
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -127,6 +128,11 @@ class LLMv2Interpreter:
             kind = item.get("kind")
             project_role = item.get("project_role")
             role_detail = item.get("role_detail")
+            phone = item.get("phone")
+            account_number = item.get("account_number")
+            daily_rate = item.get("daily_rate")
+            notes = item.get("notes")
+            field_updates = item.get("field_updates")
             entities.append(
                 {
                     "name": name.strip(),
@@ -139,6 +145,23 @@ class LLMv2Interpreter:
                         if isinstance(role_detail, str) and role_detail.strip()
                         else None
                     ),
+                    "phone": (
+                        str(phone).strip()
+                        if isinstance(phone, str) and phone.strip()
+                        else None
+                    ),
+                    "account_number": (
+                        str(account_number).strip()
+                        if isinstance(account_number, str) and account_number.strip()
+                        else None
+                    ),
+                    "daily_rate": self._number_or_none(daily_rate),
+                    "notes": (
+                        str(notes).strip()
+                        if isinstance(notes, str) and notes.strip()
+                        else None
+                    ),
+                    "field_updates": field_updates if isinstance(field_updates, dict) else None,
                 }
             )
         return entities

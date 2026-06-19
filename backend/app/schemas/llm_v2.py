@@ -64,6 +64,11 @@ class LLMv2Entity(BaseModel):
     kind: LLMv2EntityKind = LLMv2EntityKind.UNKNOWN
     project_role: LLMv2ProjectRole = LLMv2ProjectRole.OTHER
     role_detail: str | None = None
+    phone: str | None = None
+    account_number: str | None = None
+    daily_rate: Decimal | None = None
+    notes: str | None = None
+    field_updates: dict | None = None
 
     @field_validator("name")
     @classmethod

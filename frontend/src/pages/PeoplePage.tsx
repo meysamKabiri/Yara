@@ -10,8 +10,9 @@ import {
   Users,
   Wallet,
 } from "lucide-react";
+import { FormEvent, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Invoice, OperatingSummary, Payment, Worker, WorkerState, WorkLog } from "../api";
+import { Invoice, OperatingSummary, Payment, Worker, WorkerState, WorkLog, WorkerType } from "../api";
 
 type PeoplePageProps = {
   workers: Worker[];
@@ -23,6 +24,7 @@ type PeoplePageProps = {
   selectedPersonId: number | null;
   onOpenPerson: (personId: number) => void;
   onBackToPeople: () => void;
+  onUpdateWorker: (workerId: number, payload: Partial<Pick<Worker, "name" | "type" | "role_detail" | "phone" | "account_number" | "daily_rate" | "notes">>) => Promise<void>;
 };
 
 type PersonKind = Worker["type"] | "OTHER";
@@ -129,8 +131,48 @@ export function PeoplePage({
   selectedPersonId,
   onOpenPerson,
   onBackToPeople,
+  onUpdateWorker,
 }: PeoplePageProps) {
   const selected = selectedPersonId ? workers.find((worker) => worker.id === selectedPersonId) : null;
+  const [isEditing, setIsEditing] = useState(false);
+  const [profileForm, setProfileForm] = useState({
+    name: "",
+    type: "DAILY_WORKER" as WorkerType,
+    role_detail: "",
+    phone: "",
+    account_number: "",
+    daily_rate: "",
+    notes: "",
+  });
+
+  useEffect(() => {
+    if (!selected) return;
+    setProfileForm({
+      name: selected.name,
+      type: selected.type,
+      role_detail: selected.role_detail ?? "",
+      phone: selected.phone ?? "",
+      account_number: selected.account_number ?? "",
+      daily_rate: selected.daily_rate ?? "",
+      notes: selected.notes ?? "",
+    });
+    setIsEditing(false);
+  }, [selected?.id]);
+
+  async function saveProfile(event: FormEvent) {
+    event.preventDefault();
+    if (!selected) return;
+    await onUpdateWorker(selected.id, {
+      name: profileForm.name,
+      type: profileForm.type,
+      role_detail: profileForm.role_detail || null,
+      phone: profileForm.phone || null,
+      account_number: profileForm.account_number || null,
+      daily_rate: profileForm.type === "DAILY_WORKER" ? profileForm.daily_rate || null : null,
+      notes: profileForm.notes || null,
+    });
+    setIsEditing(false);
+  }
 
   if (selected) {
     const kind = personKind(selected);
@@ -158,6 +200,8 @@ export function PeoplePage({
     const receivedFromClient = paymentTotal(incomingPayments, ["INCOMING"]);
     const receivable = Number(summary?.client_receivable ?? 0);
     const available = Number(summary?.available_balance ?? 0);
+    const dailyRate = Number(selected.daily_rate ?? 0);
+    const accruedWage = kind === "DAILY_WORKER" ? Number(state?.total_days_worked ?? 0) * dailyRate : 0;
     const status = kind === "CLIENT"
       ? clientStatus(summary)
       : kind === "VENDOR"
@@ -178,7 +222,24 @@ export function PeoplePage({
             </p>
           </div>
           <mark className={status.badgeClassName}>وضعیت: {status.label}</mark>
+          <button type="button" onClick={() => setIsEditing(!isEditing)}>{isEditing ? "بستن ویرایش" : "ویرایش"}</button>
         </section>
+
+        {isEditing && (
+          <form className="panel-card profile-edit-form" onSubmit={saveProfile}>
+            <div className="section-title"><div><span className="eyebrow">ویرایش پروفایل</span><h2>اطلاعات فرد</h2></div></div>
+            <div className="edit-grid">
+              <label>نام<input value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label>
+              <label>نقش<select value={profileForm.type} onChange={(event) => setProfileForm({ ...profileForm, type: event.target.value as WorkerType })}><option value="CLIENT">کارفرما</option><option value="DAILY_WORKER">کارگر ساده</option><option value="SKILLED_WORKER">استادکار</option><option value="VENDOR">فروشنده</option><option value="OTHER">سایر</option></select></label>
+              {(profileForm.type === "SKILLED_WORKER" || profileForm.type === "OTHER") && <label>تخصص / توضیح نقش<input value={profileForm.role_detail} onChange={(event) => setProfileForm({ ...profileForm, role_detail: event.target.value })} /></label>}
+              <label>شماره موبایل<input value={profileForm.phone} onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })} /></label>
+              <label>شماره حساب<input value={profileForm.account_number} onChange={(event) => setProfileForm({ ...profileForm, account_number: event.target.value })} /></label>
+              {profileForm.type === "DAILY_WORKER" && <label>دستمزد روزانه<input inputMode="decimal" value={profileForm.daily_rate} onChange={(event) => setProfileForm({ ...profileForm, daily_rate: event.target.value })} /></label>}
+              <label>یادداشت<textarea value={profileForm.notes} onChange={(event) => setProfileForm({ ...profileForm, notes: event.target.value })} /></label>
+            </div>
+            <div className="modal-actions"><button className="primary-action" type="submit">ذخیره</button></div>
+          </form>
+        )}
 
         {kind === "CLIENT" && (
           <>
@@ -201,12 +262,14 @@ export function PeoplePage({
           <>
             <section className="summary-grid">
               <article className="metric-card pending"><Clock aria-hidden="true" /><span>تعداد روز کارکرد</span><strong>{state?.total_days_worked ?? "۰"}</strong><small>حضور روزمزد</small></article>
+              <article className="metric-card"><Wallet aria-hidden="true" /><span>دستمزد روزانه</span><strong>{selected.daily_rate ? money(selected.daily_rate) : "ثبت نشده"}</strong><small>{selected.daily_rate ? "مبنای محاسبه" : "دستمزد روزانه ثبت نشده"}</small></article>
+              <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>دستمزد محاسبه‌شده</span><strong>{money(accruedWage)}</strong><small>روز × دستمزد</small></article>
               <article className="metric-card negative"><Wallet aria-hidden="true" /><span>مجموع پرداختی</span><strong>{money(paidOut)}</strong><small>{outgoingPayments.length} پرداخت</small></article>
-              <article className="metric-card"><CreditCard aria-hidden="true" /><span>مانده حساب</span><strong>{money(balance)}</strong><small>وضعیت حساب کارگر</small></article>
+              <article className="metric-card"><CreditCard aria-hidden="true" /><span>مانده طلب کارگر</span><strong>{money(balance)}</strong><small>وضعیت حساب کارگر</small></article>
             </section>
             <section className="content-grid two-column">
-              <article className="panel-card"><div className="section-title"><div><span className="eyebrow">پروفایل</span><h2>اطلاعات کارگر</h2></div></div><DetailList><DetailItem label="نام" value={selected.name} /><DetailItem label="نقش" value="کارگر ساده / روزمزد" /><DetailItem label="تلفن" value={selected.phone || "ثبت نشده"} /><DetailItem label="شماره حساب" value={selected.account_number || "ثبت نشده"} /></DetailList></article>
-              <article className="panel-card"><div className="section-title"><div><span className="eyebrow">کار</span><h2>کارکرد</h2></div></div><DetailList><DetailItem label="تعداد روز کارکرد" value={state?.total_days_worked ?? "۰"} /><DetailItem label="مانده حساب" value={money(balance)} /></DetailList></article>
+              <article className="panel-card"><div className="section-title"><div><span className="eyebrow">پروفایل</span><h2>اطلاعات کارگر</h2></div></div><DetailList><DetailItem label="نام" value={selected.name} /><DetailItem label="نقش" value="کارگر ساده / روزمزد" /><DetailItem label="تلفن" value={selected.phone || "ثبت نشده"} /><DetailItem label="شماره حساب" value={selected.account_number || "ثبت نشده"} /><DetailItem label="یادداشت" value={selected.notes || "ثبت نشده"} /></DetailList></article>
+              <article className="panel-card"><div className="section-title"><div><span className="eyebrow">کار</span><h2>کارکرد</h2></div></div><DetailList><DetailItem label="تعداد روز کارکرد" value={state?.total_days_worked ?? "۰"} /><DetailItem label="دستمزد روزانه" value={selected.daily_rate ? money(selected.daily_rate) : "دستمزد روزانه ثبت نشده"} /><DetailItem label="دستمزد محاسبه‌شده" value={money(accruedWage)} /><DetailItem label="مانده طلب کارگر" value={money(balance)} /></DetailList></article>
               <article className="panel-card"><div className="section-title"><div><span className="eyebrow">پرداخت</span><h2>پرداخت‌ها</h2></div></div><PaymentList payments={outgoingPayments} /></article>
               <article className="panel-card"><div className="section-title"><div><span className="eyebrow">ارتباط</span><h2>پروژه‌های مرتبط</h2></div></div><DetailList><DetailItem label="پروژه" value="پروژه فعال فعلی" /></DetailList></article>
             </section>

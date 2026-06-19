@@ -47,6 +47,7 @@ class WorkerType(StrEnum):
     SKILLED_WORKER = "SKILLED_WORKER"
     VENDOR = "VENDOR"
     CLIENT = "CLIENT"
+    OTHER = "OTHER"
 
 
 class WorkUnit(StrEnum):
@@ -187,6 +188,8 @@ class Worker(TimestampMixin, Base):
     role_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     account_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    daily_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="workers")
     work_logs: Mapped[list["WorkLog"]] = relationship(back_populates="worker")

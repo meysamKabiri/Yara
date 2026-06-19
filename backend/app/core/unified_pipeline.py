@@ -1,4 +1,5 @@
 import os
+import re
 from decimal import Decimal
 from time import perf_counter
 from typing import Any
@@ -108,6 +109,13 @@ def process_input(
 
     fallback_required = True
     _debug_print("llm_v2_fallback", {"reason": "LLM v2 invalid or failed"})
+
+    profile_update = _build_profile_update_interpretation(project_id, text, entity_context)
+    if profile_update is not None:
+        db.add(profile_update)
+        db.commit()
+        db.refresh(profile_update)
+        return [profile_update]
 
     legacy_start = perf_counter()
     graph = _extract_graph(text)
@@ -221,6 +229,16 @@ def _build_llm_v2_interpretations(
             "role_detail": entity.role_detail,
             "type": _llm_v2_project_role_to_worker_type(project_role_str),
         }
+        if entity.phone is not None:
+            entity_dict["phone"] = entity.phone
+        if entity.account_number is not None:
+            entity_dict["account_number"] = entity.account_number
+        if entity.daily_rate is not None:
+            entity_dict["daily_rate"] = str(entity.daily_rate)
+        if entity.notes is not None:
+            entity_dict["notes"] = entity.notes
+        if entity.field_updates is not None:
+            entity_dict["field_updates"] = entity.field_updates
         entities_json.append(entity_dict)
         if i == 0:
             resolved = entity_resolutions.get(i)
@@ -278,6 +296,79 @@ def _build_llm_v2_interpretations(
             status=PendingInterpretationStatus.PENDING,
         )
     ]
+
+
+def _build_profile_update_interpretation(
+    project_id: int,
+    raw_text: str,
+    entity_context: list[Worker],
+) -> PendingInterpretation | None:
+    normalized = normalize_text(raw_text)
+    updates: dict[str, str | int] = {}
+    phone_match = re.search(r"09\d{9,12}", normalized.replace(" ", ""))
+    if phone_match and any(term in normalized for term in ["شماره تماس", "شماره موبایل", "موبایل", "تلفن"]):
+        updates["phone"] = phone_match.group()
+    account_match = re.search(r"\d{8,26}", normalized.replace(" ", ""))
+    if account_match and any(term in normalized for term in ["شماره حساب", "شماره کارت", "حساب", "کارت", "شبا"]):
+        updates["account_number"] = account_match.group()
+    if any(term in normalized for term in ["دستمزد روزانه", "روزی", "روزانه"]):
+        amount = parse_persian_money(raw_text)
+        if amount is None:
+            number_match = re.search(r"\d{4,}", normalized.replace(" ", ""))
+            amount = int(number_match.group()) if number_match is not None else None
+        if amount is not None:
+            updates["daily_rate"] = amount
+    if not updates:
+        return None
+
+    entity = _best_profile_update_entity(normalized, entity_context)
+    name = entity.name if entity is not None else _profile_update_name(raw_text, normalized, updates)
+    if not name:
+        return None
+    entity_type = entity.type.value if entity is not None else "DAILY_WORKER"
+    extracted_entity = {
+        "name": name,
+        "type": entity_type,
+        "project_role": entity_type,
+        "field_updates": updates,
+        **updates,
+    }
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type="SETUP_EVENT",
+        semantic_action="ENTITY_UPDATE",
+        suggested_entity_id=entity.id if entity is not None else None,
+        matched_input_text=name if entity is not None else None,
+        extracted_entities=[extracted_entity],
+        extracted_amount=None,
+        extracted_quantity=None,
+        payment_method=None,
+        financial_direction=None,
+        due_date=None,
+        description=raw_text,
+        confidence=0.9,
+        structured_interpretation=None,
+        status=PendingInterpretationStatus.PENDING,
+    )
+
+
+def _best_profile_update_entity(normalized: str, entity_context: list[Worker]) -> Worker | None:
+    matches = [worker for worker in entity_context if normalize_text(worker.name) in normalized]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return max(matches, key=lambda worker: len(worker.name))
+    return None
+
+
+def _profile_update_name(raw_text: str, normalized: str, updates: dict[str, str | int]) -> str | None:
+    text = normalized
+    for value in updates.values():
+        text = text.replace(str(value), " ")
+    text = re.sub(r"شماره تماس|شماره موبایل|شماره حساب|شماره کارت|دستمزد روزانه|موبایل|تلفن|حساب|کارت|شبا|روزی|روزانه|است|می دیم|میدیم|به", " ", text)
+    name = re.sub(r"\s+", " ", text).strip()
+    return name or None
 
 
 def _repair_llm_v2_setup_role_from_text(interpretation: Any, raw_text: str) -> None:

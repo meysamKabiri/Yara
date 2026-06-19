@@ -78,6 +78,12 @@ function firstEntity(interpretation: PendingInterpretation): Record<string, unkn
   return interpretation.extracted_entities?.[0] ?? {};
 }
 
+function workUnitFromInterpretation(interpretation: PendingInterpretation): string {
+  const si = interpretation.structured_interpretation as Record<string, unknown> | null;
+  const work = si?.work as Record<string, unknown> | undefined;
+  return typeof work?.unit === "string" ? work.unit : "";
+}
+
 function entityName(interpretation: PendingInterpretation): string {
   const entity = firstEntity(interpretation);
   return typeof entity.name === "string" && entity.name.trim() ? entity.name.trim() : "نامشخص";
@@ -140,12 +146,15 @@ function roleLabelFromType(type: string | undefined): string {
   return "فرد پروژه";
 }
 
-function setupEntities(interpretation: PendingInterpretation): Array<{ name: string; type: string; roleDetail: string | null }> {
+function setupEntities(interpretation: PendingInterpretation): Array<{ name: string; type: string; roleDetail: string | null; phone: string | null; accountNumber: string | null; dailyRate: string | null }> {
   return (interpretation.extracted_entities ?? [])
     .map((entity) => ({
       name: typeof entity.name === "string" ? entity.name : "",
       type: entityTypeFromRecord(entity),
       roleDetail: typeof entity.role_detail === "string" && entity.role_detail.trim() ? entity.role_detail.trim() : null,
+      phone: typeof entity.phone === "string" && entity.phone.trim() ? entity.phone.trim() : null,
+      accountNumber: typeof entity.account_number === "string" && entity.account_number.trim() ? entity.account_number.trim() : null,
+      dailyRate: typeof entity.daily_rate === "string" || typeof entity.daily_rate === "number" ? String(entity.daily_rate) : null,
     }))
     .filter((entity) => entity.name.trim());
 }
@@ -218,7 +227,7 @@ function financialDirection(interpretation: PendingInterpretation, workers: Work
 
 function actionSummary(interpretation: PendingInterpretation, workers: Worker[]): string {
   if (interpretation.semantic_action === "PURCHASE_PAID") return "خرید پرداخت‌شده";
-  if (interpretation.semantic_action === "DEBT_CREATED" || interpretation.semantic_action === "INVOICE") return "بدهی یا خرید نسیه";
+  if (interpretation.semantic_action === "DEBT_CREATED" || interpretation.semantic_action === "INVOICE") return "خرید نسیه / بدهی فروشنده";
   if (interpretation.semantic_action === "CHECK_PAYMENT" || interpretation.semantic_action === "DEFERRED_PAYMENT") return "پرداخت چکی یا مدت‌دار";
   if (interpretation.canonical_event_type === "FINANCIAL_EVENT") return financialDirection(interpretation, workers) === "incoming" ? "دریافت پول برای پروژه" : "پرداخت از پروژه";
   if (interpretation.canonical_event_type === "WORK_EVENT") return "ثبت کارکرد";
@@ -229,6 +238,16 @@ function actionSummary(interpretation: PendingInterpretation, workers: Worker[])
 function approvalCategory(interpretation: PendingInterpretation): string {
   if (interpretation.canonical_event_type === "SETUP_EVENT") return "افزودن فرد به پروژه";
   return "برداشت یارا";
+}
+
+function counterpartyLabel(interpretation: PendingInterpretation, workers: Worker[]): string {
+  const direction = financialDirection(interpretation, workers);
+  const type = preferredEntityType(interpretation);
+  if (direction === "incoming" || type === "CLIENT") return "کارفرما";
+  if (direction === "debt" || type === "VENDOR" || interpretation.semantic_action === "PURCHASE_PAID") return "فروشنده";
+  if (type === "SKILLED_WORKER") return "استادکار";
+  if (type === "DAILY_WORKER") return "کارگر";
+  return "فرد";
 }
 
 function structuredInterpretationRows(interpretation: PendingInterpretation): Array<{ label: string; value: string }> {
@@ -296,10 +315,25 @@ function understoodRows(interpretation: PendingInterpretation, workers: Worker[]
         ...(interpretation.due_date ? [{ label: "تاریخ سررسید", value: interpretation.due_date }] : []),
       ];
     }
+    if (interpretation.semantic_action === "DEBT_CREATED" || interpretation.semantic_action === "INVOICE") {
+      return [
+        { label: "عملیات", value: "خرید نسیه / بدهی فروشنده" },
+        { label: "مبلغ", value: amount ?? "مبلغ نامشخص" },
+        { label: "فروشنده", value: entity },
+        ...(interpretation.due_date ? [{ label: "تاریخ سررسید", value: interpretation.due_date }] : []),
+      ];
+    }
+    if (financialDirection(interpretation, workers) === "incoming") {
+      return [
+        { label: "عملیات", value: "دریافت از کارفرما" },
+        { label: "مبلغ", value: amount ?? "مبلغ نامشخص" },
+        { label: "کارفرما", value: entity },
+      ];
+    }
     return [
-      { label: preferredEntityType(interpretation) === "VENDOR" ? "فروشنده" : financialDirection(interpretation, workers) === "debt" ? "فروشنده" : "فرد", value: entity },
       { label: "عملیات", value: actionSummary(interpretation, workers) },
       { label: "مبلغ", value: amount ?? "مبلغ نامشخص" },
+      { label: counterpartyLabel(interpretation, workers), value: entity },
       ...(interpretation.due_date ? [{ label: "تاریخ سررسید", value: interpretation.due_date }] : []),
     ];
   }
@@ -318,7 +352,7 @@ function outcomeSummary(interpretation: PendingInterpretation, workers: Worker[]
     return [`${entity} به عنوان ${role}${specialty} به پروژه اضافه می‌شود.`];
   }
   if (interpretation.canonical_event_type === "WORK_EVENT") return [`${interpretation.extracted_quantity ?? "۱"} واحد کار برای ${entity} ثبت می‌شود.`];
-  if (interpretation.semantic_action === "DEBT_CREATED" || interpretation.semantic_action === "INVOICE") return [`بدهی فروشنده${amount ? ` به اندازه ${amount}` : ""} افزایش پیدا می‌کند.`];
+  if (interpretation.semantic_action === "DEBT_CREATED" || interpretation.semantic_action === "INVOICE") return [`یارا ثبت می‌کند که از ${entity}${amount ? ` به مبلغ ${amount}` : ""} خرید نسیه انجام شده و بدهی فروشنده باز است.`];
   if (interpretation.semantic_action === "PURCHASE_PAID") return [`یارا ثبت می‌کند که از ${entity} به مبلغ ${amount ?? "نامشخص"} خرید انجام شده و پرداخت شده است.`];
   if (isUnresolvedVendorAutoCreate(interpretation)) return [`فروشنده «${entity}» ایجاد می‌شود و خرید${amount ? ` به مبلغ ${amount}` : ""} ثبت می‌شود.`];
   if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
@@ -355,11 +389,12 @@ function App() {
   const [pendingInterpretations, setPendingInterpretations] = useState<PendingInterpretation[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
-  const [setupEditEntities, setSetupEditEntities] = useState<Record<number, Array<{ name: string; type: string }>>>({});
+  const [setupEditEntities, setSetupEditEntities] = useState<Record<number, Array<{ name: string; type: string; roleDetail?: string | null; phone?: string | null; accountNumber?: string | null; dailyRate?: string | null }>>>({});
   const [ambiguitySelections, setAmbiguitySelections] = useState<Record<number, number>>({});
   const [unknownEntityForms, setUnknownEntityForms] = useState<Record<number, { workerId: string; name: string; type: string }>>({});
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
@@ -485,6 +520,7 @@ function App() {
     if (!activeProjectId || !naturalText.trim()) return;
     const submittedText = naturalText.trim();
     await runAction("در حال پردازش ورودی", async () => {
+      setSuccessMessage(null);
       const result = await api.processNaturalInput(activeProjectId, submittedText);
       setPendingInterpretations(result.interpretations);
       setNaturalText("");
@@ -509,6 +545,7 @@ function App() {
       semantic_action: interpretation.semantic_action,
       extracted_amount: interpretation.extracted_amount ?? "",
       extracted_quantity: interpretation.extracted_quantity ?? "",
+      unit: workUnitFromInterpretation(interpretation),
       payment_method: interpretation.payment_method ?? "",
       due_date: interpretation.due_date ?? "",
       description: interpretation.description ?? "",
@@ -517,17 +554,41 @@ function App() {
 
   async function saveEdit(interpretation: PendingInterpretation) {
     await runAction("در حال ذخیره برداشت", async () => {
+      const currentWork = (interpretation.structured_interpretation?.work ?? {}) as Record<string, unknown>;
+      const structuredInterpretation = interpretation.structured_interpretation
+        ? {
+          ...interpretation.structured_interpretation,
+          work: {
+            ...currentWork,
+            quantity: editForm.extracted_quantity || currentWork.quantity || null,
+            unit: editForm.unit || currentWork.unit || null,
+            description: editForm.description || currentWork.description || null,
+          },
+        }
+        : null;
       const updated = await api.updatePendingInterpretation(interpretation.id, {
         canonical_event_type: editForm.canonical_event_type,
         semantic_action: editForm.semantic_action,
         extracted_entities: interpretation.canonical_event_type === "SETUP_EVENT"
-          ? (setupEditEntities[interpretation.id] ?? []).filter((entity) => entity.name.trim())
+          ? (setupEditEntities[interpretation.id] ?? [])
+            .filter((entity) => entity.name.trim())
+            .map((entity) => ({
+              ...firstEntity(interpretation),
+              name: entity.name,
+              type: entity.type,
+              project_role: entity.type,
+              role_detail: entity.roleDetail || null,
+              phone: entity.phone || null,
+              account_number: entity.accountNumber || null,
+              daily_rate: entity.type === "DAILY_WORKER" ? entity.dailyRate || null : null,
+            }))
           : editForm.entity ? [{ ...firstEntity(interpretation), name: editForm.entity, type: editForm.entityType || "DAILY_WORKER" }] : [],
         extracted_amount: editForm.extracted_amount || null,
         extracted_quantity: editForm.extracted_quantity || null,
         payment_method: (editForm.payment_method || null) as PaymentType | null,
         due_date: editForm.due_date || null,
         description: editForm.description || null,
+        structured_interpretation: structuredInterpretation,
       });
       setPendingInterpretations((items) => items.map((item) => item.id === updated.id ? updated : item));
       setEditingId(null);
@@ -539,6 +600,17 @@ function App() {
     await runAction("در حال تایید", async () => {
       await api.confirmPendingInterpretation(interpretation.id);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      await loadProjectData(activeProjectId);
+      await loadProjectFinancials(projects);
+      setSuccessMessage("ثبت شد");
+      window.setTimeout(() => setSuccessMessage(null), 2600);
+    });
+  }
+
+  async function updateWorkerProfile(workerId: number, payload: Partial<Pick<Worker, "name" | "type" | "role_detail" | "phone" | "account_number" | "daily_rate" | "notes">>) {
+    if (!activeProjectId) return;
+    await runAction("در حال ذخیره پروفایل", async () => {
+      await api.updateWorker(workerId, payload);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
     });
@@ -598,11 +670,12 @@ function App() {
           onSubmit={submitNaturalInput}
           onVoicePlaceholder={() => setError("ضبط صدا در مسیر فعلی به صورت جای‌نگهدار فعال است.")}
           onAttachPlaceholder={() => setError("افزودن فایل در مسیر فعلی به صورت جای‌نگهدار فعال است.")}
+          successMessage={successMessage}
         />
       );
     }
     if (route.name === "people" || route.name === "person") {
-      return <PeoplePage workers={workers} workerStates={workerStates} payments={payments} workLogs={workLogs} invoices={invoices} summary={operatingSummary} selectedPersonId={route.name === "person" ? route.personId : null} onOpenPerson={(personId) => navigate(`/people/${personId}`)} onBackToPeople={() => navigate("/people")} />;
+      return <PeoplePage workers={workers} workerStates={workerStates} payments={payments} workLogs={workLogs} invoices={invoices} summary={operatingSummary} selectedPersonId={route.name === "person" ? route.personId : null} onOpenPerson={(personId) => navigate(`/people/${personId}`)} onBackToPeople={() => navigate("/people")} onUpdateWorker={updateWorkerProfile} />;
     }
     if (route.name === "reports") return <ReportsPage projects={projects} project={projectDetail} summary={operatingSummary} workers={workers} workerStates={workerStates} payments={payments} invoices={invoices} />;
     return (
@@ -692,7 +765,7 @@ function App() {
                       <div className="edit-grid">
                         <label>انتخاب از افراد پروژه<select value={form.workerId} onChange={(event) => setUnknownEntityForms({ ...unknownEntityForms, [interpretation.id]: { ...form, workerId: event.target.value } })}><option value="">انتخاب کنید...</option>{workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name} - {roleLabelFromType(worker.type)}</option>)}</select></label>
                         <label>نام<input value={form.name} onChange={(event) => setUnknownEntityForms({ ...unknownEntityForms, [interpretation.id]: { ...form, name: event.target.value } })} /></label>
-                        <label>نقش<select value={form.type} onChange={(event) => setUnknownEntityForms({ ...unknownEntityForms, [interpretation.id]: { ...form, type: event.target.value } })}><option value="CLIENT">کارفرما</option><option value="VENDOR">فروشنده</option><option value="DAILY_WORKER">کارگر ساده / روزمزد</option><option value="SKILLED_WORKER">استادکار</option></select></label>
+                        <label>نقش<select value={form.type} onChange={(event) => setUnknownEntityForms({ ...unknownEntityForms, [interpretation.id]: { ...form, type: event.target.value } })}><option value="CLIENT">کارفرما</option><option value="VENDOR">فروشنده</option><option value="DAILY_WORKER">کارگر ساده</option><option value="SKILLED_WORKER">استادکار</option><option value="OTHER">سایر</option></select></label>
                       </div>
                       <div className="modal-actions">
                         <button className="primary-action" type="button" onClick={() => resolveUnknownEntity(interpretation)} disabled={isLoading || !canContinue}>ادامه</button>
@@ -745,18 +818,25 @@ function App() {
                           {(setupEditEntities[interpretation.id] ?? []).map((entity, index) => (
                             <div className="setup-edit-row" key={`${interpretation.id}-${index}`}>
                               <label>نام<input value={entity.name} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} /></label>
-                              <label>نقش<select value={entity.type} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value } : item) })}><option value="DAILY_WORKER">کارگر ساده / روزمزد</option><option value="SKILLED_WORKER">استادکار</option><option value="CLIENT">کارفرما</option><option value="VENDOR">فروشنده</option></select></label>
+                              <label>نقش<select value={entity.type} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value } : item) })}><option value="CLIENT">کارفرما</option><option value="DAILY_WORKER">کارگر ساده</option><option value="SKILLED_WORKER">استادکار</option><option value="VENDOR">فروشنده</option><option value="OTHER">سایر</option></select></label>
+                              {(entity.type === "SKILLED_WORKER" || entity.type === "OTHER") && <label>تخصص / توضیح نقش<input value={entity.roleDetail ?? ""} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, roleDetail: event.target.value } : item) })} /></label>}
+                              <label>شماره موبایل<input value={entity.phone ?? ""} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, phone: event.target.value } : item) })} /></label>
+                              <label>شماره حساب<input value={entity.accountNumber ?? ""} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, accountNumber: event.target.value } : item) })} /></label>
+                              {entity.type === "DAILY_WORKER" && <label>دستمزد روزانه<input value={entity.dailyRate ?? ""} onChange={(event) => setSetupEditEntities({ ...setupEditEntities, [interpretation.id]: (setupEditEntities[interpretation.id] ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, dailyRate: event.target.value } : item) })} /></label>}
                             </div>
                           ))}
                         </div>
                       ) : (
                         <div className="edit-grid">
-                          <label>فرد<input value={editForm.entity ?? ""} onChange={(event) => setEditForm({ ...editForm, entity: event.target.value })} /></label>
-                          <label>نوع فرد<input value={editForm.entityType ?? ""} onChange={(event) => setEditForm({ ...editForm, entityType: event.target.value })} /></label>
-                          <label>عملیات<input value={editForm.semantic_action ?? ""} onChange={(event) => setEditForm({ ...editForm, semantic_action: event.target.value })} /></label>
+                          <label>فرد<select value={editForm.entity ?? ""} onChange={(event) => {
+                            const worker = workers.find((item) => item.name === event.target.value);
+                            setEditForm({ ...editForm, entity: event.target.value, entityType: worker?.type ?? editForm.entityType });
+                          }}><option value="">انتخاب کنید...</option>{workers.map((worker) => <option key={worker.id} value={worker.name}>{worker.name} - {roleLabelFromType(worker.type)}</option>)}</select></label>
+                          <label>عملیات<select value={editForm.semantic_action ?? ""} onChange={(event) => setEditForm({ ...editForm, semantic_action: event.target.value })}><option value="PAYMENT">دریافتی/پرداخت</option><option value="PURCHASE_PAID">خرید پرداخت‌شده</option><option value="DEBT_CREATED">خرید نسیه / بدهی</option><option value="CHECK_PAYMENT">پرداخت چک</option><option value="INCREMENT">ثبت کارکرد</option></select></label>
                           <label>مبلغ<input value={editForm.extracted_amount ?? ""} onChange={(event) => setEditForm({ ...editForm, extracted_amount: event.target.value })} /></label>
                           <label>مقدار<input value={editForm.extracted_quantity ?? ""} onChange={(event) => setEditForm({ ...editForm, extracted_quantity: event.target.value })} /></label>
-                          <label>روش پرداخت<input value={editForm.payment_method ?? ""} onChange={(event) => setEditForm({ ...editForm, payment_method: event.target.value })} /></label>
+                          <label>واحد<select value={editForm.unit ?? ""} onChange={(event) => setEditForm({ ...editForm, unit: event.target.value })}><option value="day">روز</option><option value="meter">متر</option><option value="item">عدد</option><option value="project">پروژه</option><option value="custom">سفارشی</option></select></label>
+                          <label>روش پرداخت<select value={editForm.payment_method ?? ""} onChange={(event) => setEditForm({ ...editForm, payment_method: event.target.value })}><option value="">انتخاب نشده</option><option value="CASH">نقدی</option><option value="BANK_TRANSFER">کارت/انتقال بانکی</option><option value="CHECK">چک</option><option value="OTHER">سایر</option></select></label>
                           <label>تاریخ سررسید<input value={editForm.due_date ?? ""} onChange={(event) => setEditForm({ ...editForm, due_date: event.target.value })} /></label>
                           <label className="wide-field">توضیح<textarea value={editForm.description ?? ""} onChange={(event) => setEditForm({ ...editForm, description: event.target.value })} /></label>
                         </div>

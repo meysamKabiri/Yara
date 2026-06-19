@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.core import FinancialDirection, Invoice, Payment, Worker, WorkLog
+from app.models.core import FinancialDirection, Invoice, Payment, Worker, WorkerState, WorkerStateRole, WorkLog
 
 
 def invoice_paid_amount(db: Session, invoice_id: int) -> Decimal:
@@ -43,7 +43,11 @@ def project_operating_summary(db: Session, project_id: int) -> dict[str, Any]:
     )
 
     vendor_debts = _vendor_debts(db, project_id)
-    open_payables = sum((Decimal(debt["debt"]) for debt in vendor_debts), Decimal("0"))
+    worker_payables = _worker_payables(db, project_id)
+    open_payables = (
+        sum((Decimal(debt["debt"]) for debt in vendor_debts), Decimal("0"))
+        + sum((Decimal(payable["debt"]) for payable in worker_payables), Decimal("0"))
+    )
     project_balance = total_received - total_paid_out - open_payables
     client_receivable = max(Decimal("0"), total_paid_out + open_payables - total_received)
     available_balance = max(Decimal("0"), project_balance)
@@ -60,7 +64,33 @@ def project_operating_summary(db: Session, project_id: int) -> dict[str, Any]:
         "client_receivable": str(client_receivable),
         "available_balance": str(available_balance),
         "vendor_debts": vendor_debts,
+        "worker_payables": worker_payables,
     }
+
+
+def _worker_payables(db: Session, project_id: int) -> list[dict[str, str | int]]:
+    states = list(
+        db.scalars(
+            select(WorkerState).where(
+                WorkerState.project_id == project_id,
+                WorkerState.role == WorkerStateRole.DAILY,
+                WorkerState.financial_balance > 0,
+            )
+        )
+    )
+    worker_ids = {state.worker_id for state in states}
+    workers_by_id = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.id.in_(worker_ids)))
+    } if worker_ids else {}
+    return [
+        {
+            "worker_id": state.worker_id,
+            "worker_name": workers_by_id[state.worker_id].name if state.worker_id in workers_by_id else state.name,
+            "debt": str(state.financial_balance),
+        }
+        for state in states
+    ]
 
 
 def _vendor_debts(db: Session, project_id: int) -> list[dict[str, str | int]]:

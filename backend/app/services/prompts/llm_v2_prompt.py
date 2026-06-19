@@ -15,7 +15,18 @@ Schema:
       "name": "string",
       "kind": "PERSON | COMPANY | UNKNOWN",
       "project_role": "CLIENT | DAILY_WORKER | SKILLED_WORKER | VENDOR | OTHER",
-      "role_detail": "free text specialty or description | null"
+      "role_detail": "free text specialty or description | null",
+      "phone": "string | null",
+      "account_number": "string | null",
+      "daily_rate": number | null,
+      "notes": "string | null",
+      "field_updates": {
+        "phone": "string | null",
+        "account_number": "string | null",
+        "daily_rate": number | null,
+        "role_detail": "string | null",
+        "notes": "string | null"
+      } | null
     }
   ],
   "financial": {
@@ -85,4 +96,6 @@ Rules:
 4. If important fields are missing, list them in missing_fields.
 5. Amount is a plain number in the source currency (تومان). "۵ میلیون" = 5000000.
 6. For purchases: if the text implies immediate payment, use PURCHASE_PAID. If it implies credit/debt, use DEBT_CREATED.
-7. Return valid JSON only."""
+7. Profile/contact/rate updates must be SETUP + UPDATE_ENTITY, not FINANCIAL or WORK. Examples: phone numbers, account/card numbers, daily worker wage/rate.
+8. For daily worker wage phrases such as "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است" or "روزی یک میلیون و دویست به مش رحیم می‌دیم", set daily_rate and field_updates.daily_rate.
+9. Return valid JSON only."""

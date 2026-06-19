@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -90,10 +92,13 @@ def create_worker(
     name: str,
     worker_type: str,
     role_detail: str | None = None,
+    daily_rate: str | None = None,
 ) -> dict:
     payload = {"name": name, "type": worker_type}
     if role_detail is not None:
         payload["role_detail"] = role_detail
+    if daily_rate is not None:
+        payload["daily_rate"] = daily_rate
     response = client.post(
         f"/projects/{project_id}/workers",
         json=payload,
@@ -1822,3 +1827,85 @@ def test_history_entry_contains_full_semantic_traceability(client, monkeypatch) 
         stored = db.scalar(select(HistoryEntry).where(HistoryEntry.id == history["id"]))
         assert stored.rule_id == "WORK_RULE_01"
         assert stored.explanation["triggered_rule"] == "WORK_RULE_01"
+
+
+def test_profile_update_phone_via_natural_input(client: TestClient) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "میثم", "CLIENT")
+
+    interpretation = create_interpretation(client, project["id"], "شماره تماس میثم 09132842675")
+    assert interpretation["semantic_action"] == "ENTITY_UPDATE"
+    response = confirm_interpretation(client, interpretation)
+
+    assert response["workers"][0]["phone"] == "09132842675"
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    assert client.get(f"/projects/{project['id']}/work-logs").json() == []
+
+
+def test_profile_update_account_number_via_natural_input(client: TestClient) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "میثم", "CLIENT")
+
+    interpretation = create_interpretation(client, project["id"], "شماره حساب میثم 45734643565444")
+    response = confirm_interpretation(client, interpretation)
+
+    assert response["workers"][0]["account_number"] == "45734643565444"
+    assert response["payments"] == []
+    assert response["work_logs"] == []
+
+
+def test_daily_worker_rate_work_accrual_and_payment_reduction(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "مش رحیم", "DAILY_WORKER")
+
+    rate_interpretation = create_interpretation(
+        client,
+        project["id"],
+        "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است",
+    )
+    rate_response = confirm_interpretation(client, rate_interpretation)
+    assert Decimal(rate_response["workers"][0]["daily_rate"]) == Decimal("1200000")
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: {
+            "intent": "WORK",
+            "action": "WORK_LOG",
+            "entities": [{"name": "مش رحیم", "kind": "PERSON", "project_role": "DAILY_WORKER", "role_detail": None}],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": 4, "unit": "day", "description": "۴ روز کارکرد"},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "۴ روز کارکرد مش رحیم",
+        },
+    )
+    work_interpretation = create_interpretation(client, project["id"], "مش رحیم ۴ روز کار کرد")
+    work_response = confirm_interpretation(client, work_interpretation)
+    assert work_response["states"][0]["total_days_worked"] == "4.00"
+    assert work_response["states"][0]["financial_balance"] == "4800000.00"
+    assert work_response["work_logs"][0]["total_amount"] == "4800000.00"
+
+    payment = client.post(
+        f"/projects/{project['id']}/payments",
+        json={
+            "entity_id": worker["id"],
+            "amount": "2000000",
+            "type": "CASH",
+            "direction": "OUTGOING",
+        },
+    )
+    assert payment.status_code == 201
+    states = client.get(f"/projects/{project['id']}/worker-states").json()
+    state = next(item for item in states if item["name"] == "مش رحیم")
+    assert state["total_days_worked"] == "4.00"
+    assert state["financial_balance"] == "2800000.00"
+
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_work_amount"] == "4800000.00"
+    assert summary["total_paid_out"] == "2000000.00"
+    assert summary["open_payables"] == "2800000.00"

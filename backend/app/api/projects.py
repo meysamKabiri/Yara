@@ -56,6 +56,7 @@ from app.schemas.projects import (
     RawEntryRead,
     WorkerCreate,
     WorkerRead,
+    WorkerUpdate,
     WorkerStateRead,
     WorkLogCreate,
     WorkLogRead,
@@ -155,6 +156,12 @@ def _work_log_total(quantity: Decimal, rate_per_unit: Decimal | None) -> Decimal
     return quantity * rate_per_unit
 
 
+def _daily_worker_wage(worker: Worker | None, quantity: Decimal) -> Decimal | None:
+    if worker is None or worker.type != WorkerType.DAILY_WORKER or worker.daily_rate is None:
+        return None
+    return Decimal(str(quantity)) * Decimal(str(worker.daily_rate))
+
+
 SKILLED_ROLE_TERMS = {
     "welder",
     "electrician",
@@ -226,6 +233,8 @@ def _role_to_worker_type(role: str | None, event_type: str | None = None) -> Wor
         return WorkerType.VENDOR
     if role in {"SKILLED", "SKILLED_WORKER"}:
         return WorkerType.SKILLED_WORKER
+    if role == "OTHER":
+        return WorkerType.OTHER
     if role == "WORKER" or event_type == "WORK_LOG":
         return WorkerType.DAILY_WORKER
     return WorkerType.DAILY_WORKER
@@ -1158,7 +1167,18 @@ def _execute_llm_v2_interpretation(
         quantity = Decimal(str(quantity))
         if state.role == WorkerStateRole.DAILY:
             state.total_days_worked += quantity
-            delta = _history_delta(intent=intent.value, action=action.value, days=str(quantity))
+            worker = db.get(Worker, state.worker_id)
+            accrued_wage = _daily_worker_wage(worker, quantity)
+            if accrued_wage is not None:
+                state.financial_balance += accrued_wage
+            delta = _history_delta(
+                intent=intent.value,
+                action=action.value,
+                days=str(quantity),
+                accrued_wage=str(accrued_wage) if accrued_wage is not None else None,
+                daily_rate=str(worker.daily_rate) if worker is not None and worker.daily_rate is not None else None,
+                balance=str(state.financial_balance),
+            )
         else:
             state.total_quantity += quantity
             state.unit = (
@@ -1182,6 +1202,12 @@ def _execute_llm_v2_interpretation(
             ),
             unit=WorkUnit.DAY if state.role == WorkerStateRole.DAILY else WorkUnit.CUSTOM,
             quantity=quantity,
+            rate_per_unit=(
+                db.get(Worker, state.worker_id).daily_rate
+                if state.role == WorkerStateRole.DAILY and db.get(Worker, state.worker_id) is not None
+                else None
+            ),
+            total_amount=_daily_worker_wage(db.get(Worker, state.worker_id), quantity),
             description=si.work.description,
         )
         db.add(work_log)
@@ -1375,9 +1401,9 @@ def _llm_v2_role_to_worker_type(project_role: Any) -> WorkerType:
         "DAILY_WORKER": WorkerType.DAILY_WORKER,
         "SKILLED_WORKER": WorkerType.SKILLED_WORKER,
         "VENDOR": WorkerType.VENDOR,
-        "OTHER": WorkerType.DAILY_WORKER,
+        "OTHER": WorkerType.OTHER,
     }
-    return mapping.get(role_val, WorkerType.DAILY_WORKER)
+    return mapping.get(role_val, WorkerType.OTHER)
 
 
 def _execute_legacy_interpretation(
@@ -1526,10 +1552,17 @@ def _execute_legacy_interpretation(
         quantity = interpretation.extracted_quantity or Decimal("1")
         if state.role == WorkerStateRole.DAILY:
             state.total_days_worked += quantity
+            worker = db.get(Worker, state.worker_id)
+            accrued_wage = _daily_worker_wage(worker, quantity)
+            if accrued_wage is not None:
+                state.financial_balance += accrued_wage
             delta = _history_delta(
                 canonical_event_type=event_type,
                 semantic_action=action,
                 days=quantity,
+                accrued_wage=accrued_wage,
+                daily_rate=worker.daily_rate if worker is not None else None,
+                balance=state.financial_balance,
             )
         else:
             state.total_quantity += quantity
@@ -1546,6 +1579,12 @@ def _execute_legacy_interpretation(
             task_name=interpretation.description or interpretation.raw_input_text,
             unit=WorkUnit.DAY if state.role == WorkerStateRole.DAILY else WorkUnit.CUSTOM,
             quantity=quantity,
+            rate_per_unit=(
+                db.get(Worker, state.worker_id).daily_rate
+                if state.role == WorkerStateRole.DAILY and db.get(Worker, state.worker_id) is not None
+                else None
+            ),
+            total_amount=_daily_worker_wage(db.get(Worker, state.worker_id), quantity),
             description=interpretation.description,
         )
         db.add(work_log)
@@ -1773,7 +1812,7 @@ def _has_entity_field_updates(entities: list[dict]) -> bool:
             if isinstance(entity.get("field_updates"), dict)
             else entity
         )
-        if any(updates.get(key) for key in ["phone", "account_number", "role_detail"]):
+        if any(updates.get(key) for key in ["phone", "account_number", "role_detail", "daily_rate", "notes"]):
             return True
     return False
 
@@ -1821,6 +1860,8 @@ def _entity_snapshot(entity: Worker) -> dict[str, Any]:
         "phone": entity.phone,
         "account_number": entity.account_number,
         "role_detail": entity.role_detail,
+        "daily_rate": str(entity.daily_rate) if entity.daily_rate is not None else None,
+        "notes": entity.notes,
     }
 
 
@@ -2032,6 +2073,28 @@ def create_worker(project_id: int, payload: WorkerCreate, db: DbSession) -> Work
     db.commit()
     db.refresh(worker)
     return worker
+
+
+@router.patch("/workers/{worker_id}", response_model=WorkerRead)
+def update_worker(worker_id: int, payload: WorkerUpdate, db: DbSession) -> WorkerRead:
+    worker = db.get(Worker, worker_id)
+    if worker is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker not found")
+    values = payload.model_dump(exclude_unset=True)
+    target_type = values.get("type") or worker.type
+    if target_type != WorkerType.DAILY_WORKER:
+        if "daily_rate" in values and values["daily_rate"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="daily_rate is only valid for daily workers",
+            )
+        if payload.type is not None:
+            values["daily_rate"] = None
+    for field, value in values.items():
+        setattr(worker, field, value)
+    db.commit()
+    db.refresh(worker)
+    return _worker_read(worker)
 
 
 @router.get("/projects/{project_id}/workers", response_model=list[WorkerRead])
