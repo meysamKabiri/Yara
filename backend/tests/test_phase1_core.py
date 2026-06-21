@@ -11,8 +11,10 @@ from app.dev_tools.semantic_firewall.firewall import (
     SemanticFirewallService,
 )
 from app.models.core import EventCorrection, HistoryEntry, Worker, WorkerType
+from app.services.entity_normalizer import compact_name, match_score, normalize_name
+from app.services.identity_key import generate_identity_key
 from app.services.llm_extraction import extract
-from app.services.llm_v2_validator import LLMv2Validator
+from app.services.llm_v2_validator import LLMv2Validator, resolve_candidates
 from app.services.persian_money_engine import (
     UNIT_MULTIPLIERS,
     normalize_text,
@@ -40,7 +42,17 @@ def create_interpretation(client: TestClient, project_id: int, text: str) -> dic
 
 
 def confirm_interpretation(client: TestClient, interpretation: dict) -> dict:
-    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm")
+    payload: dict = {}
+    if interpretation["canonical_event_type"] == "SETUP_EVENT" and interpretation["semantic_action"] == "SETUP":
+        payload["create_new"] = True
+    if interpretation["semantic_action"] == "ENTITY_UPDATE" and interpretation.get("suggested_entity_id") is not None:
+        payload["selected_person_id"] = interpretation["suggested_entity_id"]
+    if interpretation["semantic_action"] == "ENTITY_UPDATE" and "selected_person_id" not in payload:
+        entities = interpretation.get("extracted_entities") or []
+        candidates = entities[0].get("candidate_matches") if entities else None
+        if candidates:
+            payload["selected_person_id"] = candidates[0]["person_id"]
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm", json=payload)
     assert response.status_code == 200
     return response.json()
 
@@ -414,6 +426,48 @@ def test_llm_amount_text_does_not_fallback_to_raw_number() -> None:
 
 def test_normalize_text_handles_suffix_and_spelling_noise() -> None:
     assert normalize_text("۱۰۰ ملیونشا") == "100 میلیونش را"
+
+
+def test_generate_identity_key_normalizes_name_and_optional_phone() -> None:
+    assert generate_identity_key("  میثم\u200c  کبیری  ", None) == "میثم کبیری"
+    assert generate_identity_key("میثم کبیری", "۰۹۱۲ ۳۴۵ ۶۷۸۹") == "میثم کبیری|09123456789"
+
+
+def test_entity_normalizer_name_compaction_and_scoring() -> None:
+    assert normalize_name("  آقای  میثم\u200c کبیری  ") == "میثم کبیری"
+    assert compact_name("هادی پور سیم") == "هادیپورسیم"
+    assert match_score("میثم کبیری", "میثم کبیری") == 1.0
+    assert match_score("هادیپور سیم", "هادی پور سیم") == 0.95
+    assert match_score("میثم", "میثم کبیری") == 0.7
+    assert match_score("میثم", "رحیم") == 0.0
+
+
+def test_llm_v2_resolve_candidates_ranks_without_premature_partial_binding() -> None:
+    workers = [
+        Worker(id=1, project_id=1, name="میثم کبیری", type=WorkerType.CLIENT),
+        Worker(id=2, project_id=1, name="رحیم", type=WorkerType.DAILY_WORKER),
+    ]
+
+    exact = resolve_candidates("میثم کبیری", workers)
+    assert exact["candidates"][0] == {"person_id": 1, "name": "میثم کبیری", "score": 1.0, "match_type": "exact"}
+    assert exact["requires_confirmation"] is True
+
+    partial = resolve_candidates("میثم", workers)
+    assert partial["candidates"][0] == {"person_id": 1, "name": "میثم کبیری", "score": 0.7, "match_type": "partial"}
+    assert partial["requires_confirmation"] is True
+
+
+def test_llm_v2_resolve_candidates_requires_confirmation_for_ambiguous_high_confidence() -> None:
+    workers = [
+        Worker(id=1, project_id=1, name="هادی پور سیم", type=WorkerType.VENDOR),
+        Worker(id=2, project_id=1, name="هادیپور سیم", type=WorkerType.CLIENT),
+    ]
+
+    resolution = resolve_candidates("هادیپور سیم", workers)
+
+    assert [candidate["person_id"] for candidate in resolution["candidates"]] == [2, 1]
+    assert all(candidate["score"] >= 0.90 for candidate in resolution["candidates"])
+    assert resolution["requires_confirmation"] is True
 
 
 def test_extracted_events_do_not_affect_totals_until_confirmation(
@@ -1202,6 +1256,40 @@ def test_existing_client_partial_match_creates_incoming_payment_draft(
     assert [worker["name"] for worker in workers] == ["میثم کبیری"]
 
 
+@pytest.mark.parametrize(
+    ("text", "amount"),
+    [
+        ("میثم 300 میلیون به حساب پروژه واریز کرد", "300000000.00"),
+        ("میثم ۲۰۰ میلیون پول داد به پروژه", "200000000.00"),
+        ("میثم کبیری ۵۰ میلیون برای پروژه واریز کرد", "50000000.00"),
+    ],
+)
+def test_legacy_project_account_deposit_extracts_client_incoming_payment(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    amount: str,
+) -> None:
+    project = create_project(client)
+    existing = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda raw_text: {"intent": "PAYMENT", "entities": [], "confidence": 0.3},
+    )
+
+    interpretation = create_interpretation(client, project["id"], text)
+    entity = interpretation["extracted_entities"][0]
+
+    assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert interpretation["semantic_action"] == "PAYMENT"
+    assert interpretation["extracted_amount"] == amount
+    assert interpretation["payment_method"] == "BANK_TRANSFER"
+    assert interpretation["financial_direction"] == "INCOMING"
+    assert entity["type"] == "CLIENT"
+    assert entity["project_role"] == "CLIENT"
+    assert entity["candidate_matches"][0]["person_id"] == existing["id"]
+
+
 def test_confirming_client_payment_is_incoming_without_duplicate_entity(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1334,6 +1422,49 @@ def test_purchase_with_money_defaults_to_paid_purchase(
     assert summary["total_paid_out"] == "5000000.00"
     assert summary["total_received"] == "0.00"
     assert sum(float(debt["debt"]) for debt in summary["vendor_debts"]) == 0
+
+
+def test_purchase_phrase_forces_vendor_outgoing_paid_purchase(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entities": [], "confidence": 0.3},
+    )
+
+    interpretation = create_interpretation(
+        client,
+        project["id"],
+        "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم",
+    )
+    entity = interpretation["extracted_entities"][0]
+
+    assert interpretation["semantic_action"] == "PURCHASE_PAID"
+    assert interpretation["extracted_amount"] == "25000000.00"
+    assert interpretation["financial_direction"] == "OUTGOING"
+    assert interpretation["payment_method"] == "CASH"
+    assert entity["name"] == "هادی پور"
+    assert entity["type"] == "VENDOR"
+    assert entity["project_role"] == "VENDOR"
+
+
+def test_unknown_financial_role_defaults_to_other_not_client(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_project(client)
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: {"intent": "PAYMENT", "entity": "ناشناس", "confidence": 0.5},
+    )
+
+    interpretation = create_interpretation(client, project["id"], "ناشناس ۱۰ میلیون پرداخت کرد")
+    entity = interpretation["extracted_entities"][0]
+
+    assert entity["type"] == "OTHER"
+    assert entity["project_role"] == "OTHER"
 
 
 def test_legacy_resolves_compact_vendor_name(
@@ -1862,7 +1993,9 @@ def test_profile_update_partial_name_updates_existing_client_without_duplicate(
 
     phone_interpretation = create_interpretation(client, project["id"], "شماره تماس میثم 09123456789")
     assert phone_interpretation["semantic_action"] == "ENTITY_UPDATE"
-    assert phone_interpretation["suggested_entity_id"] is not None
+    assert phone_interpretation["suggested_entity_id"] is None
+    phone_candidates = phone_interpretation["extracted_entities"][0]["candidate_matches"]
+    assert len(phone_candidates) == 1
     phone_response = confirm_interpretation(client, phone_interpretation)
 
     assert phone_response["workers"][0]["name"] == "میثم کبیری"
@@ -1870,7 +2003,8 @@ def test_profile_update_partial_name_updates_existing_client_without_duplicate(
     assert phone_response["workers"][0]["phone"] == "09123456789"
 
     account_interpretation = create_interpretation(client, project["id"], "شماره حساب میثم 6037991234567890")
-    assert account_interpretation["suggested_entity_id"] == phone_interpretation["suggested_entity_id"]
+    assert account_interpretation["suggested_entity_id"] is None
+    assert account_interpretation["extracted_entities"][0]["candidate_matches"][0]["person_id"] == phone_candidates[0]["person_id"]
     account_response = confirm_interpretation(client, account_interpretation)
 
     assert account_response["workers"][0]["name"] == "میثم کبیری"
@@ -1899,10 +2033,36 @@ def test_profile_update_ambiguous_partial_name_requires_clarification(
 
     assert interpretation["semantic_action"] == "ENTITY_UPDATE"
     assert interpretation["suggested_entity_id"] is None
-    assert response.status_code == 409
+    assert response.status_code == 400
+    assert response.json()["detail"]["status"] == "NEEDS_SELECTION"
+    assert {
+        candidate["person_id"]
+        for candidate in response.json()["detail"]["candidates"]
+    } == {first["id"], second["id"]}
     assert {worker["id"] for worker in workers} == {first["id"], second["id"]}
     assert all(worker["phone"] is None for worker in workers)
     assert not any(worker["name"] == "میثم" for worker in workers)
+
+
+def test_profile_update_missing_person_id_does_not_fallback_to_name_matching(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "میثم کبیری", "CLIENT")
+    interpretation = create_interpretation(client, project["id"], "شماره تماس میثم 09123456789")
+    edit = client.patch(
+        f"/pending-interpretations/{interpretation['id']}",
+        json={"suggested_entity_id": None},
+    )
+    assert edit.status_code == 200
+
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm")
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["status"] == "NEEDS_SELECTION"
+    assert response.json()["detail"]["candidates"][0]["person_id"] == worker["id"]
+    assert workers == [worker]
 
 
 def test_daily_worker_rate_work_accrual_and_payment_reduction(

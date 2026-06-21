@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from decimal import Decimal
@@ -33,11 +34,15 @@ from app.models.core import (
 )
 from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2PaymentMethod
 from app.services.llm_v2_interpreter import LLMv2Interpreter
-from app.services.llm_v2_validator import LLMv2Validator, LLMv2ValidationError
+from app.services.llm_v2_validator import LLMv2Validator, LLMv2ValidationError, resolve_candidates
 from app.services.persian_money_engine import normalize_text
 from app.services.persian_money_engine import parse_persian_money
+from app.services.persian_project_payment import detect_incoming_project_payment
+from app.services.persian_project_payment import detect_purchase_payment
 from app.services.persian_role_extractor import PersianRoleExtractor
 from app.services.semantic_normalizer import CanonicalEventType, SemanticNormalizerService
+
+logger = logging.getLogger(__name__)
 
 
 def process_input(
@@ -76,6 +81,7 @@ def process_input(
             text,
             validated_interpretation,
             entity_resolutions,
+            entity_context,
         )
         cache.set_timing("legacy_duration_ms", 0.0)
         cache.set_timing("governance_duration_ms", 0.0)
@@ -141,6 +147,7 @@ def process_input(
         canonical_event,
         entity_context,
     )
+    _block_ambiguous_setup_creations(legacy_interpretations, entity_context)
     cache.set_legacy_result(_shadow_legacy_payload(legacy_interpretations))
     cache.set_timing("legacy_duration_ms", _elapsed_ms(legacy_start))
     interpretations = legacy_interpretations
@@ -206,6 +213,7 @@ def _build_llm_v2_interpretations(
     raw_text: str,
     interpretation: Any,
     entity_resolutions: dict[int, Worker | None],
+    entity_context: list[Worker],
 ) -> list[PendingInterpretation]:
     from app.schemas.llm_v2 import (
         LLMv2Action,
@@ -215,11 +223,14 @@ def _build_llm_v2_interpretations(
     )
 
     _repair_llm_v2_setup_role_from_text(interpretation, raw_text)
+    incoming_project_payment = detect_incoming_project_payment(raw_text)
+    purchase_payment = detect_purchase_payment(raw_text)
 
     entities_json = []
-    suggested_entity_id = None
+    blocked_due_to_ambiguity = False
     for i, entity in enumerate(interpretation.entities):
         project_role_str = entity.project_role.value if hasattr(entity.project_role, "value") else entity.project_role
+        resolution = resolve_candidates(entity.name, entity_context)
         entity_dict = {
             "name": entity.name,
             "kind": entity.kind.value if hasattr(entity.kind, "value") else entity.kind,
@@ -227,6 +238,12 @@ def _build_llm_v2_interpretations(
             "role_detail": entity.role_detail,
             "type": _llm_v2_project_role_to_worker_type(project_role_str),
         }
+        if interpretation.intent == LLMv2Intent.SET_ROLE and resolution["candidates"]:
+            entity_dict["requires_confirmation"] = True
+            entity_dict["candidate_matches"] = resolution["candidates"]
+        if interpretation.intent == LLMv2Intent.SETUP and resolution["requires_confirmation"]:
+            _mark_entity_creation_blocked(entity_dict, raw_text, resolution["candidates"])
+            blocked_due_to_ambiguity = True
         if entity.phone is not None:
             entity_dict["phone"] = entity.phone
         if entity.account_number is not None:
@@ -238,26 +255,85 @@ def _build_llm_v2_interpretations(
         if entity.field_updates is not None:
             entity_dict["field_updates"] = entity.field_updates
         entities_json.append(entity_dict)
-        if i == 0:
-            resolved = entity_resolutions.get(i)
-            if resolved is not None:
-                suggested_entity_id = resolved.id
 
-    _coerce_llm_v2_profile_update_action(interpretation, suggested_entity_id)
+    _coerce_llm_v2_profile_update_action(interpretation)
+    if blocked_due_to_ambiguity:
+        interpretation.ambiguity = True
+        if "entity_requires_confirmation" not in interpretation.missing_fields:
+            interpretation.missing_fields.append("entity_requires_confirmation")
     intent_str = interpretation.intent.value
     action_str = interpretation.action.value
 
     financial_direction = _llm_v2_financial_direction(interpretation.financial.direction, interpretation.action, raw_text)
     canonical_type = _llm_v2_intent_to_canonical(intent_str)
     semantic_action = _llm_v2_action_to_semantic(action_str)
+    if incoming_project_payment is not None:
+        canonical_type = "FINANCIAL_EVENT"
+        semantic_action = "PAYMENT"
+        financial_direction = FinancialDirection.INCOMING
+        interpretation.financial.direction = LLMv2FinancialDirection.IN
+        if not entities_json:
+            entities_json = [
+                {
+                    "name": incoming_project_payment.payer_name,
+                    "kind": "PERSON",
+                    "project_role": "CLIENT",
+                    "role_detail": None,
+                    "type": "CLIENT",
+                }
+            ]
+        else:
+            entities_json[0] = {
+                **entities_json[0],
+                "name": incoming_project_payment.payer_name,
+                "project_role": "CLIENT",
+                "type": "CLIENT",
+            }
+        resolution = resolve_candidates(incoming_project_payment.payer_name, entity_context)
+        if resolution["candidates"]:
+            entities_json[0]["requires_confirmation"] = True
+            entities_json[0]["candidate_matches"] = resolution["candidates"]
+    elif purchase_payment is not None:
+        canonical_type = "FINANCIAL_EVENT"
+        if action_str not in {"DEBT_CREATED", "CHECK_PAYMENT"} and "نسیه" not in normalize_text(raw_text) and "چک" not in normalize_text(raw_text):
+            semantic_action = "PURCHASE_PAID"
+            financial_direction = FinancialDirection.OUTGOING
+        if purchase_payment.vendor_name is not None:
+            if not entities_json:
+                entities_json = [
+                    {
+                        "name": purchase_payment.vendor_name,
+                        "kind": "COMPANY",
+                        "project_role": "VENDOR",
+                        "role_detail": None,
+                        "type": "VENDOR",
+                    }
+                ]
+            else:
+                entities_json[0] = {
+                    **entities_json[0],
+                    "name": purchase_payment.vendor_name,
+                    "project_role": "VENDOR",
+                    "type": "VENDOR",
+                }
+        elif entities_json:
+            entities_json[0] = {**entities_json[0], "project_role": "VENDOR", "type": "VENDOR"}
     payment_method = (
         _llm_v2_payment_method(interpretation.financial.payment_method, action_str)
         if canonical_type == "FINANCIAL_EVENT"
         else None
     )
+    if incoming_project_payment is not None:
+        payment_method = PaymentType.BANK_TRANSFER.value
+    elif purchase_payment is not None:
+        payment_method = payment_method or PaymentType.CASH.value
 
     amount = interpretation.financial.amount
     parsed_text_amount = parse_persian_money(raw_text) if intent_str == "FINANCIAL" else None
+    if incoming_project_payment is not None and incoming_project_payment.amount is not None:
+        parsed_text_amount = incoming_project_payment.amount
+    elif purchase_payment is not None and purchase_payment.amount is not None:
+        parsed_text_amount = purchase_payment.amount
     if parsed_text_amount is not None:
         amount = parsed_text_amount
         interpretation.financial.amount = Decimal(str(parsed_text_amount))
@@ -274,13 +350,8 @@ def _build_llm_v2_interpretations(
             raw_input_text=raw_text,
             canonical_event_type=canonical_type,
             semantic_action=semantic_action,
-            suggested_entity_id=suggested_entity_id,
-            matched_input_text=(
-                interpretation.entities[0].name
-                if interpretation.entities
-                and suggested_entity_id is not None
-                else None
-            ),
+            suggested_entity_id=None,
+            matched_input_text=None,
             extracted_entities=entities_json or None,
             extracted_amount=amount,
             extracted_quantity=quantity,
@@ -298,6 +369,52 @@ def _build_llm_v2_interpretations(
             status=PendingInterpretationStatus.PENDING,
         )
     ]
+
+
+def _block_ambiguous_setup_creations(
+    interpretations: list[PendingInterpretation],
+    entity_context: list[Worker],
+) -> None:
+    for interpretation in interpretations:
+        if (
+            interpretation.canonical_event_type != "SETUP_EVENT"
+            or interpretation.semantic_action != "SETUP"
+            or interpretation.suggested_entity_id is not None
+        ):
+            continue
+        entities = interpretation.extracted_entities or []
+        if not entities:
+            continue
+        entity = entities[0]
+        name = entity.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        resolution = resolve_candidates(name, entity_context)
+        if not resolution["requires_confirmation"]:
+            continue
+        _mark_entity_creation_blocked(entity, interpretation.raw_input_text, resolution["candidates"])
+        interpretation.extracted_entities = entities
+
+
+def _mark_entity_creation_blocked(
+    entity: dict[str, Any],
+    raw_text: str,
+    candidates: list[dict[str, Any]],
+) -> None:
+    entity["requires_confirmation"] = True
+    entity["creation_block_reason"] = "entity_creation_blocked_due_to_ambiguity"
+    entity["candidate_matches"] = candidates
+    entity["type"] = "OTHER"
+    entity["project_role"] = "OTHER"
+    entity["role_detail"] = None
+    logger.info(
+        "entity_creation_blocked_due_to_ambiguity",
+        extra={
+            "input_text": raw_text,
+            "entity_name": entity.get("name"),
+            "candidates": candidates,
+        },
+    )
 
 
 def _build_profile_update_interpretation(
@@ -324,25 +441,27 @@ def _build_profile_update_interpretation(
         return None
 
     raw_name = _profile_update_name(raw_text, normalized, updates)
-    entity = _best_profile_update_entity(raw_name, entity_context) if raw_name else None
-    name = entity.name if entity is not None else _profile_update_name(raw_text, normalized, updates)
+    name = raw_name or _profile_update_name(raw_text, normalized, updates)
     if not name:
         return None
-    entity_type = entity.type.value if entity is not None else "OTHER"
+    resolution = resolve_candidates(name, entity_context)
     extracted_entity = {
         "name": name,
-        "type": entity_type,
-        "project_role": entity_type,
+        "type": "OTHER",
+        "project_role": "OTHER",
         "field_updates": updates,
         **updates,
     }
+    if resolution["candidates"]:
+        extracted_entity["requires_confirmation"] = True
+        extracted_entity["candidate_matches"] = resolution["candidates"]
     return PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="SETUP_EVENT",
         semantic_action="ENTITY_UPDATE",
-        suggested_entity_id=entity.id if entity is not None else None,
-        matched_input_text=name if entity is not None else None,
+        suggested_entity_id=None,
+        matched_input_text=None,
         extracted_entities=[extracted_entity],
         extracted_amount=None,
         extracted_quantity=None,
@@ -356,13 +475,12 @@ def _build_profile_update_interpretation(
     )
 
 
-def _coerce_llm_v2_profile_update_action(interpretation: Any, suggested_entity_id: int | None) -> None:
+def _coerce_llm_v2_profile_update_action(interpretation: Any) -> None:
     from app.schemas.llm_v2 import LLMv2Action, LLMv2Intent
 
     if (
         interpretation.intent != LLMv2Intent.SETUP
         or interpretation.action != LLMv2Action.ADD_ENTITY
-        or suggested_entity_id is None
     ):
         return
 
@@ -370,50 +488,17 @@ def _coerce_llm_v2_profile_update_action(interpretation: Any, suggested_entity_i
         field_updates = entity.field_updates if isinstance(entity.field_updates, dict) else {}
         if field_updates or any(
             getattr(entity, key, None) is not None
-            for key in ["phone", "account_number", "daily_rate", "notes", "role_detail"]
+            for key in ["phone", "account_number", "daily_rate", "notes"]
         ):
             interpretation.action = LLMv2Action.UPDATE_ENTITY
             return
-
-
-def _best_profile_update_entity(normalized: str, entity_context: list[Worker]) -> Worker | None:
-    normalized_name = _normalize_profile_match_text(normalized)
-    compact_name = _compact_profile_match_text(normalized)
-    if not normalized_name:
-        return None
-    buckets: list[list[Worker]] = [
-        [worker for worker in entity_context if _normalize_profile_match_text(worker.name) == normalized_name],
-        [worker for worker in entity_context if _compact_profile_match_text(worker.name) == compact_name],
-        [worker for worker in entity_context if _normalize_profile_match_text(worker.name).startswith(normalized_name)],
-        [worker for worker in entity_context if _compact_profile_match_text(worker.name).startswith(compact_name)],
-        [worker for worker in entity_context if normalized_name in _normalize_profile_match_text(worker.name).split()],
-        [worker for worker in entity_context if normalized_name in _normalize_profile_match_text(worker.name)],
-    ]
-    for matches in buckets:
-        unique = {worker.id: worker for worker in matches}
-        if len(unique) == 1:
-            return next(iter(unique.values()))
-        if len(unique) > 1:
-            return None
-    return None
-
-
-def _normalize_profile_match_text(value: str) -> str:
-    normalized = normalize_text(value).replace("\u200c", " ").strip()
-    normalized = re.sub(r"\s+", " ", normalized)
-    normalized = re.sub(r"^(مش|آقای|اقای|خانم)\s+", "", normalized)
-    return normalized
-
-
-def _compact_profile_match_text(value: str) -> str:
-    return _normalize_profile_match_text(value).replace(" ", "")
 
 
 def _profile_update_name(raw_text: str, normalized: str, updates: dict[str, str | int]) -> str | None:
     text = normalized
     for value in updates.values():
         text = text.replace(str(value), " ")
-    text = re.sub(r"شماره تماس|شماره موبایل|شماره حساب|شماره کارت|دستمزد روزانه|موبایل|تلفن|حساب|کارت|شبا|روزی|روزانه|است|می دیم|میدیم|به", " ", text)
+    text = re.sub(r"شماره تماس|شماره موبایل|شماره حساب|شماره کارت|دستمزد روزانه|موبایل|تلفن|حساب|کارت|شبا|روزی|روزانه|تومان|ریال|است|می دیم|میدیم|به", " ", text)
     name = re.sub(r"\s+", " ", text).strip()
     return name or None
 
@@ -421,7 +506,10 @@ def _profile_update_name(raw_text: str, normalized: str, updates: dict[str, str 
 def _repair_llm_v2_setup_role_from_text(interpretation: Any, raw_text: str) -> None:
     from app.schemas.llm_v2 import LLMv2Action, LLMv2Intent, LLMv2ProjectRole
 
-    if interpretation.intent != LLMv2Intent.SETUP or interpretation.action != LLMv2Action.ADD_ENTITY:
+    if interpretation.intent not in {LLMv2Intent.SETUP, LLMv2Intent.SET_ROLE} or interpretation.action not in {
+        LLMv2Action.ADD_ENTITY,
+        LLMv2Action.SET_ROLE,
+    }:
         return
     if not interpretation.entities:
         return
@@ -442,6 +530,7 @@ def _repair_llm_v2_setup_role_from_text(interpretation: Any, raw_text: str) -> N
 
 def _llm_v2_intent_to_canonical(intent: str) -> str:
     mapping = {
+        "SET_ROLE": "SETUP_EVENT",
         "SETUP": "SETUP_EVENT",
         "WORK": "WORK_EVENT",
         "FINANCIAL": "FINANCIAL_EVENT",
@@ -453,6 +542,7 @@ def _llm_v2_intent_to_canonical(intent: str) -> str:
 
 def _llm_v2_action_to_semantic(action: str) -> str:
     mapping = {
+        "SET_ROLE": "SET_ROLE",
         "ADD_ENTITY": "SETUP",
         "UPDATE_ENTITY": "ENTITY_UPDATE",
         "WORK_LOG": "INCREMENT",
@@ -472,7 +562,7 @@ def _llm_v2_project_role_to_worker_type(project_role: str) -> str:
         "DAILY_WORKER": "DAILY_WORKER",
         "SKILLED_WORKER": "SKILLED_WORKER",
         "VENDOR": "VENDOR",
-        "OTHER": "DAILY_WORKER",
+        "OTHER": "OTHER",
     }
     return mapping.get(project_role, "DAILY_WORKER")
 
@@ -494,7 +584,11 @@ def _llm_v2_financial_direction(
     if direction == "IN":
         return FinancialDirection.INCOMING
     if direction == "OUT":
+        if detect_incoming_project_payment(raw_text) is not None:
+            return FinancialDirection.INCOMING
         return FinancialDirection.OUTGOING
+    if detect_incoming_project_payment(raw_text) is not None:
+        return FinancialDirection.INCOMING
     return None
 
 

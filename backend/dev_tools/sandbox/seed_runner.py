@@ -8,7 +8,8 @@ from sqlalchemy import select
 from app.api import projects as project_api
 from app.db.session import SessionLocal
 from app.models.core import HistoryEntry, Invoice, Payment, Project, Worker, WorkerState
-from app.schemas.projects import NaturalInputCreate, ProjectCreate
+from app.schemas.projects import NaturalInputCreate, PendingInterpretationConfirm, ProjectCreate
+from app.services.entity_normalizer import normalize_name
 from app.services.persian_money_engine import parse_persian_money
 from dev_tools.sandbox.scenarios import get_scenario
 
@@ -61,7 +62,11 @@ def _run_steps(
                     db,
                 )
                 confirmed_results = [
-                    project_api.confirm_pending_interpretation(interpretation.id, db)
+                    project_api.confirm_pending_interpretation(
+                        interpretation.id,
+                        db,
+                        _confirmation_payload_for_interpretation(db, interpretation),
+                    )
                     for interpretation in draft.interpretations
                 ]
                 trace.append(
@@ -96,6 +101,33 @@ def _run_steps(
     finally:
         project_api.extract_graph = original_extract_graph
         project_api.LLMv2Interpreter.interpret = original_llm_v2_interpret
+
+
+def _confirmation_payload_for_interpretation(db, interpretation) -> PendingInterpretationConfirm:
+    entity_name = None
+    entities = interpretation.extracted_entities or []
+    if entities and isinstance(entities[0].get("name"), str):
+        entity_name = entities[0]["name"]
+    if entity_name:
+        normalized = normalize_name(entity_name)
+        matches = [
+            worker
+            for worker in db.scalars(select(Worker).where(Worker.project_id == interpretation.project_id))
+            if normalize_name(worker.name) == normalized
+        ]
+        if len(matches) == 1:
+            return PendingInterpretationConfirm(selected_person_id=matches[0].id)
+    if interpretation.canonical_event_type == "SETUP_EVENT" or _pending_entity_is_vendor(interpretation):
+        return PendingInterpretationConfirm(create_new=True)
+    return PendingInterpretationConfirm()
+
+
+def _pending_entity_is_vendor(interpretation) -> bool:
+    entities = interpretation.extracted_entities or []
+    if not entities:
+        return False
+    role = entities[0].get("project_role") or entities[0].get("type")
+    return role == "VENDOR"
 
 
 def _llm_v2_from_graph(text: str, graph: dict[str, Any]) -> dict[str, Any]:

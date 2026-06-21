@@ -55,6 +55,16 @@ function specialty(worker: Worker): string {
   return worker.role_detail || "تخصص ثبت نشده";
 }
 
+function personDisplayRole(worker: Worker): string {
+  const kind = personKind(worker);
+  if ((kind === "SKILLED_WORKER" || kind === "OTHER") && worker.role_detail?.trim()) {
+    return worker.role_detail.trim();
+  }
+  if (kind === "SKILLED_WORKER") return "استادکار";
+  if (kind === "OTHER") return "سایر";
+  return roleTitle(kind);
+}
+
 function paymentTotal(payments: Payment[], directions: Payment["direction"][]): number {
   return payments
     .filter((payment) => directions.includes(payment.direction))
@@ -217,9 +227,7 @@ export function PeoplePage({
           <div>
             <span className="eyebrow">جزئیات فرد</span>
             <h1>{selected.name}</h1>
-            <p className="muted">
-              {roleTitle(kind)}{selected.role_detail && kind === "SKILLED_WORKER" ? ` · ${selected.role_detail}` : ""}
-            </p>
+	            <p className="muted">{personDisplayRole(selected)}</p>
           </div>
           <mark className={status.badgeClassName}>وضعیت: {status.label}</mark>
           <button type="button" onClick={() => setIsEditing(!isEditing)}>{isEditing ? "بستن ویرایش" : "ویرایش"}</button>
@@ -262,7 +270,7 @@ export function PeoplePage({
           <>
             <section className="summary-grid">
               <article className="metric-card pending"><Clock aria-hidden="true" /><span>تعداد روز کارکرد</span><strong>{state?.total_days_worked ?? "۰"}</strong><small>حضور روزمزد</small></article>
-              <article className="metric-card"><Wallet aria-hidden="true" /><span>دستمزد روزانه</span><strong>{selected.daily_rate ? money(selected.daily_rate) : "ثبت نشده"}</strong><small>{selected.daily_rate ? "مبنای محاسبه" : "دستمزد روزانه ثبت نشده"}</small></article>
+              <article className="metric-card"><Wallet aria-hidden="true" /><span>دستمزد روزانه</span><strong>{selected.daily_rate ? money(selected.daily_rate) : "دستمزد روزانه ثبت نشده"}</strong><small>{selected.daily_rate ? "مبنای محاسبه" : "دستمزد روزانه ثبت نشده"}</small></article>
               <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>دستمزد محاسبه‌شده</span><strong>{money(accruedWage)}</strong><small>روز × دستمزد</small></article>
               <article className="metric-card negative"><Wallet aria-hidden="true" /><span>مجموع پرداختی</span><strong>{money(paidOut)}</strong><small>{outgoingPayments.length} پرداخت</small></article>
               <article className="metric-card"><CreditCard aria-hidden="true" /><span>مانده طلب کارگر</span><strong>{money(balance)}</strong><small>وضعیت حساب کارگر</small></article>
@@ -371,14 +379,14 @@ export function PeoplePage({
                 return (
                   <button className="person-card clickable-card" key={worker.id} type="button" onClick={() => onOpenPerson(worker.id)}>
                     <div className="person-card-header">
-                      <div><strong>{worker.name}</strong><span>{roleTitle(kind)}{kind === "SKILLED_WORKER" && worker.role_detail ? ` · ${worker.role_detail}` : ""}</span></div>
+	                      <div><strong>{worker.name}</strong><span>{personDisplayRole(worker)}</span></div>
                       <mark className={status.badgeClassName}>{status.label}</mark>
                     </div>
                     <DetailList>
                       <DetailItem label="تلفن" value={worker.phone || "ثبت نشده"} />
                       <DetailItem label="شماره حساب" value={worker.account_number || "ثبت نشده"} />
                       {kind === "CLIENT" && <><DetailItem label="پرداخت‌شده توسط کارفرما" value={money(clientPaid)} /><DetailItem label="هزینه / نیاز مالی پروژه" value={money(fundingNeed)} /><DetailItem label="طلب پروژه از کارفرما" value={money(receivable)} /><DetailItem label="موجودی قابل خرج پروژه" value={money(available)} /></>}
-                      {kind === "DAILY_WORKER" && <><DetailItem label="تعداد روز کارکرد" value={state?.total_days_worked ?? "۰"} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
+                      {kind === "DAILY_WORKER" && <><DetailItem label="تعداد روز کارکرد" value={state?.total_days_worked ?? "۰"} /><DetailItem label="دستمزد روزانه" value={worker.daily_rate ? money(worker.daily_rate) : "دستمزد روزانه ثبت نشده"} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
                       {kind === "SKILLED_WORKER" && <><DetailItem label="تخصص" value={specialty(worker)} /><DetailItem label="میزان کارکرد" value={state?.total_quantity ?? "۰"} /><DetailItem label="واحد کارکرد" value={state?.unit ?? "ثبت نشده"} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
                       {kind === "VENDOR" && <><DetailItem label="مجموع خرید / فاکتورها" value={money(invoiceTotal + directPurchaseTotal)} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="بدهی باز" value={money(vendorDebt)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
                     </DetailList>

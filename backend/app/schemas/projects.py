@@ -279,6 +279,14 @@ class PendingInterpretationUpdate(BaseModel):
     structured_interpretation: dict | None = None
 
 
+class PendingInterpretationConfirm(BaseModel):
+    selected_person_id: int | None = None
+    create_new: bool = False
+    name: str | None = None
+    role: str | None = None
+    role_detail: str | None = None
+
+
 class NaturalInputInterpretationResult(BaseModel):
     interpretations: list[PendingInterpretationRead]
 

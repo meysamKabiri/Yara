@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class LLMv2Intent(StrEnum):
+    SET_ROLE = "SET_ROLE"
     SETUP = "SETUP"
     WORK = "WORK"
     FINANCIAL = "FINANCIAL"
@@ -13,6 +14,7 @@ class LLMv2Intent(StrEnum):
 
 
 class LLMv2Action(StrEnum):
+    SET_ROLE = "SET_ROLE"
     ADD_ENTITY = "ADD_ENTITY"
     UPDATE_ENTITY = "UPDATE_ENTITY"
     WORK_LOG = "WORK_LOG"

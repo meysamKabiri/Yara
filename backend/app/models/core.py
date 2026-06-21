@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Numeric, String, Text
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -178,6 +178,10 @@ class EventCorrection(TimestampMixin, Base):
 
 
 class Worker(TimestampMixin, Base):
+    __table_args__ = (
+        Index("ix_worker_project_identity_key", "project_id", "identity_key", unique=True),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -185,6 +189,7 @@ class Worker(TimestampMixin, Base):
         SqlEnum(WorkerType, native_enum=False, length=30),
         nullable=False,
     )
+    identity_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     account_number: Mapped[str | None] = mapped_column(String(100), nullable=True)

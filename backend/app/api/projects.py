@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, status
 from sqlalchemy import func, select
 
 from app.core import unified_pipeline
@@ -47,6 +47,7 @@ from app.schemas.projects import (
     PaymentCreate,
     PaymentRead,
     PendingInterpretationRead,
+    PendingInterpretationConfirm,
     PendingInterpretationUpdate,
     ProjectCreate,
     ProjectDetail,
@@ -66,10 +67,12 @@ from app.services.entity_registry import EntityRegistryService
 from app.services.financial_summary import invoice_paid_amount, project_operating_summary
 from app.services.llm_extraction import extract, extract_graph  # noqa: F401
 from app.services.llm_v2_interpreter import LLMv2Interpreter  # noqa: F401
+from app.services.llm_v2_validator import resolve_candidates
 from app.services.persian_money_engine import (
     normalize_text,
     parse_persian_money,
 )
+from app.services.persian_project_payment import detect_incoming_project_payment, detect_purchase_payment
 from app.services.persian_role_extractor import PersianRoleExtractor
 from app.services.semantic_normalizer import (
     CanonicalEvent,
@@ -449,14 +452,33 @@ def _build_pending_interpretations(
                 event_graph["amount_text"] = raw_event.get("amount_text")
             if raw_event.get("quantity_text") is not None:
                 event_graph["quantity_text"] = raw_event.get("quantity_text")
+        effective_action = canonical_event.action
+        if detect_purchase_payment(raw_text) is not None and effective_action == "PAYMENT" and not _purchase_has_debt_or_check_terms(raw_text):
+            effective_action = "PURCHASE_PAID"
         payment_method = None
-        if canonical_event.action in {"CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
+        if effective_action in {"CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
             payment_method = PaymentType.CHECK.value
-        elif canonical_event.action == "PURCHASE_PAID":
+        elif effective_action == "PURCHASE_PAID":
             payment_method = PaymentType.CASH.value
         elif canonical_event.type == CanonicalEventType.FINANCIAL:
             payment_method = PaymentType.BANK_TRANSFER.value
+        incoming_project_payment = (
+            detect_incoming_project_payment(raw_text)
+            if canonical_event.type == CanonicalEventType.FINANCIAL
+            else None
+        )
+        purchase_payment = (
+            detect_purchase_payment(raw_text)
+            if canonical_event.type == CanonicalEventType.FINANCIAL
+            else None
+        )
         draft_entities = _draft_entities(event_graph, canonical_event, raw_text)
+        if incoming_project_payment is not None:
+            draft_entities = [_pending_entity_dict(incoming_project_payment.payer_name, "CLIENT")]
+        elif purchase_payment is not None and purchase_payment.vendor_name is not None:
+            draft_entities = [_pending_entity_dict(purchase_payment.vendor_name, "VENDOR")]
+        elif purchase_payment is not None and draft_entities:
+            draft_entities[0] = {**draft_entities[0], "type": "VENDOR", "project_role": "VENDOR"}
         raw_entity_name = _draft_entity_name(draft_entities)
         resolved_entity = _resolve_existing_entity(
             raw_entity_name,
@@ -466,21 +488,30 @@ def _build_pending_interpretations(
         financial_direction = _financial_direction(
             raw_text,
             canonical_event.type,
-            canonical_event.action,
+            effective_action,
             resolved_entity,
         )
+        if incoming_project_payment is not None:
+            financial_direction = FinancialDirection.INCOMING
+            payment_method = PaymentType.BANK_TRANSFER.value
+            _attach_candidate_matches(draft_entities, raw_entity_name, entity_context)
+        elif purchase_payment is not None:
+            if effective_action == "PURCHASE_PAID":
+                financial_direction = FinancialDirection.OUTGOING
+            payment_method = payment_method or PaymentType.CASH.value
         if resolved_entity is not None and draft_entities:
             draft_entities[0] = {
                 **draft_entities[0],
                 "name": resolved_entity.name,
                 "type": resolved_entity.type.value,
+                "project_role": resolved_entity.type.value,
             }
         interpretations.append(
             PendingInterpretation(
                 project_id=project_id,
                 raw_input_text=raw_text,
                 canonical_event_type=canonical_event.type.value,
-                semantic_action=canonical_event.action,
+                semantic_action=effective_action,
                 suggested_entity_id=resolved_entity.id if resolved_entity is not None else None,
                 matched_input_text=(
                     raw_entity_name
@@ -488,7 +519,13 @@ def _build_pending_interpretations(
                     else None
                 ),
                 extracted_entities=draft_entities,
-                extracted_amount=_graph_amount(event_graph, raw_text),
+                extracted_amount=(
+                    incoming_project_payment.amount
+                    if incoming_project_payment is not None and incoming_project_payment.amount is not None
+                    else purchase_payment.amount
+                    if purchase_payment is not None and purchase_payment.amount is not None
+                    else _graph_amount(event_graph, raw_text)
+                ),
                 extracted_quantity=_graph_quantity(event_graph),
                 payment_method=payment_method,
                 financial_direction=financial_direction,
@@ -520,7 +557,7 @@ def _draft_entities(
     role_guess = _graph_role_guess(graph)
     if role_guess is None and canonical_event.type == CanonicalEventType.FINANCIAL:
         role_guess = _pending_financial_role_guess(raw_text, canonical_event.action)
-    return [_pending_entity_dict(entity_name, role_guess or "DAILY_WORKER")]
+    return [_pending_entity_dict(entity_name, role_guess or "OTHER")]
 
 
 def _pending_financial_role_guess(raw_text: str, action: str) -> str | None:
@@ -530,6 +567,14 @@ def _pending_financial_role_guess(raw_text: str, action: str) -> str | None:
     if "خرید" in normalized or "فاکتور" in normalized:
         return "VENDOR"
     return None
+
+
+def _purchase_has_debt_or_check_terms(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    return any(
+        phrase in normalized
+        for phrase in ["نسیه", "ندادم", "هنوز ندادم", "چک", "فاکتور", "بدهی"]
+    )
 
 
 def _pending_entity_dict(name: str, role: str) -> dict[str, Any]:
@@ -607,6 +652,18 @@ def _draft_expected_role(entities: list[dict[str, Any]]) -> str | None:
     if hasattr(role, "value"):
         role = role.value
     return role if isinstance(role, str) else None
+
+
+def _attach_candidate_matches(
+    entities: list[dict[str, Any]],
+    raw_entity_name: str | None,
+    entity_context: list[Worker],
+) -> None:
+    if not entities or not raw_entity_name:
+        return
+    resolution = resolve_candidates(raw_entity_name, entity_context)
+    if resolution["candidates"]:
+        entities[0]["candidate_matches"] = resolution["candidates"]
 
 
 def _resolve_existing_entity(
@@ -692,8 +749,10 @@ def _financial_direction(
         return FinancialDirection.OUTGOING
     if action == "PURCHASE_PAID" or "خرید" in normalized:
         return FinancialDirection.OUTGOING
+    if detect_incoming_project_payment(raw_text) is not None:
+        return FinancialDirection.INCOMING
     if resolved_entity is not None and resolved_entity.type == WorkerType.CLIENT:
-        incoming_phrases = ["پول داد", "پرداخت کرد", "واریز کرد", "داد برای"]
+        incoming_phrases = ["پول داد", "پرداخت کرد", "واریز کرد", "داد برای", "برای پروژه واریز کرد"]
         if any(phrase in normalized for phrase in incoming_phrases):
             return FinancialDirection.INCOMING
     return FinancialDirection.OUTGOING
@@ -942,14 +1001,17 @@ def discard_pending_interpretation(
 def confirm_pending_interpretation(
     interpretation_id: int,
     db: DbSession,
+    payload: PendingInterpretationConfirm | None = Body(default=None),
 ) -> NaturalInputResult:
+    if not isinstance(payload, PendingInterpretationConfirm):
+        payload = PendingInterpretationConfirm()
     interpretation = _get_pending_interpretation(db, interpretation_id)
     if interpretation.status not in {
         PendingInterpretationStatus.PENDING,
         PendingInterpretationStatus.EDITED,
     }:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed")
-    result = _execute_pending_interpretation(db, interpretation)
+    result = _execute_pending_interpretation(db, interpretation, payload)
     interpretation.status = PendingInterpretationStatus.CONFIRMED
     db.commit()
     db.refresh(interpretation)
@@ -969,35 +1031,197 @@ def _get_pending_interpretation(db: DbSession, interpretation_id: int) -> Pendin
 def _execute_pending_interpretation(
     db: DbSession,
     interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
+    _apply_create_new_confirmation_payload(interpretation, payload)
     if interpretation.structured_interpretation is not None:
-        _validate_llm_v2_confirmation_safety(db, interpretation)
-        return _execute_llm_v2_interpretation(db, interpretation)
+        _validate_llm_v2_confirmation_safety(db, interpretation, payload)
+        return _execute_llm_v2_interpretation(db, interpretation, payload)
 
-    _validate_legacy_confirmation_safety(db, interpretation)
-    return _execute_legacy_interpretation(db, interpretation)
+    _validate_legacy_confirmation_safety(db, interpretation, payload)
+    return _execute_legacy_interpretation(db, interpretation, payload)
+
+
+def _apply_create_new_confirmation_payload(
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> None:
+    if not payload.create_new:
+        return
+    if not _allows_create_new_confirmation(interpretation):
+        return
+    if payload.name is None and payload.role is None and payload.role_detail is None:
+        return
+
+    name = payload.name.strip() if isinstance(payload.name, str) else ""
+    role = payload.role.strip() if isinstance(payload.role, str) else ""
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Create-new confirmation requires a name",
+        )
+    if not role:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Create-new confirmation requires a role",
+        )
+    worker_type = _llm_v2_role_to_worker_type(role)
+    if worker_type == WorkerType.OTHER and role != "OTHER":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Create-new confirmation role is invalid",
+        )
+
+    entities = list(interpretation.extracted_entities or [{}])
+    entity = dict(entities[0] if entities else {})
+    entity.update(
+        {
+            "name": name,
+            "type": worker_type.value,
+            "project_role": worker_type.value,
+            "create_new": True,
+        }
+    )
+    if isinstance(payload.role_detail, str) and payload.role_detail.strip():
+        entity["role_detail"] = payload.role_detail.strip()
+    else:
+        entity["role_detail"] = None
+    entities[0] = entity
+    interpretation.extracted_entities = entities
+
+
+def _allows_create_new_confirmation(interpretation: PendingInterpretation) -> bool:
+    if interpretation.canonical_event_type != CanonicalEventType.SETUP.value:
+        return False
+    if interpretation.semantic_action in {"SETUP", "SET_ROLE", "ADD_ENTITY"}:
+        return True
+    structured = interpretation.structured_interpretation
+    return bool(
+        isinstance(structured, dict)
+        and structured.get("intent") in {"SETUP", "SET_ROLE"}
+        and structured.get("action") in {"ADD_ENTITY", "SET_ROLE"}
+    )
 
 
 def _validate_legacy_confirmation_safety(
     db: DbSession,
     interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
 ) -> None:
+    _require_explicit_entity_selection(db, interpretation, payload)
+    if (
+        _pending_requires_entity_confirmation(interpretation)
+        and payload.selected_person_id is None
+        and not payload.create_new
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Entity creation requires confirmation",
+        )
     if (
         interpretation.canonical_event_type == CanonicalEventType.SETUP.value
         and interpretation.semantic_action == "ENTITY_UPDATE"
         and _has_entity_field_updates(interpretation.extracted_entities or [])
-        and _ensure_profile_update_resolved(db, interpretation) is None
+        and _get_selected_worker(db, interpretation, payload) is None
+        and _pending_worker(db, interpretation) is None
         and not _pending_allows_new_entity(interpretation)
     ):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Profile update requires a resolved entity",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_needs_selection_payload(db, interpretation),
         )
+
+
+def _require_explicit_entity_selection(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> None:
+    if not _requires_ui_identity_decision(interpretation):
+        return
+    if payload.selected_person_id is not None and _get_selected_worker(db, interpretation, payload) is not None:
+        return
+    if payload.create_new and not _is_update_entity_interpretation(interpretation):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=_needs_selection_payload(db, interpretation),
+    )
+
+
+def _is_update_entity_interpretation(interpretation: PendingInterpretation) -> bool:
+    if (
+        interpretation.canonical_event_type == CanonicalEventType.SETUP.value
+        and interpretation.semantic_action == "ENTITY_UPDATE"
+    ):
+        return True
+    structured = interpretation.structured_interpretation
+    return bool(
+        isinstance(structured, dict)
+        and structured.get("intent") == "SETUP"
+        and structured.get("action") == "UPDATE_ENTITY"
+    )
+
+
+def _needs_selection_payload(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+) -> dict[str, Any]:
+    workers = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.project_id == interpretation.project_id))
+    }
+    name = _pending_entity_name(interpretation) or interpretation.raw_input_text
+    resolution = resolve_candidates(name, list(workers.values()))
+    candidates = []
+    for candidate in resolution["candidates"]:
+        worker = workers.get(candidate["person_id"])
+        if worker is None:
+            continue
+        candidates.append(
+            {
+                "person_id": worker.id,
+                "worker_id": worker.id,
+                "name": worker.name,
+                "type": worker.type.value,
+                "score": candidate["score"],
+                "match_type": candidate["match_type"],
+            }
+        )
+    return {
+        "status": "NEEDS_SELECTION",
+        "candidates": candidates,
+    }
+
+
+def _requires_ui_identity_decision(interpretation: PendingInterpretation) -> bool:
+    if interpretation.canonical_event_type == CanonicalEventType.SETUP.value:
+        return True
+    structured = interpretation.structured_interpretation
+    return bool(
+        isinstance(structured, dict)
+        and structured.get("intent") in {"SETUP", "SET_ROLE"}
+        and structured.get("action") in {"SET_ROLE", "ADD_ENTITY", "UPDATE_ENTITY"}
+    )
+
+
+def _get_selected_worker(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> Worker | None:
+    if payload.selected_person_id is None:
+        return None
+    worker = db.get(Worker, payload.selected_person_id)
+    if worker is None or worker.project_id != interpretation.project_id:
+        return None
+    return worker
 
 
 def _validate_llm_v2_confirmation_safety(
     db: DbSession,
     interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
 ) -> None:
     from app.schemas.llm_v2 import (
         LLMv2Action,
@@ -1008,16 +1232,27 @@ def _validate_llm_v2_confirmation_safety(
     )
 
     si = LLMv2Interpretation(**interpretation.structured_interpretation)
+    _require_explicit_entity_selection(db, interpretation, payload)
+    if (
+        _pending_requires_entity_confirmation(interpretation)
+        and payload.selected_person_id is None
+        and not payload.create_new
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Entity creation requires confirmation",
+        )
     if (
         si.intent == LLMv2Intent.SETUP
         and si.action == LLMv2Action.UPDATE_ENTITY
         and _has_entity_field_updates(interpretation.extracted_entities or [])
-        and _ensure_profile_update_resolved(db, interpretation) is None
+        and _get_selected_worker(db, interpretation, payload) is None
+        and _pending_worker(db, interpretation) is None
         and not _pending_allows_new_entity(interpretation)
     ):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Profile update requires a resolved entity",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_needs_selection_payload(db, interpretation),
         )
 
     if si.intent != LLMv2Intent.FINANCIAL:
@@ -1048,7 +1283,7 @@ def _validate_llm_v2_confirmation_safety(
             detail="Financial interpretation requires a direction before confirmation",
         )
 
-    worker = _pending_worker(db, interpretation)
+    worker = _get_selected_worker(db, interpretation, payload) or _pending_worker(db, interpretation)
     expected_role = si.entities[0].project_role if si.entities else None
     if (
         worker is not None
@@ -1059,7 +1294,9 @@ def _validate_llm_v2_confirmation_safety(
             status_code=status.HTTP_409_CONFLICT,
             detail="Matched entity role conflicts with expected vendor role",
         )
-    if worker is None and not _pending_allows_new_llm_v2_vendor(interpretation, si):
+    if worker is None and not (
+        payload.create_new and _pending_allows_new_llm_v2_vendor(interpretation, si)
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Financial interpretation requires a resolved entity",
@@ -1069,6 +1306,7 @@ def _validate_llm_v2_confirmation_safety(
 def _execute_llm_v2_interpretation(
     db: DbSession,
     interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
     from app.schemas.llm_v2 import (
         LLMv2Action,
@@ -1096,9 +1334,13 @@ def _execute_llm_v2_interpretation(
     action = si.action
 
     if intent == LLMv2Intent.SETUP and action == LLMv2Action.ADD_ENTITY:
-        created = EntityRegistryService(db, interpretation.project_id).apply_setup(
-            interpretation.extracted_entities or []
-        )
+        if payload.create_new:
+            created = EntityRegistryService(db, interpretation.project_id).apply_setup(
+                interpretation.extracted_entities or []
+            )
+        else:
+            selected = _get_selected_worker(db, interpretation, payload)
+            created = [selected] if selected is not None else []
         workers.extend(created)
         history = HistoryEntry(
             project_id=interpretation.project_id,
@@ -1122,22 +1364,50 @@ def _execute_llm_v2_interpretation(
             work_logs=work_logs, invoices=invoices, payments=payments,
         )
 
+    if intent == LLMv2Intent.SET_ROLE and action == LLMv2Action.SET_ROLE:
+        entities = interpretation.extracted_entities or []
+        selected = _get_selected_worker(db, interpretation, payload)
+        if selected is not None and entities:
+            _apply_role_assignment(selected, entities[0])
+            workers.append(selected)
+        elif payload.create_new:
+            workers.extend(
+                EntityRegistryService(db, interpretation.project_id).apply_setup(entities)
+            )
+        history = HistoryEntry(
+            project_id=interpretation.project_id,
+            input_text=interpretation.raw_input_text,
+            change_type=HistoryChangeType.SETUP,
+            delta=_history_delta(
+                intent=intent.value,
+                action=action.value,
+                entities=[_entity_snapshot(entity) for entity in workers],
+            ),
+            **semantic_history,
+        )
+        db.add(history)
+        db.flush()
+        history_entries.append(history)
+        return NaturalInputResult(
+            raw_entry_id=raw_entry.id,
+            intent=interpretation.canonical_event_type,
+            workers=workers,
+            states=states,
+            history_entries=history_entries,
+            work_logs=work_logs,
+            invoices=invoices,
+            payments=payments,
+        )
+
     if intent == LLMv2Intent.SETUP and action == LLMv2Action.UPDATE_ENTITY:
         registry = EntityRegistryService(db, interpretation.project_id)
         entities = interpretation.extracted_entities or []
-        updated = []
-        if _pending_allows_new_entity(interpretation):
-            updated = registry.apply_setup(entities)
-        if not updated:
-            updated = (
-                registry.update_entity_by_id(interpretation.suggested_entity_id, entities[0])
-                if interpretation.suggested_entity_id is not None and entities and _has_entity_field_updates(entities)
-                else []
-            )
-        if not updated:
-            updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
-        if not updated:
-            updated = registry.update_entity_by_partial_match(interpretation.raw_input_text)
+        selected = _get_selected_worker(db, interpretation, payload)
+        updated = (
+            registry.update_entity_by_id(selected.id, entities[0])
+            if selected is not None and entities and _has_entity_field_updates(entities)
+            else []
+        )
         workers.extend(updated)
         history = HistoryEntry(
             project_id=interpretation.project_id,
@@ -1165,7 +1435,7 @@ def _execute_llm_v2_interpretation(
     if entity_name is None and intent != LLMv2Intent.NOTE:
         entity_name = si.entities[0].name if si.entities else None
 
-    pending_worker = _pending_worker(db, interpretation)
+    pending_worker = _get_selected_worker(db, interpretation, payload) or _pending_worker(db, interpretation)
     project_role = si.entities[0].project_role if si.entities else None
     role = _llm_v2_role_to_state_role(project_role, pending_worker)
 
@@ -1188,7 +1458,12 @@ def _execute_llm_v2_interpretation(
             work_logs=work_logs, invoices=invoices, payments=payments,
         )
 
-    if pending_worker is None and entity_name and _pending_allows_new_llm_v2_vendor(interpretation, si):
+    if (
+        pending_worker is None
+        and entity_name
+        and payload.create_new
+        and _pending_allows_new_llm_v2_vendor(interpretation, si)
+    ):
         pending_worker = _find_or_create_worker(
             db,
             interpretation.project_id,
@@ -1465,6 +1740,7 @@ def _llm_v2_role_to_worker_type(project_role: Any) -> WorkerType:
 def _execute_legacy_interpretation(
     db: DbSession,
     interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
     raw_entry = RawEntry(
         project_id=interpretation.project_id,
@@ -1486,9 +1762,13 @@ def _execute_legacy_interpretation(
     pending_worker = _pending_worker(db, interpretation)
 
     if event_type == CanonicalEventType.SETUP.value and action == "SETUP":
-        created = EntityRegistryService(db, interpretation.project_id).apply_setup(
-            interpretation.extracted_entities or []
-        )
+        if payload.create_new:
+            created = EntityRegistryService(db, interpretation.project_id).apply_setup(
+                interpretation.extracted_entities or []
+            )
+        else:
+            selected = _get_selected_worker(db, interpretation, payload)
+            created = [selected] if selected is not None else []
         workers.extend(created)
         history = HistoryEntry(
             project_id=interpretation.project_id,
@@ -1518,11 +1798,12 @@ def _execute_legacy_interpretation(
     if event_type == CanonicalEventType.SETUP.value:
         registry = EntityRegistryService(db, interpretation.project_id)
         entities = interpretation.extracted_entities or []
-        updated = registry.apply_setup(entities) if _pending_allows_new_entity(interpretation) else []
-        if not updated:
-            updated = registry.update_entities(entities) if _has_entity_field_updates(entities) else []
-        if not updated:
-            updated = registry.update_entity_by_partial_match(interpretation.raw_input_text)
+        selected = _get_selected_worker(db, interpretation, payload)
+        updated = (
+            registry.update_entity_by_id(selected.id, entities[0])
+            if selected is not None and entities and _has_entity_field_updates(entities)
+            else []
+        )
         workers.extend(updated)
         history = HistoryEntry(
             project_id=interpretation.project_id,
@@ -1785,36 +2066,14 @@ def _pending_worker(db: DbSession, interpretation: PendingInterpretation) -> Wor
     return worker
 
 
-def _ensure_profile_update_resolved(
-    db: DbSession,
-    interpretation: PendingInterpretation,
-) -> Worker | None:
-    worker = _pending_worker(db, interpretation)
-    if worker is not None:
-        return worker
-    name = _pending_entity_name(interpretation)
-    if name is None:
-        return None
-    worker = EntityRegistryService(db, interpretation.project_id).find_by_partial_match(name)
-    if worker is None:
-        return None
-    interpretation.suggested_entity_id = worker.id
-    interpretation.matched_input_text = name if name != worker.name else None
-    entities = interpretation.extracted_entities or []
-    if entities:
-        entities[0] = {
-            **entities[0],
-            "name": worker.name,
-            "type": worker.type.value,
-            "project_role": worker.type.value,
-        }
-        interpretation.extracted_entities = entities
-    return worker
-
-
 def _pending_allows_new_entity(interpretation: PendingInterpretation) -> bool:
     entities = interpretation.extracted_entities or []
     return bool(entities and entities[0].get("create_new") is True)
+
+
+def _pending_requires_entity_confirmation(interpretation: PendingInterpretation) -> bool:
+    entities = interpretation.extracted_entities or []
+    return bool(entities and entities[0].get("requires_confirmation") is True)
 
 
 def _pending_allows_new_llm_v2_vendor(
@@ -1897,9 +2156,19 @@ def _has_entity_field_updates(entities: list[dict]) -> bool:
             if isinstance(entity.get("field_updates"), dict)
             else entity
         )
-        if any(updates.get(key) for key in ["phone", "account_number", "role_detail", "daily_rate", "notes", "type", "project_role"]):
+        if any(updates.get(key) for key in ["phone", "account_number", "daily_rate", "notes"]):
             return True
     return False
+
+
+def _apply_role_assignment(worker: Worker, entity: dict[str, Any]) -> None:
+    role_value = entity.get("project_role") or entity.get("type")
+    worker_type = _llm_v2_role_to_worker_type(role_value)
+    if worker_type != WorkerType.OTHER:
+        worker.type = worker_type
+    role_detail = entity.get("role_detail")
+    if isinstance(role_detail, str) and role_detail.strip():
+        worker.role_detail = role_detail.strip()
 
 
 def _graph_intent(graph: dict[str, Any]) -> str:
@@ -1981,12 +2250,13 @@ def _graph_setup_entities(graph: dict[str, Any]) -> list[dict[str, Any]]:
         for entity in entities:
             if not isinstance(entity, dict) or not isinstance(entity.get("name"), str):
                 continue
-            entity_type = entity.get("type") or entity.get("role_guess") or "DAILY_WORKER"
+            entity_type = entity.get("type") or entity.get("role_guess") or "OTHER"
             field_updates = entity.get("field_updates")
             updates = field_updates if isinstance(field_updates, dict) else entity
             setup_entities.append(
                 {
                     "type": entity_type,
+                    "project_role": entity_type,
                     "name": entity.get("name"),
                     "phone": updates.get("phone"),
                     "account_number": updates.get("account_number"),
@@ -1999,7 +2269,8 @@ def _graph_setup_entities(graph: dict[str, Any]) -> list[dict[str, Any]]:
     if not setup_entities and isinstance(entity_name, str) and entity_name.strip():
         setup_entities.append(
                 {
-                "type": graph.get("role_guess") or "DAILY_WORKER",
+                "type": graph.get("role_guess") or "OTHER",
+                "project_role": graph.get("role_guess") or "OTHER",
                 "name": entity_name.strip(),
                 "phone": graph.get("phone"),
                 "account_number": graph.get("account_number"),

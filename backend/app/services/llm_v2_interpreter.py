@@ -8,9 +8,9 @@ from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen3:8b"
 
-VALID_INTENTS = {"SETUP", "WORK", "FINANCIAL", "NOTE", "DOCUMENT"}
+VALID_INTENTS = {"SET_ROLE", "SETUP", "WORK", "FINANCIAL", "NOTE", "DOCUMENT"}
 VALID_ACTIONS = {
-    "ADD_ENTITY", "UPDATE_ENTITY", "WORK_LOG",
+    "SET_ROLE", "ADD_ENTITY", "UPDATE_ENTITY", "WORK_LOG",
     "PAYMENT_IN", "PAYMENT_OUT", "PURCHASE_PAID",
     "DEBT_CREATED", "CHECK_PAYMENT", "NOTE",
 }
@@ -107,6 +107,8 @@ class LLMv2Interpreter:
         }
 
     def _action_for_intent(self, intent: Any) -> str:
+        if intent == "SET_ROLE":
+            return "SET_ROLE"
         if intent == "SETUP":
             return "ADD_ENTITY"
         if intent == "WORK":

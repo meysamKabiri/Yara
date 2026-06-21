@@ -8,8 +8,8 @@ Return STRICT JSON only. No markdown. No explanation outside JSON.
 
 Schema:
 {
-  "intent": "SETUP | WORK | FINANCIAL | NOTE | DOCUMENT",
-  "action": "ADD_ENTITY | UPDATE_ENTITY | WORK_LOG | PAYMENT_IN | PAYMENT_OUT | PURCHASE_PAID | DEBT_CREATED | CHECK_PAYMENT | NOTE",
+  "intent": "SET_ROLE | SETUP | WORK | FINANCIAL | NOTE | DOCUMENT",
+  "action": "SET_ROLE | ADD_ENTITY | UPDATE_ENTITY | WORK_LOG | PAYMENT_IN | PAYMENT_OUT | PURCHASE_PAID | DEBT_CREATED | CHECK_PAYMENT | NOTE",
   "entities": [
     {
       "name": "string",
@@ -50,8 +50,9 @@ Schema:
 }
 
 Intent & action meanings:
-- SETUP + ADD_ENTITY: defining new people, clients, workers, vendors or companies in the project
-- SETUP + UPDATE_ENTITY: updating contact info, role, or details of existing people/companies
+- SET_ROLE + SET_ROLE: assigning or changing only a person's/company's project role or role_detail
+- SETUP + ADD_ENTITY: creating a new person, client, worker, vendor or company in the project when the text explicitly introduces them as a new entity
+- SETUP + UPDATE_ENTITY: updating profile fields of existing people/companies
 - WORK + WORK_LOG: recording labor, attendance, quantity progress (welding meters, tiling area, etc.)
 - FINANCIAL + PAYMENT_IN: money received into the project (from client, sale, etc.)
 - FINANCIAL + PAYMENT_OUT: money paid out (to worker, vendor, etc.)
@@ -75,6 +76,12 @@ Financial direction:
 - OUT: money leaving the project (payment to worker, payment to vendor, paid purchase)
 - NONE: no financial movement or unclear
 
+Incoming project account payments:
+- Phrases meaning money entered the project account are FINANCIAL + PAYMENT_IN with direction IN and payment_method BANK_TRANSFER.
+- Examples: "به حساب پروژه واریز کرد", "به حساب پروژه ریخت", "پول داد به پروژه", "برای پروژه واریز کرد".
+- For "{person} {amount} به حساب پروژه واریز کرد", extract the payer before the amount as the entity and set project_role CLIENT.
+- Example: "میثم 300 میلیون به حساب پروژه واریز کرد" -> entity name "میثم", project_role CLIENT, amount 300000000, direction IN, payment_method BANK_TRANSFER.
+
 Payment method:
 - CASH: cash payment/receipt
 - BANK_TRANSFER: electronic transfer ("کارت به کارت", "واریز", "حواله")
@@ -96,6 +103,8 @@ Rules:
 4. If important fields are missing, list them in missing_fields.
 5. Amount is a plain number in the source currency (تومان). "۵ میلیون" = 5000000.
 6. For purchases: if the text implies immediate payment, use PURCHASE_PAID. If it implies credit/debt, use DEBT_CREATED.
-7. Profile/contact/rate updates must be SETUP + UPDATE_ENTITY, not FINANCIAL or WORK. Examples: phone numbers, account/card numbers, daily worker wage/rate.
-8. For daily worker wage phrases such as "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است" or "روزی یک میلیون و دویست به مش رحیم می‌دیم", set daily_rate and field_updates.daily_rate.
-9. Return valid JSON only."""
+7. Role-only statements such as "کارفرمای پروژه است", "کارگر است", or "فروشنده است" must be SET_ROLE + SET_ROLE. Do not use UPDATE_ENTITY and do not add missing_fields.
+8. Profile/contact/rate/note updates must be SETUP + UPDATE_ENTITY, not FINANCIAL, WORK, or SET_ROLE. Only use UPDATE_ENTITY when phone, account/card number, daily_rate, notes, or field_updates are explicitly present.
+9. For daily worker wage phrases such as "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است" or "روزی یک میلیون و دویست به مش رحیم می‌دیم", set daily_rate and field_updates.daily_rate.
+10. missing_fields must not include phone, account_number, or role_detail for SET_ROLE + SET_ROLE.
+11. Return valid JSON only."""

@@ -37,16 +37,57 @@ def test_llm_v2_setup_adds_client_entity(client: TestClient, monkeypatch: pytest
     assert len(interpretations) == 1
     pi = interpretations[0]
     assert pi["canonical_event_type"] == "SETUP_EVENT"
-    assert pi["semantic_action"] == "SETUP"
+    assert pi["semantic_action"] == "SET_ROLE"
     assert pi["structured_interpretation"] is not None
-    assert pi["structured_interpretation"]["intent"] == "SETUP"
-    assert pi["structured_interpretation"]["action"] == "ADD_ENTITY"
+    assert pi["structured_interpretation"]["intent"] == "SET_ROLE"
+    assert pi["structured_interpretation"]["action"] == "SET_ROLE"
+    assert pi["structured_interpretation"]["missing_fields"] == []
     assert pi["extracted_entities"][0]["name"] == "مش رحیم"
     assert pi["extracted_entities"][0]["project_role"] == "CLIENT"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm", json={"create_new": True}).json()
     assert confirm["workers"][0]["name"] == "مش رحیم"
     assert confirm["workers"][0]["type"] == "CLIENT"
+
+
+def test_llm_v2_role_only_statement_is_set_role_without_missing_fields(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "UPDATE_ENTITY",
+            "entities": [{
+                "name": "میثم کبیری",
+                "kind": "PERSON",
+                "project_role": "CLIENT",
+                "role_detail": None,
+            }],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": ["phone", "account_number", "role_detail"],
+            "reasoning_summary": "میثم کبیری کارفرمای پروژه است",
+        }),
+    )
+
+    project = client.post("/projects", json={"name": "role-only"}).json()
+    pi = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "میثم کبیری کارفرمای پروژه است"},
+    ).json()["interpretations"][0]
+
+    assert pi["canonical_event_type"] == "SETUP_EVENT"
+    assert pi["semantic_action"] == "SET_ROLE"
+    assert pi["structured_interpretation"]["intent"] == "SET_ROLE"
+    assert pi["structured_interpretation"]["action"] == "SET_ROLE"
+    assert pi["structured_interpretation"]["missing_fields"] == []
+    assert pi["extracted_entities"][0]["name"] == "میثم کبیری"
+    assert pi["extracted_entities"][0]["project_role"] == "CLIENT"
 
 
 def test_llm_v2_work_records_daily_labor(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,7 +125,7 @@ def test_llm_v2_work_records_daily_labor(client: TestClient, monkeypatch: pytest
 def test_llm_v2_financial_payment_out(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM v2 financial OUT interpretation creates a payment with direction OUTGOING."""
     project = client.post("/projects", json={"name": "test3"}).json()
-    _make_worker(client, "نادری جوشکار", "SKILLED_WORKER", project["id"])
+    worker = _make_worker(client, "نادری جوشکار", "SKILLED_WORKER", project["id"])
 
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
@@ -108,7 +149,10 @@ def test_llm_v2_financial_payment_out(client: TestClient, monkeypatch: pytest.Mo
     assert pi["extracted_amount"] == "100000000.00"
     assert pi["financial_direction"] == "OUTGOING"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": worker["id"]},
+    ).json()
     assert len(confirm["payments"]) == 1
     assert confirm["payments"][0]["amount"] == "100000000.00"
     assert confirm["payments"][0]["direction"] == "OUTGOING"
@@ -118,7 +162,7 @@ def test_llm_v2_financial_payment_out(client: TestClient, monkeypatch: pytest.Mo
 def test_llm_v2_financial_payment_in(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM v2 financial IN interpretation creates an incoming payment."""
     project = client.post("/projects", json={"name": "test4"}).json()
-    _make_worker(client, "میثم کبیری", "CLIENT", project["id"])
+    worker = _make_worker(client, "میثم کبیری", "CLIENT", project["id"])
 
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
@@ -139,15 +183,57 @@ def test_llm_v2_financial_payment_in(client: TestClient, monkeypatch: pytest.Mon
     pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "میثم ۲۰۰ میلیون پول داد"}).json()["interpretations"][0]
     assert pi["financial_direction"] == "INCOMING"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": worker["id"]},
+    ).json()
     assert len(confirm["payments"]) == 1
     assert confirm["payments"][0]["direction"] == "INCOMING"
+
+
+def test_llm_v2_repairs_project_account_deposit_with_missing_entity(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "deposit repair"}).json()
+    existing = _make_worker(client, "میثم کبیری", "CLIENT", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PAYMENT_OUT",
+            "entities": [],
+            "financial": {"amount": None, "direction": "OUT", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.3,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "مدل جهت را اشتباه تشخیص داده است",
+        }),
+    )
+
+    pi = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "میثم 300 میلیون به حساب پروژه واریز کرد"},
+    ).json()["interpretations"][0]
+    entity = pi["extracted_entities"][0]
+
+    assert pi["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert pi["semantic_action"] == "PAYMENT"
+    assert pi["extracted_amount"] == "300000000.00"
+    assert pi["payment_method"] == "BANK_TRANSFER"
+    assert pi["financial_direction"] == "INCOMING"
+    assert entity["name"] == "میثم"
+    assert entity["type"] == "CLIENT"
+    assert entity["project_role"] == "CLIENT"
+    assert entity["candidate_matches"][0]["person_id"] == existing["id"]
 
 
 def test_llm_v2_financial_debt(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM v2 DEBT_CREATED interpretation creates an invoice."""
     project = client.post("/projects", json={"name": "test5"}).json()
-    _make_worker(client, "هادی‌پور سیم", "VENDOR", project["id"])
+    worker = _make_worker(client, "هادی‌پور سیم", "VENDOR", project["id"])
 
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
@@ -169,14 +255,17 @@ def test_llm_v2_financial_debt(client: TestClient, monkeypatch: pytest.MonkeyPat
     assert pi["financial_direction"] == "DEBT"
     assert pi["semantic_action"] == "DEBT_CREATED"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": worker["id"]},
+    ).json()
     assert len(confirm["invoices"]) == 1
     assert confirm["invoices"][0]["total_amount"] == "5000000.00"
 
 
-def test_llm_v2_resolves_compact_vendor_name(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_llm_v2_compact_prefix_vendor_name_requires_later_resolution(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     project = client.post("/projects", json={"name": "compact vendor"}).json()
-    vendor = _make_worker(client, "هادی‌پور سیم", "VENDOR", project["id"])
+    _make_worker(client, "هادی‌پور سیم", "VENDOR", project["id"])
 
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
@@ -200,8 +289,8 @@ def test_llm_v2_resolves_compact_vendor_name(client: TestClient, monkeypatch: py
     )
     assert response.status_code == 201
     pi = response.json()["interpretations"][0]
-    assert pi["suggested_entity_id"] == vendor["id"]
-    assert pi["matched_input_text"] == "هادیپور"
+    assert pi["suggested_entity_id"] is None
+    assert pi["matched_input_text"] is None
 
 
 def test_llm_v2_named_vendor_auto_create_allows_unknown_kind(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,7 +322,7 @@ def test_llm_v2_named_vendor_auto_create_allows_unknown_kind(client: TestClient,
     assert pi["structured_interpretation"]["ambiguity"] is False
     assert pi["confidence"] >= 0.85
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm", json={"create_new": True})
     assert confirm.status_code == 200
     result = confirm.json()
     assert result["workers"][0]["name"] == "هادیپور"
@@ -278,21 +367,12 @@ def test_llm_v2_paid_purchase_corrects_amount_direction_and_worker_role_conflict
     assert pi["extracted_entities"][0]["type"] == "VENDOR"
     assert pi["description"] == "خورطومی"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
-    assert confirm.status_code == 200
-    result = confirm.json()
-    assert result["invoices"] == []
-    assert len(result["payments"]) == 1
-    assert result["payments"][0]["amount"] == "2350000.00"
-    assert result["payments"][0]["direction"] == "OUTGOING"
-    assert result["payments"][0]["type"] == "CASH"
-    assert result["workers"][0]["id"] != daily_worker["id"]
-    assert result["workers"][0]["name"] == "هادی پور"
-    assert result["workers"][0]["type"] == "VENDOR"
-
-    workers = client.get(f"/projects/{project['id']}/workers").json()
-    same_name = [worker for worker in workers if worker["name"] == "هادی پور"]
-    assert {worker["type"] for worker in same_name} == {"DAILY_WORKER", "VENDOR"}
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": daily_worker["id"]},
+    )
+    assert confirm.status_code == 409
+    assert confirm.json()["detail"] == "Matched entity role conflicts with expected vendor role"
 
 
 def test_llm_v2_purchase_rejects_explicit_daily_worker_vendor_conflict(
@@ -425,11 +505,18 @@ def test_llm_v2_add_entity_with_existing_phone_update_is_coerced_to_update(
     assert response.status_code == 201
     pi = response.json()["interpretations"][0]
 
-    assert pi["suggested_entity_id"] == existing["id"]
+    assert pi["suggested_entity_id"] is None
     assert pi["semantic_action"] == "ENTITY_UPDATE"
     assert pi["structured_interpretation"]["action"] == "UPDATE_ENTITY"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    unresolved = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert unresolved.status_code == 400
+    assert unresolved.json()["detail"]["status"] == "NEEDS_SELECTION"
+
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": existing["id"]},
+    )
     assert confirm.status_code == 200
     workers = client.get(f"/projects/{project['id']}/workers").json()
     assert len(workers) == 1
@@ -443,7 +530,7 @@ def test_llm_v2_existing_account_number_update_does_not_create_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = client.post("/projects", json={"name": "profile account"}).json()
-    _make_worker(client, "میثم", "CLIENT", project["id"])
+    existing = _make_worker(client, "میثم", "CLIENT", project["id"])
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
         lambda self, text, pid: _mock_llm_v2({
@@ -468,7 +555,14 @@ def test_llm_v2_existing_account_number_update_does_not_create_duplicate(
     )
 
     pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "شماره حساب میثم 45734643565444"}).json()["interpretations"][0]
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    unresolved = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert unresolved.status_code == 400
+    assert unresolved.json()["detail"]["status"] == "NEEDS_SELECTION"
+
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": existing["id"]},
+    )
     workers = client.get(f"/projects/{project['id']}/workers").json()
 
     assert confirm.status_code == 200
@@ -482,7 +576,7 @@ def test_llm_v2_existing_daily_rate_update_does_not_change_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = client.post("/projects", json={"name": "profile rate"}).json()
-    _make_worker(client, "مش رحیم", "DAILY_WORKER", project["id"])
+    existing = _make_worker(client, "مش رحیم", "DAILY_WORKER", project["id"])
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
         lambda self, text, pid: _mock_llm_v2({
@@ -507,7 +601,14 @@ def test_llm_v2_existing_daily_rate_update_does_not_change_role(
     )
 
     pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است"}).json()["interpretations"][0]
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    unresolved = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert unresolved.status_code == 400
+    assert unresolved.json()["detail"]["status"] == "NEEDS_SELECTION"
+
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"selected_person_id": existing["id"]},
+    )
     workers = client.get(f"/projects/{project['id']}/workers").json()
 
     assert confirm.status_code == 200
@@ -515,6 +616,57 @@ def test_llm_v2_existing_daily_rate_update_does_not_change_role(
     assert len(workers) == 1
     assert workers[0]["type"] == "DAILY_WORKER"
     assert workers[0]["daily_rate"] == "1200000.00"
+
+
+def test_llm_v2_partial_setup_creation_is_blocked_until_confirmation_resolution(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    project = client.post("/projects", json={"name": "partial setup block"}).json()
+    existing = _make_worker(client, "میثم کبیری", "CLIENT", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "ADD_ENTITY",
+            "entities": [{
+                "name": "میثم",
+                "kind": "PERSON",
+                "project_role": "DAILY_WORKER",
+                "role_detail": None,
+            }],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.9,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "میثم به پروژه اضافه شود",
+        }),
+    )
+
+    pi = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "میثم کارگر پروژه است"},
+    ).json()["interpretations"][0]
+
+    entity = pi["extracted_entities"][0]
+    assert pi["suggested_entity_id"] is None
+    assert pi["semantic_action"] == "SET_ROLE"
+    assert pi["structured_interpretation"]["missing_fields"] == []
+    assert entity["name"] == "میثم"
+    assert entity["type"] == "DAILY_WORKER"
+    assert entity["project_role"] == "DAILY_WORKER"
+    assert entity["requires_confirmation"] is True
+    assert entity["candidate_matches"][0]["person_id"] == existing["id"]
+
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+
+    assert confirm.status_code == 400
+    assert confirm.json()["detail"]["status"] == "NEEDS_SELECTION"
+    assert workers == [existing]
 
 
 def test_confirmation_modal_phone_update_copy_is_not_add_copy() -> None:

@@ -192,6 +192,14 @@ export type PendingInterpretation = {
 
 export type PendingInterpretationUpdate = Partial<Pick<PendingInterpretation, "canonical_event_type" | "semantic_action" | "suggested_entity_id" | "matched_input_text" | "extracted_entities" | "extracted_amount" | "extracted_quantity" | "payment_method" | "financial_direction" | "due_date" | "description" | "structured_interpretation">>;
 
+export type PendingInterpretationConfirm = {
+  selected_person_id?: number | null;
+  create_new?: boolean;
+  name?: string | null;
+  role?: string | null;
+  role_detail?: string | null;
+};
+
 export type NaturalInputInterpretationResult = {
   interpretations: PendingInterpretation[];
 };
@@ -273,8 +281,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
-  confirmPendingInterpretation: (interpretationId: number) =>
-    request<NaturalInputResult>(`/pending-interpretations/${interpretationId}/confirm`, { method: "POST" }),
+  confirmPendingInterpretation: (interpretationId: number, payload: PendingInterpretationConfirm = {}) =>
+    request<NaturalInputResult>(`/pending-interpretations/${interpretationId}/confirm`, { method: "POST", body: JSON.stringify(payload) }),
   discardPendingInterpretation: (interpretationId: number) =>
     request<PendingInterpretation>(`/pending-interpretations/${interpretationId}/discard`, { method: "POST" }),
 };
