@@ -132,3 +132,26 @@ def test_mocked_latency_remains_stable(client: TestClient, monkeypatch) -> None:
 
     assert response.status_code == 201
     assert duration_ms < 500
+
+
+def test_role_only_setup_bypasses_slow_llm(client: TestClient, monkeypatch) -> None:
+    project = _create_project(client)
+
+    def slow_interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+        raise AssertionError("role-only setup should not call LLM")
+
+    monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", slow_interpret)
+
+    start = perf_counter()
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "میثم کبیری کارفرمای پروژه است"},
+    )
+    duration_ms = (perf_counter() - start) * 1000
+
+    assert response.status_code == 201
+    interpretation = response.json()["interpretations"][0]
+    assert interpretation["canonical_event_type"] == "SETUP_EVENT"
+    assert interpretation["semantic_action"] == "SET_ROLE"
+    assert interpretation["structured_interpretation"]["intent"] == "SET_ROLE"
+    assert duration_ms < 500

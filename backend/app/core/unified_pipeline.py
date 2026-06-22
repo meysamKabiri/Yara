@@ -58,6 +58,24 @@ def process_input(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
+    fast_setup = _build_role_assignment_interpretation(project_id, text, entity_context)
+    if fast_setup is not None:
+        db.add(fast_setup)
+        db.commit()
+        db.refresh(fast_setup)
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_setup]
 
     llm_v2_start = perf_counter()
     llm_v2_result = _safe_llm_v2_result(text, project_id)
@@ -473,6 +491,93 @@ def _build_profile_update_interpretation(
         structured_interpretation=None,
         status=PendingInterpretationStatus.PENDING,
     )
+
+
+def _build_role_assignment_interpretation(
+    project_id: int,
+    raw_text: str,
+    entity_context: list[Worker],
+) -> PendingInterpretation | None:
+    if _text_has_financial_signal(raw_text) or not _is_role_only_assignment_text(raw_text):
+        return None
+    extracted = PersianRoleExtractor().extract(raw_text)
+    if extracted is None or extracted.confidence < 0.75:
+        return None
+    role = extracted.worker_type.value
+    resolution = resolve_candidates(extracted.name, entity_context)
+    entity: dict[str, Any] = {
+        "name": extracted.name,
+        "kind": "PERSON",
+        "project_role": role,
+        "role_detail": extracted.role_phrase if role == "SKILLED_WORKER" else None,
+        "type": role,
+    }
+    if resolution["candidates"]:
+        entity["requires_confirmation"] = True
+        entity["candidate_matches"] = resolution["candidates"]
+    structured = {
+        "intent": "SET_ROLE",
+        "action": "SET_ROLE",
+        "entities": [entity],
+        "financial": {
+            "amount": None,
+            "direction": "NONE",
+            "payment_method": None,
+            "due_date_text": None,
+        },
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": None},
+        "confidence": extracted.confidence,
+        "ambiguity": False,
+        "missing_fields": [],
+        "reasoning_summary": f"{extracted.name} نقش {extracted.role_phrase} دارد",
+    }
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type="SETUP_EVENT",
+        semantic_action="SET_ROLE",
+        suggested_entity_id=None,
+        matched_input_text=None,
+        extracted_entities=[entity],
+        extracted_amount=None,
+        extracted_quantity=None,
+        payment_method=None,
+        financial_direction=None,
+        due_date=None,
+        description=raw_text,
+        confidence=extracted.confidence,
+        structured_interpretation=structured,
+        status=PendingInterpretationStatus.PENDING,
+    )
+
+
+def _text_has_financial_signal(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    return any(
+        term in normalized
+        for term in [
+            "گرفتم",
+            "گرفت",
+            "پرداختم",
+            "پرداخت",
+            "خریدم",
+            "خرید",
+            "واریز",
+            "پول داد",
+            "چک",
+            "میلیون",
+            "تومان",
+            "تومن",
+        ]
+    )
+
+
+def _is_role_only_assignment_text(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    if any(term in normalized for term in ["اضافه", "امروز", "کار کرد", "کارکرد", "اومد", "آمد", "زد"]):
+        return False
+    return any(term in normalized for term in [" است", " هست", "می باشد", "میباشد"])
 
 
 def _coerce_llm_v2_profile_update_action(interpretation: Any) -> None:

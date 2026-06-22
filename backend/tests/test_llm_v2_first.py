@@ -12,6 +12,23 @@ def _mock_llm_v2(result: dict) -> dict:
     return result
 
 
+def _confirm_financial(client: TestClient, pi: dict, payload: dict | None = None) -> dict:
+    response = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json=payload or {},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    if body.get("status") == "ENTITY_RESOLVED":
+        response = client.post(
+            f"/pending-interpretations/{pi['id']}/confirm",
+            json={"entity_id": body["entity_id"], "confirmed": True},
+        )
+        assert response.status_code == 200
+        body = response.json()
+    return body
+
+
 def test_llm_v2_setup_adds_client_entity(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM v2 interpretation of a client setup creates the correct pending interpretation."""
     monkeypatch.setattr(
@@ -149,10 +166,7 @@ def test_llm_v2_financial_payment_out(client: TestClient, monkeypatch: pytest.Mo
     assert pi["extracted_amount"] == "100000000.00"
     assert pi["financial_direction"] == "OUTGOING"
 
-    confirm = client.post(
-        f"/pending-interpretations/{pi['id']}/confirm",
-        json={"selected_person_id": worker["id"]},
-    ).json()
+    confirm = _confirm_financial(client, pi, {"selected_person_id": worker["id"]})
     assert len(confirm["payments"]) == 1
     assert confirm["payments"][0]["amount"] == "100000000.00"
     assert confirm["payments"][0]["direction"] == "OUTGOING"
@@ -183,10 +197,7 @@ def test_llm_v2_financial_payment_in(client: TestClient, monkeypatch: pytest.Mon
     pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "میثم ۲۰۰ میلیون پول داد"}).json()["interpretations"][0]
     assert pi["financial_direction"] == "INCOMING"
 
-    confirm = client.post(
-        f"/pending-interpretations/{pi['id']}/confirm",
-        json={"selected_person_id": worker["id"]},
-    ).json()
+    confirm = _confirm_financial(client, pi, {"selected_person_id": worker["id"]})
     assert len(confirm["payments"]) == 1
     assert confirm["payments"][0]["direction"] == "INCOMING"
 
@@ -255,10 +266,7 @@ def test_llm_v2_financial_debt(client: TestClient, monkeypatch: pytest.MonkeyPat
     assert pi["financial_direction"] == "DEBT"
     assert pi["semantic_action"] == "DEBT_CREATED"
 
-    confirm = client.post(
-        f"/pending-interpretations/{pi['id']}/confirm",
-        json={"selected_person_id": worker["id"]},
-    ).json()
+    confirm = _confirm_financial(client, pi, {"selected_person_id": worker["id"]})
     assert len(confirm["invoices"]) == 1
     assert confirm["invoices"][0]["total_amount"] == "5000000.00"
 
@@ -324,7 +332,9 @@ def test_llm_v2_named_vendor_auto_create_allows_unknown_kind(client: TestClient,
 
     confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm", json={"create_new": True})
     assert confirm.status_code == 200
-    result = confirm.json()
+    resolved = confirm.json()
+    assert resolved["status"] == "ENTITY_RESOLVED"
+    result = _confirm_financial(client, pi, {"entity_id": resolved["entity_id"], "confirmed": True})
     assert result["workers"][0]["name"] == "هادیپور"
     assert result["workers"][0]["type"] == "VENDOR"
 
@@ -371,6 +381,14 @@ def test_llm_v2_paid_purchase_corrects_amount_direction_and_worker_role_conflict
         f"/pending-interpretations/{pi['id']}/confirm",
         json={"selected_person_id": daily_worker["id"]},
     )
+    assert confirm.status_code == 200
+    resolved = confirm.json()
+    assert resolved["status"] == "ENTITY_RESOLVED"
+
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"entity_id": resolved["entity_id"], "confirmed": True},
+    )
     assert confirm.status_code == 409
     assert confirm.json()["detail"] == "Matched entity role conflicts with expected vendor role"
 
@@ -408,7 +426,10 @@ def test_llm_v2_purchase_rejects_explicit_daily_worker_vendor_conflict(
     )
     assert edit.status_code == 200
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"entity_id": daily_worker["id"], "confirmed": True},
+    )
     assert confirm.status_code == 409
     assert "vendor role" in confirm.json()["detail"]
 
@@ -670,11 +691,12 @@ def test_llm_v2_partial_setup_creation_is_blocked_until_confirmation_resolution(
 
 
 def test_confirmation_modal_phone_update_copy_is_not_add_copy() -> None:
-    source = Path(__file__).resolve().parents[2] / "frontend" / "src" / "App.tsx"
-    app_source = source.read_text()
+    source = Path(__file__).resolve().parents[2] / "frontend" / "src" / "ui" / "entity" / "EntityUpdateModal.tsx"
+    modal_source = source.read_text()
 
-    assert "شماره تماس ${entity} به ${setupEntity.phone} به‌روزرسانی می‌شود." in app_source
-    assert "به‌روزرسانی اطلاعات فرد" in app_source
+    assert "به‌روزرسانی اطلاعات فرد" in modal_source
+    assert "شماره موبایل" in modal_source
+    assert "به عنوان" not in modal_source
 
 
 def _make_worker(client: TestClient, name: str, worker_type: str, project_id: int | None = None) -> dict:

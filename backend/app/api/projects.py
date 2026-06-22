@@ -1,12 +1,16 @@
+import logging
+import os
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, status
 from sqlalchemy import func, select
 
+from app.core.trace_events import TraceEvent, trace_error, trace_event
 from app.core import unified_pipeline
 from app.dependencies.database import DbSession
 from app.models.core import (
@@ -38,6 +42,7 @@ from app.schemas.projects import (
     ExtractedEventCreate,
     ExtractedEventRead,
     ExtractedEventUpdate,
+    EntityResolutionResult,
     HistoryEntryRead,
     InvoiceCreate,
     InvoiceRead,
@@ -63,7 +68,11 @@ from app.schemas.projects import (
     WorkLogRead,
     WorkLogUpdate,
 )
+from app.services.entity_resolution_service import EntityResolutionService
 from app.services.entity_registry import EntityRegistryService
+from app.services.domain_router_service import DomainRouterService, DomainType
+from app.services.execution_comparator import ExecutionComparator
+from app.services.execution_engine import ConfirmedFinancialInterpretation, ExecutionEngine
 from app.services.financial_summary import invoice_paid_amount, project_operating_summary
 from app.services.llm_extraction import extract, extract_graph  # noqa: F401
 from app.services.llm_v2_interpreter import LLMv2Interpreter  # noqa: F401
@@ -80,6 +89,12 @@ from app.services.semantic_normalizer import (
 )
 
 router = APIRouter(tags=["projects"])
+logger = logging.getLogger(__name__)
+USE_EXECUTION_ENGINE = os.getenv("YARA_USE_EXECUTION_ENGINE", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 
 def _get_project(db: DbSession, project_id: int) -> Project:
@@ -241,7 +256,7 @@ def _role_to_worker_type(role: str | None, event_type: str | None = None) -> Wor
         return WorkerType.OTHER
     if role == "WORKER" or event_type == "WORK_LOG":
         return WorkerType.DAILY_WORKER
-    return WorkerType.DAILY_WORKER
+    return WorkerType.OTHER
 
 
 def _worker_type_for_entity(
@@ -453,6 +468,10 @@ def _build_pending_interpretations(
             if raw_event.get("quantity_text") is not None:
                 event_graph["quantity_text"] = raw_event.get("quantity_text")
         effective_action = canonical_event.action
+        effective_type = canonical_event.type
+        if effective_type == CanonicalEventType.NOTE and _graph_setup_entities(event_graph):
+            effective_type = CanonicalEventType.SETUP
+            effective_action = "SETUP"
         if detect_purchase_payment(raw_text) is not None and effective_action == "PAYMENT" and not _purchase_has_debt_or_check_terms(raw_text):
             effective_action = "PURCHASE_PAID"
         payment_method = None
@@ -460,16 +479,16 @@ def _build_pending_interpretations(
             payment_method = PaymentType.CHECK.value
         elif effective_action == "PURCHASE_PAID":
             payment_method = PaymentType.CASH.value
-        elif canonical_event.type == CanonicalEventType.FINANCIAL:
+        elif effective_type == CanonicalEventType.FINANCIAL:
             payment_method = PaymentType.BANK_TRANSFER.value
         incoming_project_payment = (
             detect_incoming_project_payment(raw_text)
-            if canonical_event.type == CanonicalEventType.FINANCIAL
+            if effective_type == CanonicalEventType.FINANCIAL
             else None
         )
         purchase_payment = (
             detect_purchase_payment(raw_text)
-            if canonical_event.type == CanonicalEventType.FINANCIAL
+            if effective_type == CanonicalEventType.FINANCIAL
             else None
         )
         draft_entities = _draft_entities(event_graph, canonical_event, raw_text)
@@ -487,7 +506,7 @@ def _build_pending_interpretations(
         )
         financial_direction = _financial_direction(
             raw_text,
-            canonical_event.type,
+            effective_type,
             effective_action,
             resolved_entity,
         )
@@ -510,7 +529,7 @@ def _build_pending_interpretations(
             PendingInterpretation(
                 project_id=project_id,
                 raw_input_text=raw_text,
-                canonical_event_type=canonical_event.type.value,
+                canonical_event_type=effective_type.value,
                 semantic_action=effective_action,
                 suggested_entity_id=resolved_entity.id if resolved_entity is not None else None,
                 matched_input_text=(
@@ -927,6 +946,7 @@ def process_natural_input(
     payload: NaturalInputCreate,
     db: DbSession,
 ) -> NaturalInputInterpretationResult:
+    _get_project(db, project_id)
     interpretations = unified_pipeline.process_input(db, project_id, payload.text)
     return NaturalInputInterpretationResult(interpretations=interpretations)
 
@@ -996,26 +1016,60 @@ def discard_pending_interpretation(
 
 @router.post(
     "/pending-interpretations/{interpretation_id}/confirm",
-    response_model=NaturalInputResult,
+    response_model=NaturalInputResult | EntityResolutionResult,
 )
 def confirm_pending_interpretation(
     interpretation_id: int,
     db: DbSession,
     payload: PendingInterpretationConfirm | None = Body(default=None),
-) -> NaturalInputResult:
+) -> NaturalInputResult | EntityResolutionResult:
+    db_write_start = perf_counter()
     if not isinstance(payload, PendingInterpretationConfirm):
         payload = PendingInterpretationConfirm()
-    interpretation = _get_pending_interpretation(db, interpretation_id)
-    if interpretation.status not in {
-        PendingInterpretationStatus.PENDING,
-        PendingInterpretationStatus.EDITED,
-    }:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed")
-    result = _execute_pending_interpretation(db, interpretation, payload)
-    interpretation.status = PendingInterpretationStatus.CONFIRMED
-    db.commit()
-    db.refresh(interpretation)
-    return result
+    try:
+        interpretation = _get_pending_interpretation(db, interpretation_id)
+        if interpretation.status not in {
+            PendingInterpretationStatus.PENDING,
+            PendingInterpretationStatus.EDITED,
+        }:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed")
+        route = _domain_route(interpretation)
+        if route["domain"] == DomainType.MIXED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Mixed setup and financial input must be split before confirmation",
+            )
+        resolution_result = _resolve_entity_phase_if_needed(db, interpretation, payload)
+        if resolution_result is not None:
+            db.commit()
+            trace_event(
+                TraceEvent.DB_WRITE_SUCCESS,
+                {"pending_interpretation_id": interpretation.id, "stage": "entity_resolution"},
+                start_time=db_write_start,
+            )
+            return EntityResolutionResult(
+                status="ENTITY_RESOLVED",
+                entity_id=resolution_result["entity_id"],
+                is_new=resolution_result["is_new"],
+                name=resolution_result["name"],
+                role=resolution_result["role"],
+                requires_confirmation=False,
+            )
+        result = _execute_pending_interpretation(db, interpretation, payload)
+        interpretation.status = PendingInterpretationStatus.CONFIRMED
+        db.commit()
+        trace_event(
+            TraceEvent.DB_WRITE_SUCCESS,
+            {"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
+            start_time=db_write_start,
+        )
+        db.refresh(interpretation)
+        if not _execution_engine_primary_enabled(interpretation):
+            _run_execution_engine_shadow(db, interpretation, payload, result)
+        return result
+    except Exception as exc:
+        trace_error(exc, {"pending_interpretation_id": interpretation_id})
+        raise
 
 
 def _get_pending_interpretation(db: DbSession, interpretation_id: int) -> PendingInterpretation:
@@ -1034,12 +1088,440 @@ def _execute_pending_interpretation(
     payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
     _apply_create_new_confirmation_payload(interpretation, payload)
+    route = _domain_route(interpretation)
+    if route["domain"] == DomainType.SETUP.value and _execution_engine_primary_enabled(interpretation):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Setup domain must not use financial execution",
+        )
     if interpretation.structured_interpretation is not None:
         _validate_llm_v2_confirmation_safety(db, interpretation, payload)
+        if _execution_engine_primary_enabled(interpretation):
+            return _execute_with_execution_engine_primary(db, interpretation, payload)
         return _execute_llm_v2_interpretation(db, interpretation, payload)
 
     _validate_legacy_confirmation_safety(db, interpretation, payload)
+    if _execution_engine_primary_enabled(interpretation):
+        return _execute_with_execution_engine_primary(db, interpretation, payload)
     return _execute_legacy_interpretation(db, interpretation, payload)
+
+
+def _resolve_entity_phase_if_needed(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> dict[str, Any] | None:
+    if not _execution_engine_primary_enabled(interpretation):
+        return None
+    if payload.entity_id is not None and payload.confirmed:
+        payload.selected_person_id = payload.entity_id
+        interpretation.suggested_entity_id = payload.entity_id
+        return None
+    if payload.entity_id is not None and not payload.confirmed:
+        return _resolve_entity_phase(db, interpretation, payload, payload.entity_id)
+    if payload.selected_person_id is not None and payload.confirmed:
+        payload.entity_id = payload.selected_person_id
+        interpretation.suggested_entity_id = payload.selected_person_id
+        return None
+    if payload.selected_person_id is not None:
+        return _resolve_entity_phase(db, interpretation, payload, payload.selected_person_id)
+
+    entity_name = payload.name or _pending_entity_name(interpretation)
+    entity_role = payload.role or _entity_resolution_role(interpretation)
+    return _resolve_entity_phase(
+        db,
+        interpretation,
+        payload,
+        None,
+        entity_name,
+        entity_role,
+        payload.role_detail,
+        payload.create_new,
+    )
+
+
+def _domain_route(interpretation: PendingInterpretation) -> dict[str, Any]:
+    return DomainRouterService().route(
+        interpretation.raw_input_text,
+        interpretation.structured_interpretation
+        or {
+            "semantic_action": interpretation.semantic_action,
+            "action": interpretation.semantic_action,
+        },
+    )
+
+
+def _resolve_entity_phase(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+    entity_id: int | None = None,
+    entity_name: str | None = None,
+    entity_role: str | WorkerType | None = None,
+    role_detail: str | None = None,
+    create_new: bool = False,
+) -> dict[str, Any]:
+    try:
+        resolved = EntityResolutionService(db, interpretation.project_id).resolve(
+            entity_id=entity_id,
+            name=entity_name,
+            role=entity_role,
+            role_detail=role_detail,
+            create_new=create_new,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    interpretation.suggested_entity_id = resolved["entity_id"]
+    payload.entity_id = resolved["entity_id"]
+    payload.selected_person_id = resolved["entity_id"]
+    entities = list(interpretation.extracted_entities or [{}])
+    entity = dict(entities[0] if entities else {})
+    entity.update(
+        {
+            "name": resolved["name"],
+            "type": resolved["role"],
+            "project_role": resolved["role"],
+        }
+    )
+    entity.pop("create_new", None)
+    entities[0] = entity
+    interpretation.extracted_entities = entities
+    return resolved
+
+
+def _entity_resolution_role(interpretation: PendingInterpretation) -> str:
+    entities = interpretation.extracted_entities or []
+    if entities:
+        entity = entities[0]
+        role = entity.get("project_role") or entity.get("type") or entity.get("role_guess")
+        if isinstance(role, str) and role:
+            return role
+    if interpretation.financial_direction == FinancialDirection.INCOMING:
+        return WorkerType.CLIENT.value
+    return WorkerType.VENDOR.value
+
+
+def _execution_engine_primary_enabled(interpretation: PendingInterpretation) -> bool:
+    return (
+        USE_EXECUTION_ENGINE
+        and interpretation.canonical_event_type == CanonicalEventType.FINANCIAL.value
+    )
+
+
+def _run_execution_engine_shadow(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+    old_result: NaturalInputResult,
+) -> None:
+    confirmed = _confirmed_financial_interpretation_for_shadow(
+        interpretation,
+        payload,
+        old_result,
+    )
+    if confirmed is None:
+        return
+    transaction = db.begin_nested()
+    try:
+        state = _shadow_state_for_confirmed_person(db, confirmed)
+        shadow_result = ExecutionEngine().execute_confirmed_interpretation(
+            confirmed,
+            db,
+            state,
+        )
+        comparison = ExecutionComparator().compare(old_result, shadow_result)
+        logger.info(
+            "execution_engine_shadow_comparison",
+            extra={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+                "comparison": comparison,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "execution_engine_shadow_failed",
+            extra={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+            },
+        )
+    finally:
+        transaction.rollback()
+
+
+def _execute_with_execution_engine_primary(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> NaturalInputResult:
+    raw_entry = RawEntry(
+        project_id=interpretation.project_id,
+        text=interpretation.raw_input_text,
+        status=RawEntryStatus.PROCESSED,
+    )
+    db.add(raw_entry)
+    db.flush()
+
+    worker = _execution_engine_worker(db, interpretation, payload)
+    state = _shadow_state_for_confirmed_person(
+        db,
+        ConfirmedFinancialInterpretation(
+            project_id=interpretation.project_id,
+            semantic_action=interpretation.semantic_action,
+            amount=interpretation.extracted_amount,
+            entity_id=worker.id,
+            financial_direction=interpretation.financial_direction,
+            payment_method=interpretation.payment_method,
+            due_date=interpretation.due_date,
+            description=interpretation.description,
+        ),
+    )
+    confirmed = ConfirmedFinancialInterpretation(
+        project_id=interpretation.project_id,
+        semantic_action=interpretation.semantic_action,
+        amount=interpretation.extracted_amount,
+        entity_id=worker.id,
+        financial_direction=interpretation.financial_direction,
+        payment_method=interpretation.payment_method,
+        due_date=interpretation.due_date,
+        description=interpretation.description,
+    )
+    engine_result = ExecutionEngine().execute_confirmed_interpretation(
+        confirmed,
+        db,
+        state,
+    )
+    payments = [
+        payment
+        for payment_id in _result_ids(engine_result, "payments")
+        if (payment := db.get(Payment, payment_id)) is not None
+    ]
+    invoices = [
+        invoice
+        for invoice_id in _result_ids(engine_result, "invoices")
+        if (invoice := db.get(Invoice, invoice_id)) is not None
+    ]
+    state = _shadow_state_for_confirmed_person(db, confirmed)
+    states = [state] if state is not None else []
+    change_type = HistoryChangeType.INVOICE if invoices else HistoryChangeType.PAYMENT
+    history_entries = []
+    if state is not None:
+        history_entries.append(
+            _add_history(
+                db,
+                interpretation.project_id,
+                state,
+                interpretation.raw_input_text,
+                change_type,
+                _history_delta(
+                    canonical_event_type=interpretation.canonical_event_type,
+                    semantic_action=interpretation.semantic_action,
+                    amount=interpretation.extracted_amount,
+                    balance=state.financial_balance,
+                    payment_method=interpretation.payment_method,
+                    due_date=interpretation.due_date,
+                    financial_direction=(
+                        interpretation.financial_direction.value
+                        if interpretation.financial_direction is not None
+                        else None
+                    ),
+                ),
+                _semantic_history_fields_from_pending(interpretation),
+            )
+        )
+    db.flush()
+    for item in [worker, *states, *history_entries, *payments, *invoices]:
+        db.refresh(item)
+    result = NaturalInputResult(
+        raw_entry_id=raw_entry.id,
+        intent=interpretation.canonical_event_type,
+        workers=[worker],
+        states=states,
+        history_entries=history_entries,
+        work_logs=[],
+        invoices=invoices,
+        payments=payments,
+    )
+    logger.info(
+        "confirmed_interpretation_executed",
+        extra={
+            "engine": "execution_engine",
+            "pending_interpretation_id": interpretation.id,
+            "project_id": interpretation.project_id,
+            "summary": _execution_result_summary(result),
+        },
+    )
+    _run_legacy_execution_shadow(db, interpretation, payload, result)
+    return result
+
+
+def _execution_engine_worker(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> Worker:
+    entity_id = payload.entity_id or payload.selected_person_id or interpretation.suggested_entity_id
+    if entity_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Entity must be resolved before execution",
+        )
+    payload.entity_id = entity_id
+    payload.selected_person_id = entity_id
+    worker = _get_selected_worker(db, interpretation, payload)
+    if worker is not None:
+        return worker
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Entity must be resolved before execution",
+    )
+
+
+def _pending_allows_new_financial_vendor(interpretation: PendingInterpretation) -> bool:
+    if interpretation.structured_interpretation is None:
+        return _pending_allows_new_legacy_vendor(interpretation)
+    try:
+        from app.schemas.llm_v2 import LLMv2Interpretation
+
+        si = LLMv2Interpretation(**interpretation.structured_interpretation)
+    except Exception:
+        return False
+    return _pending_allows_new_llm_v2_vendor(interpretation, si)
+
+
+def _result_ids(engine_result: dict[str, Any], key: str) -> list[int]:
+    ids: list[int] = []
+    for item in engine_result.get(key) or []:
+        item_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(item_id, int):
+            ids.append(item_id)
+    return ids
+
+
+def _run_legacy_execution_shadow(
+    db: DbSession,
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+    engine_result: NaturalInputResult,
+) -> None:
+    transaction = db.begin_nested()
+    try:
+        legacy_result = (
+            _execute_llm_v2_interpretation(db, interpretation, payload)
+            if interpretation.structured_interpretation is not None
+            else _execute_legacy_interpretation(db, interpretation, payload)
+        )
+        comparison = ExecutionComparator().compare(legacy_result, _natural_result_to_engine_dict(engine_result))
+        logger.info(
+            "legacy_execution_shadow_comparison",
+            extra={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+                "comparison": comparison,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "legacy_execution_shadow_failed",
+            extra={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+            },
+        )
+    finally:
+        transaction.rollback()
+
+
+def _natural_result_to_engine_dict(result: NaturalInputResult) -> dict[str, Any]:
+    return {
+        "payments": [
+            {
+                "entity_id": payment.entity_id,
+                "amount": str(payment.amount),
+                "type": payment.type.value,
+                "direction": payment.direction.value,
+                "due_date": payment.due_date,
+                "related_invoice_id": payment.related_invoice_id,
+            }
+            for payment in result.payments
+        ],
+        "invoices": [
+            {
+                "vendor_id": invoice.vendor_id,
+                "total_amount": str(invoice.total_amount),
+                "description": invoice.description,
+                "status": invoice.status.value,
+            }
+            for invoice in result.invoices
+        ],
+    }
+
+
+def _execution_result_summary(result: NaturalInputResult) -> dict[str, Any]:
+    return {
+        "payments": len(result.payments),
+        "invoices": len(result.invoices),
+        "workers": len(result.workers),
+        "states": len(result.states),
+    }
+
+
+def _confirmed_financial_interpretation_for_shadow(
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+    old_result: NaturalInputResult,
+) -> ConfirmedFinancialInterpretation | None:
+    if interpretation.canonical_event_type != CanonicalEventType.FINANCIAL.value:
+        return None
+    entity_id = _shadow_selected_person_id(interpretation, payload, old_result)
+    return ConfirmedFinancialInterpretation(
+        project_id=interpretation.project_id,
+        semantic_action=interpretation.semantic_action,
+        amount=interpretation.extracted_amount,
+        entity_id=entity_id,
+        financial_direction=interpretation.financial_direction,
+        payment_method=interpretation.payment_method,
+        due_date=interpretation.due_date,
+        description=interpretation.description,
+    )
+
+
+def _shadow_selected_person_id(
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+    old_result: NaturalInputResult,
+) -> int | None:
+    if payload.entity_id is not None:
+        return payload.entity_id
+    if payload.selected_person_id is not None:
+        return payload.selected_person_id
+    if interpretation.suggested_entity_id is not None:
+        return interpretation.suggested_entity_id
+    if old_result.payments:
+        return old_result.payments[0].entity_id
+    if old_result.invoices:
+        return old_result.invoices[0].vendor_id
+    if old_result.workers:
+        return old_result.workers[0].id
+    return None
+
+
+def _shadow_state_for_confirmed_person(
+    db: DbSession,
+    confirmed: ConfirmedFinancialInterpretation,
+) -> WorkerState | None:
+    if confirmed.entity_id is None:
+        return None
+    return db.scalar(
+        select(WorkerState).where(
+            WorkerState.project_id == confirmed.project_id,
+            WorkerState.worker_id == confirmed.entity_id,
+        )
+    )
 
 
 def _apply_create_new_confirmation_payload(
@@ -1210,9 +1692,10 @@ def _get_selected_worker(
     interpretation: PendingInterpretation,
     payload: PendingInterpretationConfirm,
 ) -> Worker | None:
-    if payload.selected_person_id is None:
+    selected_id = payload.entity_id or payload.selected_person_id
+    if selected_id is None:
         return None
-    worker = db.get(Worker, payload.selected_person_id)
+    worker = db.get(Worker, selected_id)
     if worker is None or worker.project_id != interpretation.project_id:
         return None
     return worker
@@ -1258,9 +1741,15 @@ def _validate_llm_v2_confirmation_safety(
     if si.intent != LLMv2Intent.FINANCIAL:
         return
 
-    if si.action == LLMv2Action.PURCHASE_PAID:
-        si.financial.direction = LLMv2FinancialDirection.OUT
-        interpretation.financial_direction = FinancialDirection.OUTGOING
+    if _execution_engine_primary_enabled(interpretation) and (
+        payload.entity_id is None
+        and payload.selected_person_id is None
+        and interpretation.suggested_entity_id is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Entity must be resolved before execution",
+        )
 
     amount = (
         interpretation.extracted_amount
@@ -1294,9 +1783,7 @@ def _validate_llm_v2_confirmation_safety(
             status_code=status.HTTP_409_CONFLICT,
             detail="Matched entity role conflicts with expected vendor role",
         )
-    if worker is None and not (
-        payload.create_new and _pending_allows_new_llm_v2_vendor(interpretation, si)
-    ):
+    if worker is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Financial interpretation requires a resolved entity",
@@ -1332,6 +1819,7 @@ def _execute_llm_v2_interpretation(
 
     intent = si.intent
     action = si.action
+    confirmed_action = _confirmed_llm_v2_action(interpretation, action)
 
     if intent == LLMv2Intent.SETUP and action == LLMv2Action.ADD_ENTITY:
         if payload.create_new:
@@ -1558,7 +2046,7 @@ def _execute_llm_v2_interpretation(
 
     elif (
         intent == LLMv2Intent.FINANCIAL
-        and action == LLMv2Action.DEBT_CREATED
+        and confirmed_action == LLMv2Action.DEBT_CREATED
         and state is not None
     ):
         amount = interpretation.extracted_amount
@@ -1587,7 +2075,7 @@ def _execute_llm_v2_interpretation(
                 HistoryChangeType.INVOICE,
                 _history_delta(
                     intent=intent.value,
-                    action=action.value,
+                    action=confirmed_action.value,
                     amount=str(amount) if amount else None,
                     balance=str(state.financial_balance) if state else None,
                 ),
@@ -1599,37 +2087,15 @@ def _execute_llm_v2_interpretation(
         amount = interpretation.extracted_amount
         if amount is None:
             amount = si.financial.amount
-        fd = si.financial.direction
-        fd_val = fd.value if hasattr(fd, "value") else (fd or "OUT")
-        if action == LLMv2Action.PURCHASE_PAID:
-            fd_val = "OUT"
-        if fd_val == "NONE":
-            fd_val = "OUT"
+        direction = _confirmed_payment_direction(interpretation, si, confirmed_action)
         if amount is not None:
             amount = Decimal(str(amount))
-            payment_type = PaymentType.OTHER
-            if si.financial.payment_method:
-                pm = si.financial.payment_method
-                pm_val = pm.value if hasattr(pm, "value") else pm
-                if pm_val == "CASH":
-                    payment_type = PaymentType.CASH
-                elif pm_val == "BANK_TRANSFER":
-                    payment_type = PaymentType.BANK_TRANSFER
-                elif pm_val == "CHECK":
-                    payment_type = PaymentType.CHECK
-            elif action in {LLMv2Action.CHECK_PAYMENT}:
-                payment_type = PaymentType.CHECK
-            else:
-                payment_type = PaymentType(
-                    interpretation.payment_method or PaymentType.BANK_TRANSFER.value
-                )
+            payment_type = _confirmed_payment_type(interpretation, si, confirmed_action)
 
-            if fd_val == "IN" or action == LLMv2Action.PAYMENT_IN:
-                direction = FinancialDirection.INCOMING
+            if direction == FinancialDirection.INCOMING:
                 state.role = WorkerStateRole.CLIENT
                 state.financial_balance += amount
             else:
-                direction = FinancialDirection.OUTGOING
                 if state.role != WorkerStateRole.VENDOR and state.role != WorkerStateRole.CLIENT:
                     state.financial_balance -= amount
 
@@ -1639,7 +2105,7 @@ def _execute_llm_v2_interpretation(
                 amount=amount,
                 related_invoice_id=None,
                 type=payment_type,
-                due_date=si.financial.due_date_text or interpretation.due_date,
+                due_date=interpretation.due_date or si.financial.due_date_text,
                 direction=direction,
             )
             db.add(payment)
@@ -1654,15 +2120,11 @@ def _execute_llm_v2_interpretation(
                 HistoryChangeType.PAYMENT,
                 _history_delta(
                     intent=intent.value,
-                    action=action.value,
+                    action=confirmed_action.value,
                     amount=str(amount) if amount else None,
                     balance=str(state.financial_balance) if state else None,
-                    payment_method=(
-                        si.financial.payment_method.value
-                        if si.financial.payment_method
-                        else None
-                    ),
-                    financial_direction=fd_val,
+                    payment_method=payment_type.value,
+                    financial_direction=direction.value,
                 ),
                 semantic_history,
             )
@@ -1690,6 +2152,81 @@ def _execute_llm_v2_interpretation(
         history_entries=history_entries,
         work_logs=work_logs, invoices=invoices, payments=payments,
     )
+
+
+def _confirmed_llm_v2_action(
+    interpretation: PendingInterpretation,
+    fallback: Any,
+) -> Any:
+    from app.schemas.llm_v2 import LLMv2Action
+
+    semantic_action = interpretation.semantic_action
+    if semantic_action == "PAYMENT":
+        if interpretation.financial_direction == FinancialDirection.DEBT:
+            return LLMv2Action.DEBT_CREATED
+        if (
+            interpretation.financial_direction == FinancialDirection.DEFERRED
+            or interpretation.payment_method == PaymentType.CHECK
+        ):
+            return LLMv2Action.CHECK_PAYMENT
+        if interpretation.financial_direction == FinancialDirection.INCOMING:
+            return LLMv2Action.PAYMENT_IN
+        if interpretation.financial_direction == FinancialDirection.OUTGOING:
+            return LLMv2Action.PAYMENT_OUT
+        return fallback
+    mapping = {
+        "PURCHASE_PAID": LLMv2Action.PURCHASE_PAID,
+        "DEBT_CREATED": LLMv2Action.DEBT_CREATED,
+        "INVOICE": LLMv2Action.DEBT_CREATED,
+        "CHECK_PAYMENT": LLMv2Action.CHECK_PAYMENT,
+        "DEFERRED_PAYMENT": LLMv2Action.CHECK_PAYMENT,
+    }
+    return mapping.get(semantic_action, fallback)
+
+
+def _confirmed_payment_direction(
+    interpretation: PendingInterpretation,
+    si: Any,
+    action: Any,
+) -> FinancialDirection:
+    from app.schemas.llm_v2 import LLMv2Action
+
+    if interpretation.financial_direction in {
+        FinancialDirection.INCOMING,
+        FinancialDirection.OUTGOING,
+        FinancialDirection.DEFERRED,
+    }:
+        return interpretation.financial_direction
+
+    if action == LLMv2Action.PAYMENT_IN:
+        return FinancialDirection.INCOMING
+
+    fd = si.financial.direction
+    fd_val = fd.value if hasattr(fd, "value") else (fd or "OUT")
+    if fd_val == "IN":
+        return FinancialDirection.INCOMING
+    return FinancialDirection.OUTGOING
+
+
+def _confirmed_payment_type(
+    interpretation: PendingInterpretation,
+    si: Any,
+    action: Any,
+) -> PaymentType:
+    from app.schemas.llm_v2 import LLMv2Action
+
+    if interpretation.payment_method:
+        return PaymentType(interpretation.payment_method)
+    if action == LLMv2Action.CHECK_PAYMENT:
+        return PaymentType.CHECK
+    if si.financial.payment_method:
+        pm = si.financial.payment_method
+        pm_val = pm.value if hasattr(pm, "value") else pm
+        if pm_val in {PaymentType.CASH.value, PaymentType.BANK_TRANSFER.value, PaymentType.CHECK.value, PaymentType.OTHER.value}:
+            return PaymentType(pm_val)
+    if action == LLMv2Action.PURCHASE_PAID:
+        return PaymentType.CASH
+    return PaymentType.BANK_TRANSFER
 
 
 def _llm_v2_role_to_state_role(
@@ -2551,10 +3088,22 @@ def create_invoice(project_id: int, payload: InvoiceCreate, db: DbSession) -> In
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Worker is not a vendor",
         )
-    invoice = Invoice(project_id=project_id, status=InvoiceStatus.OPEN, **payload.model_dump())
-    db.add(invoice)
     state = _find_or_create_worker_state(db, project_id, vendor.name, WorkerStateRole.VENDOR)
-    state.financial_balance += payload.total_amount
+    engine_result = ExecutionEngine().execute_confirmed_interpretation(
+        ConfirmedFinancialInterpretation(
+            project_id=project_id,
+            semantic_action="DEBT_CREATED",
+            amount=payload.total_amount,
+            entity_id=payload.vendor_id,
+            description=payload.description,
+        ),
+        db,
+        state,
+    )
+    invoice_id = _result_ids(engine_result, "invoices")[0]
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Invoice creation failed")
     _add_history(
         db,
         project_id,
@@ -2587,7 +3136,7 @@ def list_invoices(project_id: int, db: DbSession) -> list[Invoice]:
 )
 def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Payment:
     _get_project(db, project_id)
-    _get_worker(db, project_id, payload.entity_id)
+    entity = _get_worker(db, project_id, payload.entity_id)
     invoice = None
     if payload.related_invoice_id is not None:
         invoice = _get_invoice(db, project_id, payload.related_invoice_id)
@@ -2596,10 +3145,6 @@ def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Pa
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Payment entity must match invoice vendor",
             )
-    payment = Payment(project_id=project_id, **payload.model_dump())
-    db.add(payment)
-    db.flush()
-    entity = _get_worker(db, project_id, payload.entity_id)
     state_role = (
         WorkerStateRole.CLIENT
         if payload.direction == FinancialDirection.INCOMING or entity.type == WorkerType.CLIENT
@@ -2608,12 +3153,25 @@ def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Pa
         else WorkerStateRole.DAILY
     )
     state = _find_or_create_worker_state(db, project_id, entity.name, state_role)
-    if payload.direction == FinancialDirection.INCOMING:
-        state.financial_balance += payload.amount
-    elif invoice is not None:
-        state.financial_balance -= payload.amount
-    elif state.role != WorkerStateRole.VENDOR:
-        state.financial_balance -= payload.amount
+    action = "CHECK_PAYMENT" if payload.type == PaymentType.CHECK else "PAYMENT"
+    engine_result = ExecutionEngine().execute_confirmed_interpretation(
+        ConfirmedFinancialInterpretation(
+            project_id=project_id,
+            semantic_action=action,
+            amount=payload.amount,
+            entity_id=payload.entity_id,
+            financial_direction=payload.direction,
+            payment_method=payload.type,
+            due_date=payload.due_date,
+            related_invoice_id=payload.related_invoice_id,
+        ),
+        db,
+        state,
+    )
+    payment_id = _result_ids(engine_result, "payments")[0]
+    payment = db.get(Payment, payment_id)
+    if payment is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Payment creation failed")
     _add_history(
         db,
         project_id,

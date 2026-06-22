@@ -67,6 +67,23 @@ def _create_project(client: TestClient) -> dict:
     return response.json()
 
 
+def _confirm_financial(client: TestClient, draft: dict, payload: dict | None = None) -> dict:
+    response = client.post(
+        f"/pending-interpretations/{draft['id']}/confirm",
+        json=payload or {},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    if body.get("status") == "ENTITY_RESOLVED":
+        response = client.post(
+            f"/pending-interpretations/{draft['id']}/confirm",
+            json={"entity_id": body["entity_id"], "confirmed": True},
+        )
+        assert response.status_code == 200
+        body = response.json()
+    return body
+
+
 def test_llm_v2_is_attempted_before_legacy(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
@@ -234,14 +251,231 @@ def test_paid_purchase_from_llm_v2_does_not_create_payables(
     before = client.get(f"/projects/{project['id']}/operating-summary").json()
     assert before["open_payables"] == "0"
 
-    confirmed = client.post(
-        f"/pending-interpretations/{draft['id']}/confirm",
-        json={"selected_person_id": vendor["id"]},
-    ).json()
+    confirmed = _confirm_financial(client, draft, {"selected_person_id": vendor["id"]})
     assert confirmed["payments"][0]["direction"] == "OUTGOING"
     assert confirmed["invoices"] == []
     after = client.get(f"/projects/{project['id']}/operating-summary").json()
     assert after["open_payables"] == "0"
+
+
+def test_edited_llm_v2_purchase_to_debt_creates_invoice_not_payment(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PURCHASE_PAID",
+            25_000_000,
+            payment_method="CASH",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    vendor = client.post(
+        f"/projects/{project['id']}/workers",
+        json={"name": "هادی‌پور سیم", "type": "VENDOR"},
+    ).json()
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادی‌پور سیم ۲۵ میلیون سیم خریدم و پرداخت کردم"},
+    ).json()["interpretations"][0]
+
+    edit = client.patch(
+        f"/pending-interpretations/{draft['id']}",
+        json={
+            "semantic_action": "DEBT_CREATED",
+            "financial_direction": "DEBT",
+            "payment_method": None,
+            "description": "edited unpaid purchase",
+        },
+    )
+    assert edit.status_code == 200
+
+    confirmed = _confirm_financial(client, draft, {"selected_person_id": vendor["id"]})
+
+    assert confirmed["payments"] == []
+    assert confirmed["invoices"][0]["vendor_id"] == vendor["id"]
+    assert confirmed["invoices"][0]["total_amount"] == "25000000.00"
+
+
+def test_edited_llm_v2_financial_direction_incoming_is_respected(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PAYMENT_OUT",
+            50_000_000,
+            direction="OUT",
+            name="علی",
+            project_role="CLIENT",
+            payment_method="BANK_TRANSFER",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    client_worker = client.post(
+        f"/projects/{project['id']}/workers",
+        json={"name": "علی", "type": "CLIENT"},
+    ).json()
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از علی ۵۰ میلیون گرفتم بابت پروژه"},
+    ).json()["interpretations"][0]
+
+    edit = client.patch(
+        f"/pending-interpretations/{draft['id']}",
+        json={
+            "semantic_action": "PAYMENT",
+            "financial_direction": "INCOMING",
+            "payment_method": "BANK_TRANSFER",
+        },
+    )
+    assert edit.status_code == 200
+
+    confirmed = _confirm_financial(client, draft, {"selected_person_id": client_worker["id"]})
+
+    assert confirmed["payments"][0]["direction"] == "INCOMING"
+    assert confirmed["payments"][0]["entity_id"] == client_worker["id"]
+
+
+def test_edited_llm_v2_payment_method_check_is_respected(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PURCHASE_PAID",
+            25_000_000,
+            payment_method="CASH",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    vendor = client.post(
+        f"/projects/{project['id']}/workers",
+        json={"name": "هادی‌پور سیم", "type": "VENDOR"},
+    ).json()
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "به هادی‌پور سیم چک ۲۵ میلیونی دادم برای سیم"},
+    ).json()["interpretations"][0]
+
+    edit = client.patch(
+        f"/pending-interpretations/{draft['id']}",
+        json={"payment_method": "CHECK", "financial_direction": "OUTGOING"},
+    )
+    assert edit.status_code == 200
+
+    confirmed = _confirm_financial(client, draft, {"selected_person_id": vendor["id"]})
+
+    assert confirmed["payments"][0]["type"] == "CHECK"
+    assert confirmed["payments"][0]["direction"] == "OUTGOING"
+
+
+def test_edited_llm_v2_debt_to_generic_payment_does_not_use_stale_debt_action(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "DEBT_CREATED",
+            25_000_000,
+            payment_method=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    vendor = client.post(
+        f"/projects/{project['id']}/workers",
+        json={"name": "هادی‌پور سیم", "type": "VENDOR"},
+    ).json()
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "از هادی‌پور سیم ۲۵ میلیون سیم خریدم و بدهکار شدم"},
+    ).json()["interpretations"][0]
+
+    edit = client.patch(
+        f"/pending-interpretations/{draft['id']}",
+        json={
+            "semantic_action": "PAYMENT",
+            "financial_direction": "OUTGOING",
+            "payment_method": "CASH",
+        },
+    )
+    assert edit.status_code == 200
+
+    confirmed = _confirm_financial(client, draft, {"selected_person_id": vendor["id"]})
+
+    assert confirmed["invoices"] == []
+    assert confirmed["payments"][0]["type"] == "CASH"
+    assert confirmed["payments"][0]["direction"] == "OUTGOING"
+
+
+def test_edited_llm_v2_deferred_payment_preserves_check_direction(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, project_id: _valid_llm_v2_financial(
+            "PAYMENT_OUT",
+            25_000_000,
+            payment_method="BANK_TRANSFER",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.api.projects.extract_graph",
+        lambda text: pytest.fail("legacy should not run after valid LLM v2"),
+    )
+
+    project = _create_project(client)
+    vendor = client.post(
+        f"/projects/{project['id']}/workers",
+        json={"name": "هادی‌پور سیم", "type": "VENDOR"},
+    ).json()
+    draft = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "به هادی‌پور سیم ۲۵ میلیون دادم"},
+    ).json()["interpretations"][0]
+
+    edit = client.patch(
+        f"/pending-interpretations/{draft['id']}",
+        json={
+            "semantic_action": "DEFERRED_PAYMENT",
+            "financial_direction": "DEFERRED",
+            "payment_method": "CHECK",
+            "due_date": "۱۴ مهر ۱۴۰۵",
+        },
+    )
+    assert edit.status_code == 200
+
+    confirmed = _confirm_financial(client, draft, {"selected_person_id": vendor["id"]})
+
+    assert confirmed["invoices"] == []
+    assert confirmed["payments"][0]["type"] == "CHECK"
+    assert confirmed["payments"][0]["direction"] == "DEFERRED"
+    assert confirmed["payments"][0]["due_date"] == "۱۴ مهر ۱۴۰۵"
 
 
 def test_llm_v2_financial_unknown_entity_must_block_confirmation(
@@ -274,6 +508,11 @@ def test_llm_v2_financial_unknown_entity_must_block_confirmation(
     ).json()["interpretations"][0]
 
     response = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    if response.status_code == 200 and response.json().get("status") == "ENTITY_RESOLVED":
+        response = client.post(
+            f"/pending-interpretations/{draft['id']}/confirm",
+            json={"entity_id": response.json()["entity_id"], "confirmed": True},
+        )
     assert response.status_code == 409
 
 
@@ -306,6 +545,11 @@ def test_llm_v2_financial_missing_amount_must_block_confirmation(
     ).json()["interpretations"][0]
 
     response = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    if response.status_code == 200 and response.json().get("status") == "ENTITY_RESOLVED":
+        response = client.post(
+            f"/pending-interpretations/{draft['id']}/confirm",
+            json={"entity_id": response.json()["entity_id"], "confirmed": True},
+        )
     assert response.status_code == 409
 
 
@@ -342,6 +586,11 @@ def test_llm_v2_financial_missing_direction_must_block_confirmation(
     ).json()
 
     response = client.post(f"/pending-interpretations/{draft['id']}/confirm")
+    if response.status_code == 200 and response.json().get("status") == "ENTITY_RESOLVED":
+        response = client.post(
+            f"/pending-interpretations/{draft['id']}/confirm",
+            json={"entity_id": response.json()["entity_id"], "confirmed": True},
+        )
     assert response.status_code == 409
 
 
@@ -379,10 +628,12 @@ def test_llm_v2_new_vendor_paid_purchase_auto_creates_vendor_after_confirm(
         json={"create_new": True},
     )
     assert confirmed.status_code == 200
-    body = confirmed.json()
+    resolved = confirmed.json()
+    assert resolved["status"] == "ENTITY_RESOLVED"
+    body = _confirm_financial(client, draft, {"entity_id": resolved["entity_id"], "confirmed": True})
     assert body["workers"][0]["name"] == "هادیپور"
     assert body["workers"][0]["type"] == "VENDOR"
-    assert body["payments"][0]["entity_id"] == body["workers"][0]["id"]
+    assert body["payments"][0]["entity_id"] == resolved["entity_id"]
     assert body["payments"][0]["amount"] == "5000000.00"
     assert body["invoices"] == []
     assert len(client.get(f"/projects/{project['id']}/workers").json()) == 1
@@ -419,9 +670,11 @@ def test_llm_v2_new_vendor_unpaid_purchase_auto_creates_payable(
         json={"create_new": True},
     )
     assert confirmed.status_code == 200
-    body = confirmed.json()
+    resolved = confirmed.json()
+    assert resolved["status"] == "ENTITY_RESOLVED"
+    body = _confirm_financial(client, draft, {"entity_id": resolved["entity_id"], "confirmed": True})
     assert body["workers"][0]["type"] == "VENDOR"
-    assert body["invoices"][0]["vendor_id"] == body["workers"][0]["id"]
+    assert body["invoices"][0]["vendor_id"] == resolved["entity_id"]
     assert body["invoices"][0]["total_amount"] == "10000000.00"
     assert body["payments"] == []
 
@@ -459,7 +712,9 @@ def test_llm_v2_new_vendor_check_purchase_auto_creates_check_payment_with_due_da
         json={"create_new": True},
     )
     assert confirmed.status_code == 200
-    payment = confirmed.json()["payments"][0]
+    resolved = confirmed.json()
+    assert resolved["status"] == "ENTITY_RESOLVED"
+    payment = _confirm_financial(client, draft, {"entity_id": resolved["entity_id"], "confirmed": True})["payments"][0]
     assert payment["type"] == "CHECK"
     assert payment["due_date"] == "۱۴ مهر"
 
@@ -500,7 +755,9 @@ def test_llm_v2_existing_vendor_reused_for_compact_purchase_name(
         json={"selected_person_id": vendor["id"]},
     )
     assert confirmed.status_code == 200
-    assert confirmed.json()["payments"][0]["entity_id"] == vendor["id"]
+    assert confirmed.json()["status"] == "ENTITY_RESOLVED"
+    body = _confirm_financial(client, draft, {"entity_id": vendor["id"], "confirmed": True})
+    assert body["payments"][0]["entity_id"] == vendor["id"]
     assert len(client.get(f"/projects/{project['id']}/workers").json()) == 1
 
 

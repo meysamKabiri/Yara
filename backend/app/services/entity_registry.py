@@ -170,9 +170,11 @@ class EntityRegistryService:
             return WorkerType.VENDOR
         if value in {"SKILLED", "SKILLED_WORKER"}:
             return WorkerType.SKILLED_WORKER
+        if value in {"WORKER", "DAILY_WORKER"}:
+            return WorkerType.DAILY_WORKER
         if value == "OTHER":
             return WorkerType.OTHER
-        return WorkerType.DAILY_WORKER
+        return WorkerType.OTHER
 
     def _update_if_present(self, worker: Worker, field: str, value: Any) -> None:
         if isinstance(value, str) and value.strip():

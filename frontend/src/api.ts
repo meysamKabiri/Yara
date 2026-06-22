@@ -1,5 +1,40 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
+/* =========================================================
+   TRACE SYSTEM (FIXED - MINIMAL SAFE VERSION)
+========================================================= */
+
+const traceListeners = new Set<(traceId: string) => void>();
+
+// prevent infinite duplicate calls
+const seenTraceIds = new Set<string>();
+
+export function subscribeToTraceIds(
+  listener: (traceId: string) => void,
+): () => void {
+  traceListeners.add(listener);
+
+  return () => {
+    traceListeners.delete(listener);
+  };
+}
+
+function emitTrace(traceId: string) {
+  if (!traceId) return;
+
+  // ✅ CRITICAL FIX: prevent infinite loops
+  if (seenTraceIds.has(traceId)) return;
+  seenTraceIds.add(traceId);
+
+  traceListeners.forEach((listener) => {
+    listener(traceId);
+  });
+}
+
+/* =========================================================
+   TYPES
+========================================================= */
+
 export type Project = {
   id: number;
   name: string;
@@ -43,12 +78,13 @@ export type ExtractedEvent = {
 export type EventType = "MONEY_IN" | "MONEY_OUT" | "PURCHASE" | "NOTE";
 export type CounterpartyType = "CUSTOMER" | "VENDOR" | "WORKER" | "UNKNOWN";
 
-export type EventUpdate = Pick<
-  ExtractedEvent,
-  "type" | "counterparty_name" | "counterparty_type" | "amount" | "description" | "event_date"
->;
+export type WorkerType =
+  | "DAILY_WORKER"
+  | "SKILLED_WORKER"
+  | "VENDOR"
+  | "CLIENT"
+  | "OTHER";
 
-export type WorkerType = "DAILY_WORKER" | "SKILLED_WORKER" | "VENDOR" | "CLIENT" | "OTHER";
 export type WorkUnit = "meter" | "day" | "item" | "project" | "custom";
 export type PaymentType = "CASH" | "BANK_TRANSFER" | "CHECK" | "OTHER";
 export type FinancialDirection = "INCOMING" | "OUTGOING" | "DEBT" | "DEFERRED";
@@ -63,6 +99,20 @@ export type Worker = {
   account_number: string | null;
   daily_rate: string | null;
   notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkerState = {
+  id: number;
+  project_id: number;
+  worker_id: number;
+  name: string;
+  role: "DAILY" | "SKILLED" | "VENDOR" | "CLIENT";
+  total_days_worked: string;
+  total_quantity: string;
+  unit: string | null;
+  financial_balance: string;
   created_at: string;
   updated_at: string;
 };
@@ -99,6 +149,7 @@ export type Payment = {
   amount: string;
   related_invoice_id: number | null;
   type: PaymentType;
+  due_date: string | null;
   direction: FinancialDirection;
   created_at: string;
   updated_at: string;
@@ -129,43 +180,21 @@ export type OperatingSummary = {
   }>;
 };
 
-export type WorkerState = {
-  id: number;
-  project_id: number;
-  worker_id: number;
-  name: string;
-  role: "DAILY" | "SKILLED" | "VENDOR" | "CLIENT";
-  total_days_worked: string;
-  total_quantity: string;
-  unit: string | null;
-  financial_balance: string;
-  created_at: string;
-  updated_at: string;
-};
-
 export type HistoryEntry = {
   id: number;
   project_id: number;
   worker_state_id: number | null;
   input_text: string;
-  change_type: "WORK" | "PAYMENT" | "INVOICE" | "SETUP" | "ENTITY_UPDATE" | "NOTE";
+  change_type: string;
   delta: Record<string, string | number | null> | string | number | null;
+  rule_id: string | null;
+  explanation: Record<string, unknown> | null;
+  conflict_warnings: Array<Record<string, unknown>> | null;
   created_at: string;
   updated_at: string;
 };
 
-export type NaturalInputResult = {
-  raw_entry_id: number;
-  intent: string;
-  workers: Worker[];
-  states: WorkerState[];
-  history_entries: HistoryEntry[];
-  work_logs: WorkLog[];
-  invoices: Invoice[];
-  payments: Payment[];
-};
-
-export type PendingInterpretationStatus = "PENDING" | "CONFIRMED" | "EDITED" | "DISCARDED";
+export type PendingInterpretationStatus = "PENDING" | "EDITED" | "CONFIRMED" | "DISCARDED";
 
 export type PendingInterpretation = {
   id: number;
@@ -175,7 +204,7 @@ export type PendingInterpretation = {
   semantic_action: string;
   suggested_entity_id: number | null;
   matched_input_text: string | null;
-  extracted_entities: Array<Record<string, string | number | boolean | null | Record<string, string | number | boolean | null>>> | null;
+  extracted_entities: Array<Record<string, unknown>> | null;
   extracted_amount: string | null;
   extracted_quantity: string | null;
   payment_method: PaymentType | null;
@@ -185,6 +214,12 @@ export type PendingInterpretation = {
   semantic_explanation: Record<string, unknown> | null;
   confidence: number | null;
   structured_interpretation: Record<string, unknown> | null;
+  domain_route: {
+    domain: "SETUP" | "FINANCIAL" | "ENTITY_UPDATE" | "MIXED";
+    confidence: number;
+    required_schema: "setup_confirmation" | "financial_confirmation" | "split_confirmation";
+    ui_mode: "SetupModal" | "FinancialModal" | "SplitFlow";
+  } | null;
   status: PendingInterpretationStatus;
   created_at: string;
   updated_at: string;
@@ -193,16 +228,63 @@ export type PendingInterpretation = {
 export type PendingInterpretationUpdate = Partial<Pick<PendingInterpretation, "canonical_event_type" | "semantic_action" | "suggested_entity_id" | "matched_input_text" | "extracted_entities" | "extracted_amount" | "extracted_quantity" | "payment_method" | "financial_direction" | "due_date" | "description" | "structured_interpretation">>;
 
 export type PendingInterpretationConfirm = {
+  entity_id?: number | null;
   selected_person_id?: number | null;
+  confirmed?: boolean;
   create_new?: boolean;
   name?: string | null;
   role?: string | null;
   role_detail?: string | null;
 };
 
+export type EntityResolutionResult = {
+  status: "ENTITY_RESOLVED";
+  entity_id: number;
+  is_new: boolean;
+  name: string;
+  role: string;
+  requires_confirmation: boolean;
+};
+
+export type PendingInterpretationConfirmResult = NaturalInputResult | EntityResolutionResult;
+
+export type NaturalInputResult = {
+  raw_entry_id: number | null;
+  intent: string;
+  workers: Worker[];
+  states: WorkerState[];
+  history_entries: HistoryEntry[];
+  work_logs: WorkLog[];
+  invoices: Invoice[];
+  payments: Payment[];
+};
+
 export type NaturalInputInterpretationResult = {
   interpretations: PendingInterpretation[];
 };
+
+/* =========================================================
+   TRACE EVENT TYPES
+========================================================= */
+
+export type TraceEvent = {
+  trace_id: string;
+  event: string;
+  payload: Record<string, unknown>;
+  start_time: number | null;
+  end_time: number | null;
+  duration_ms: number | null;
+  created_at: number;
+};
+
+export type TraceDetail = {
+  trace_id: string;
+  events: TraceEvent[];
+};
+
+/* =========================================================
+   REQUEST WRAPPER
+========================================================= */
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -213,6 +295,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
   });
 
+  // ✅ TRACE HOOK (FIXED)
+  const traceId = response.headers.get("X-Trace-Id");
+
+  // Only emit for NON-read-only debug endpoints
+  const isTraceRead = path.startsWith("/traces/");
+
+  if (traceId && !isTraceRead) {
+    emitTrace(traceId);
+  }
+
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || `Request failed with ${response.status}`);
@@ -221,68 +313,142 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/* =========================================================
+   API
+========================================================= */
+
 export const api = {
   listProjects: () => request<Project[]>("/projects"),
+
   createProject: (name: string) =>
     request<Project>("/projects", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  getProject: (projectId: number) => request<ProjectDetail>(`/projects/${projectId}`),
-  listRawEntries: (projectId: number) => request<RawEntry[]>(`/projects/${projectId}/raw-entries`),
+
+  getProject: (projectId: number) =>
+    request<ProjectDetail>(`/projects/${projectId}`),
+
+  listRawEntries: (projectId: number) =>
+    request<RawEntry[]>(`/projects/${projectId}/raw-entries`),
+
   createRawEntry: (projectId: number, text: string) =>
     request<RawEntry>(`/projects/${projectId}/raw-entries`, {
       method: "POST",
       body: JSON.stringify({ text }),
     }),
+
   extractRawEntry: (projectId: number, rawEntryId: number) =>
-    request<ExtractedEvent[]>(`/projects/${projectId}/raw-entries/${rawEntryId}/extract`, {
-      method: "POST",
-    }),
+    request<ExtractedEvent[]>(
+      `/projects/${projectId}/raw-entries/${rawEntryId}/extract`,
+      { method: "POST" },
+    ),
+
   listPendingEvents: (projectId: number) =>
-    request<ExtractedEvent[]>(`/projects/${projectId}/extracted-events/pending`),
+    request<ExtractedEvent[]>(
+      `/projects/${projectId}/extracted-events/pending`,
+    ),
+
   listConfirmedEvents: (projectId: number) =>
-    request<ExtractedEvent[]>(`/projects/${projectId}/extracted-events/confirmed`),
-  updateEvent: (eventId: number, payload: EventUpdate) =>
+    request<ExtractedEvent[]>(
+      `/projects/${projectId}/extracted-events/confirmed`,
+    ),
+
+  updateEvent: (eventId: number, payload: Partial<ExtractedEvent>) =>
     request<ExtractedEvent>(`/extracted-events/${eventId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+
   confirmEvent: (eventId: number) =>
-    request<ExtractedEvent>(`/extracted-events/${eventId}/confirm`, { method: "POST" }),
+    request<ExtractedEvent>(`/extracted-events/${eventId}/confirm`, {
+      method: "POST",
+    }),
+
   discardEvent: (eventId: number) =>
-    request<ExtractedEvent>(`/extracted-events/${eventId}/discard`, { method: "POST" }),
-  listWorkers: (projectId: number) => request<Worker[]>(`/projects/${projectId}/workers`),
-  listWorkerStates: (projectId: number) => request<WorkerState[]>(`/projects/${projectId}/worker-states`),
-  listHistory: (projectId: number) => request<HistoryEntry[]>(`/projects/${projectId}/history`),
+    request<ExtractedEvent>(`/extracted-events/${eventId}/discard`, {
+      method: "POST",
+    }),
+
+  listWorkers: (projectId: number) =>
+    request<Worker[]>(`/projects/${projectId}/workers`),
+
   createWorker: (projectId: number, payload: Pick<Worker, "name" | "type"> & Partial<Pick<Worker, "role_detail" | "phone" | "account_number" | "daily_rate" | "notes">>) =>
-    request<Worker>(`/projects/${projectId}/workers`, { method: "POST", body: JSON.stringify(payload) }),
+    request<Worker>(`/projects/${projectId}/workers`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   updateWorker: (workerId: number, payload: Partial<Pick<Worker, "name" | "type" | "role_detail" | "phone" | "account_number" | "daily_rate" | "notes">>) =>
-    request<Worker>(`/workers/${workerId}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  listWorkLogs: (projectId: number) => request<WorkLog[]>(`/projects/${projectId}/work-logs`),
+    request<Worker>(`/workers/${workerId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  listWorkerStates: (projectId: number) =>
+    request<WorkerState[]>(`/projects/${projectId}/worker-states`),
+
+  listHistory: (projectId: number) =>
+    request<HistoryEntry[]>(`/projects/${projectId}/history`),
+
+  listWorkLogs: (projectId: number) =>
+    request<WorkLog[]>(`/projects/${projectId}/work-logs`),
+
   createWorkLog: (projectId: number, payload: { worker_id: number; task_name: string; unit: WorkUnit; quantity: string; rate_per_unit?: string | null; description?: string | null }) =>
-    request<WorkLog>(`/projects/${projectId}/work-logs`, { method: "POST", body: JSON.stringify(payload) }),
+    request<WorkLog>(`/projects/${projectId}/work-logs`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   updateWorkLog: (workLogId: number, payload: Partial<{ task_name: string; unit: WorkUnit; quantity: string; rate_per_unit: string | null; description: string | null }>) =>
-    request<WorkLog>(`/work-logs/${workLogId}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  listInvoices: (projectId: number) => request<Invoice[]>(`/projects/${projectId}/invoices`),
+    request<WorkLog>(`/work-logs/${workLogId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  listPayments: (projectId: number) =>
+    request<Payment[]>(`/projects/${projectId}/payments`),
+
+  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType; direction?: FinancialDirection; due_date?: string | null }) =>
+    request<Payment>(`/projects/${projectId}/payments`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  listInvoices: (projectId: number) =>
+    request<Invoice[]>(`/projects/${projectId}/invoices`),
+
   createInvoice: (projectId: number, payload: { vendor_id: number; total_amount: string; description?: string | null }) =>
-    request<Invoice>(`/projects/${projectId}/invoices`, { method: "POST", body: JSON.stringify(payload) }),
-  listPayments: (projectId: number) => request<Payment[]>(`/projects/${projectId}/payments`),
-  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType }) =>
-    request<Payment>(`/projects/${projectId}/payments`, { method: "POST", body: JSON.stringify(payload) }),
-  getOperatingSummary: (projectId: number) => request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
+    request<Invoice>(`/projects/${projectId}/invoices`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  getOperatingSummary: (projectId: number) =>
+    request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
+
+  getTrace: (traceId: string) => request<TraceDetail>(`/traces/${traceId}`),
+
   processNaturalInput: (projectId: number, text: string) =>
     request<NaturalInputInterpretationResult>(`/projects/${projectId}/natural-input`, {
       method: "POST",
       body: JSON.stringify({ text }),
     }),
-  updatePendingInterpretation: (interpretationId: number, payload: PendingInterpretationUpdate) =>
-    request<PendingInterpretation>(`/pending-interpretations/${interpretationId}`, {
+
+  updatePendingInterpretation: (id: number, payload: PendingInterpretationUpdate) =>
+    request<PendingInterpretation>(`/pending-interpretations/${id}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
-  confirmPendingInterpretation: (interpretationId: number, payload: PendingInterpretationConfirm = {}) =>
-    request<NaturalInputResult>(`/pending-interpretations/${interpretationId}/confirm`, { method: "POST", body: JSON.stringify(payload) }),
-  discardPendingInterpretation: (interpretationId: number) =>
-    request<PendingInterpretation>(`/pending-interpretations/${interpretationId}/discard`, { method: "POST" }),
+
+  confirmPendingInterpretation: (id: number, payload: PendingInterpretationConfirm = {}) =>
+    request<PendingInterpretationConfirmResult>(`/pending-interpretations/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  discardPendingInterpretation: (id: number) =>
+    request<PendingInterpretation>(`/pending-interpretations/${id}/discard`, {
+      method: "POST",
+    }),
 };

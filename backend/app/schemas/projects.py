@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.models.core import (
     CounterpartyType,
@@ -239,6 +239,13 @@ class NaturalInputCreate(BaseModel):
     text: str
 
 
+class DomainRouteRead(BaseModel):
+    domain: str
+    confidence: float
+    required_schema: str
+    ui_mode: str
+
+
 class PendingInterpretationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -259,9 +266,27 @@ class PendingInterpretationRead(BaseModel):
     semantic_explanation: dict | None
     confidence: float | None
     structured_interpretation: dict | None = None
+    domain_route: DomainRouteRead | None = None
     status: PendingInterpretationStatus
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def attach_domain_route(self) -> "PendingInterpretationRead":
+        if self.domain_route is None:
+            from app.services.domain_router_service import DomainRouterService
+
+            self.domain_route = DomainRouteRead(
+                **DomainRouterService().route(
+                    self.raw_input_text,
+                    self.structured_interpretation
+                    or {
+                        "semantic_action": self.semantic_action,
+                        "action": self.semantic_action,
+                    },
+                )
+            )
+        return self
 
 
 class PendingInterpretationUpdate(BaseModel):
@@ -280,11 +305,22 @@ class PendingInterpretationUpdate(BaseModel):
 
 
 class PendingInterpretationConfirm(BaseModel):
+    entity_id: int | None = None
     selected_person_id: int | None = None
+    confirmed: bool = False
     create_new: bool = False
     name: str | None = None
     role: str | None = None
     role_detail: str | None = None
+
+
+class EntityResolutionResult(BaseModel):
+    status: str
+    entity_id: int
+    is_new: bool = False
+    name: str
+    role: str
+    requires_confirmation: bool = False
 
 
 class NaturalInputInterpretationResult(BaseModel):

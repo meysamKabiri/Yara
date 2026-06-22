@@ -62,11 +62,7 @@ def _run_steps(
                     db,
                 )
                 confirmed_results = [
-                    project_api.confirm_pending_interpretation(
-                        interpretation.id,
-                        db,
-                        _confirmation_payload_for_interpretation(db, interpretation),
-                    )
+                    _confirm_interpretation(db, interpretation)
                     for interpretation in draft.interpretations
                 ]
                 trace.append(
@@ -120,6 +116,21 @@ def _confirmation_payload_for_interpretation(db, interpretation) -> PendingInter
     if interpretation.canonical_event_type == "SETUP_EVENT" or _pending_entity_is_vendor(interpretation):
         return PendingInterpretationConfirm(create_new=True)
     return PendingInterpretationConfirm()
+
+
+def _confirm_interpretation(db, interpretation):
+    result = project_api.confirm_pending_interpretation(
+        interpretation.id,
+        db,
+        _confirmation_payload_for_interpretation(db, interpretation),
+    )
+    if getattr(result, "status", None) == "ENTITY_RESOLVED":
+        result = project_api.confirm_pending_interpretation(
+            interpretation.id,
+            db,
+            PendingInterpretationConfirm(entity_id=result.entity_id, confirmed=True),
+        )
+    return result
 
 
 def _pending_entity_is_vendor(interpretation) -> bool:
