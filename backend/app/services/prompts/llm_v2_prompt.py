@@ -6,12 +6,21 @@ Do NOT look for specific Persian keywords. Understand the meaning.
 
 Return STRICT JSON only. No markdown. No explanation outside JSON.
 
-CRITICAL: You MUST always return the FULL wrapper object with "intent", "action", "entities", "financial", "work", "note", "confidence", "ambiguity", "missing_fields", and "reasoning_summary". NEVER return a bare entity object. A bare entity like {"name": "...", "project_role": "..."} will be rejected and treated as NOTE. Always wrap the entity inside {"intent": "...", "action": "...", "entities": [bare_entity], ...}.
+CRITICAL: You MUST always return the FULL wrapper object with "intent", "action", "entities", "financial", "work", "note", "matched_text", "confidence", "ambiguity", "missing_fields", and "reasoning_summary". NEVER return a bare entity object. A bare entity like {"name": "...", "project_role": "..."} will be rejected and treated as NOTE. Always wrap the entity inside {"intent": "...", "action": "...", "entities": [bare_entity], ...}.
 
-Schema:
+MULTI-EVENT SUPPORT: If the user's note contains MULTIPLE independent events (e.g. multiple financial transactions, a setup + a purchase, profile updates for different people), return them as an array of event objects in an "events" wrapper:
+
+{"events": [schema_for_event_1, schema_for_event_2, ...]}
+
+Each event in the array must follow the single-event schema below and include a "matched_text" field containing the EXACT text snippet that triggered that event.
+
+If the note contains only ONE event, return the single event schema directly (no "events" wrapper).
+
+Single-event schema:
 {
   "intent": "SET_ROLE | SETUP | WORK | FINANCIAL | NOTE | DOCUMENT",
   "action": "SET_ROLE | ADD_ENTITY | UPDATE_ENTITY | WORK_LOG | PAYMENT_IN | PAYMENT_OUT | PURCHASE_PAID | DEBT_CREATED | CHECK_PAYMENT | NOTE",
+  "matched_text": "the exact text snippet that triggered this event",
   "entities": [
     {
       "name": "string",

@@ -99,39 +99,37 @@ def process_input(
     cache.set_timing("llm_v2_duration_ms", _elapsed_ms(llm_v2_start))
 
     llm_v2_valid = False
-    validated_interpretation = None
-    entity_resolutions: dict[int, Worker | None] = {}
+    validated_interpretations: list[Any] = []
     if not llm_v2_result.get("_llm_v2_failed"):
         try:
             validator = LLMv2Validator()
-            validated_interpretation = validator.validate(llm_v2_result, entity_context)
-            entity_resolutions = validator.resolve_entities(validated_interpretation, entity_context)
+            if "events" in llm_v2_result:
+                validated_interpretations = validator.validate_multi(llm_v2_result, entity_context)
+            else:
+                single = validator.validate(llm_v2_result, entity_context)
+                validated_interpretations = [single]
             llm_v2_valid = True
         except LLMv2ValidationError:
             llm_v2_valid = False
 
-    if llm_v2_valid and validated_interpretation is not None:
+    if llm_v2_valid and validated_interpretations:
         interpretations = _build_llm_v2_interpretations(
             project_id,
             text,
-            validated_interpretation,
-            entity_resolutions,
+            validated_interpretations,
             entity_context,
         )
         cache.set_timing("legacy_duration_ms", 0.0)
         cache.set_timing("governance_duration_ms", 0.0)
-        _debug_print(
-            "llm_v2_primary",
-            {
-                "intent": validated_interpretation.intent.value,
-                "action": validated_interpretation.action.value,
-                "entities": [e.name for e in validated_interpretation.entities],
-                "entity_resolutions": {
-                    str(i): w.name if w else None
-                    for i, w in entity_resolutions.items()
+        for vi in validated_interpretations:
+            _debug_print(
+                "llm_v2_primary",
+                {
+                    "intent": vi.intent.value,
+                    "action": vi.action.value,
+                    "entities": [e.name for e in vi.entities],
                 },
-            },
-        )
+            )
         for interpretation in interpretations:
             db.add(interpretation)
         db.commit()
@@ -361,10 +359,27 @@ def _resolve_financial_counterparty(
 def _build_llm_v2_interpretations(
     project_id: int,
     raw_text: str,
-    interpretation: Any,
-    entity_resolutions: dict[int, Worker | None],
+    interpretations: list[Any],
     entity_context: list[Worker],
 ) -> list[PendingInterpretation]:
+    results: list[PendingInterpretation] = []
+    for interpretation in interpretations:
+        event_text = getattr(interpretation, "matched_text", None) or raw_text
+        pi = _build_one_llm_v2_interpretation(
+            project_id, raw_text, interpretation, entity_context, event_text,
+        )
+        if pi is not None:
+            results.append(pi)
+    return results
+
+
+def _build_one_llm_v2_interpretation(
+    project_id: int,
+    raw_text: str,
+    interpretation: Any,
+    entity_context: list[Worker],
+    event_text: str,
+) -> PendingInterpretation | None:
     from app.schemas.llm_v2 import (
         LLMv2Action,
         LLMv2FinancialDirection,
@@ -373,15 +388,15 @@ def _build_llm_v2_interpretations(
     )
 
     _repair_llm_v2_setup_role_from_text(interpretation, raw_text)
-    incoming_project_payment = detect_incoming_project_payment(raw_text)
-    purchase_payment = detect_purchase_payment(raw_text)
+    incoming_project_payment = detect_incoming_project_payment(event_text)
+    purchase_payment = detect_purchase_payment(event_text)
 
-    entities_json = []
+    entities_json: list[dict[str, Any]] = []
     blocked_due_to_ambiguity = False
     for i, entity in enumerate(interpretation.entities):
         project_role_str = entity.project_role.value if hasattr(entity.project_role, "value") else entity.project_role
         resolution = resolve_candidates(entity.name, entity_context)
-        entity_dict = {
+        entity_dict: dict[str, Any] = {
             "name": entity.name,
             "kind": entity.kind.value if hasattr(entity.kind, "value") else entity.kind,
             "project_role": project_role_str,
@@ -425,7 +440,7 @@ def _build_llm_v2_interpretations(
     intent_str = interpretation.intent.value
     action_str = interpretation.action.value
 
-    financial_direction = _llm_v2_financial_direction(interpretation.financial.direction, interpretation.action, raw_text)
+    financial_direction = _llm_v2_financial_direction(interpretation.financial.direction, interpretation.action, event_text)
     canonical_type = _llm_v2_intent_to_canonical(intent_str)
     semantic_action = _llm_v2_action_to_semantic(action_str)
     if incoming_project_payment is not None:
@@ -456,7 +471,7 @@ def _build_llm_v2_interpretations(
             entities_json[0]["candidate_matches"] = resolution["candidates"]
     elif purchase_payment is not None:
         canonical_type = "FINANCIAL_EVENT"
-        if action_str not in {"DEBT_CREATED", "CHECK_PAYMENT"} and "نسیه" not in normalize_text(raw_text) and "چک" not in normalize_text(raw_text):
+        if action_str not in {"DEBT_CREATED", "CHECK_PAYMENT"} and "نسیه" not in normalize_text(event_text) and "چک" not in normalize_text(event_text):
             semantic_action = "PURCHASE_PAID"
             financial_direction = FinancialDirection.OUTGOING
         if purchase_payment.vendor_name is not None:
@@ -498,7 +513,7 @@ def _build_llm_v2_interpretations(
         payment_method = payment_method or PaymentType.CASH.value
 
     amount = interpretation.financial.amount
-    parsed_text_amount = parse_persian_money(raw_text) if intent_str == "FINANCIAL" else None
+    parsed_text_amount = parse_persian_money(event_text) if intent_str == "FINANCIAL" else None
     if incoming_project_payment is not None and incoming_project_payment.amount is not None:
         parsed_text_amount = incoming_project_payment.amount
     elif purchase_payment is not None and purchase_payment.amount is not None:
@@ -517,31 +532,31 @@ def _build_llm_v2_interpretations(
     if quantity is not None:
         quantity = Decimal(str(quantity))
 
-    return [
-        PendingInterpretation(
-            project_id=project_id,
-            raw_input_text=raw_text,
-            canonical_event_type=canonical_type,
-            semantic_action=semantic_action,
-            suggested_entity_id=suggested_entity_id,
-            matched_input_text=None,
-            extracted_entities=entities_json or None,
-            extracted_amount=amount,
-            extracted_quantity=quantity,
-            payment_method=payment_method,
-            financial_direction=financial_direction,
-            due_date=interpretation.financial.due_date_text,
-            description=(
-                interpretation.work.description
-                or interpretation.note.text
-                or interpretation.reasoning_summary
-                or raw_text
-            ),
-            confidence=interpretation.confidence,
-            structured_interpretation=_json_safe(interpretation.model_dump()),
-            status=PendingInterpretationStatus.PENDING,
-        )
-    ]
+    matched_text = getattr(interpretation, "matched_text", None)
+
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type=canonical_type,
+        semantic_action=semantic_action,
+        suggested_entity_id=suggested_entity_id,
+        matched_input_text=matched_text,
+        extracted_entities=entities_json or None,
+        extracted_amount=amount,
+        extracted_quantity=quantity,
+        payment_method=payment_method,
+        financial_direction=financial_direction,
+        due_date=interpretation.financial.due_date_text,
+        description=(
+            interpretation.work.description
+            or interpretation.note.text
+            or interpretation.reasoning_summary
+            or event_text
+        ),
+        confidence=interpretation.confidence,
+        structured_interpretation=_json_safe(interpretation.model_dump()),
+        status=PendingInterpretationStatus.PENDING,
+    )
 
 
 def _block_ambiguous_setup_creations(
@@ -1000,6 +1015,36 @@ def _shadow_legacy_payload(
 
 def _elapsed_ms(start: float) -> float:
     return (perf_counter() - start) * 1000
+
+
+def _split_multi_event_text(text: str) -> list[str]:
+    """Deterministic fallback: split text on obvious separators.
+
+    Only splits when each resulting chunk contains a clear financial, setup,
+    or profile-update signal.  This avoids over-splitting names or descriptions.
+    Returns [text] when no viable split is found.
+    """
+    normalized = normalize_text(text)
+    separators = re.compile(r"[.\n;؛]")
+    candidate_chunks = [c.strip() for c in separators.split(normalized) if c.strip()]
+    if len(candidate_chunks) < 2:
+        return [text]
+
+    def _has_signal(chunk: str) -> bool:
+        money_terms = {"تومان", "تومن", "میلیون", "میلیارد", "ریال"}
+        financial_verbs = {"دادم", "داد", "گرفتم", "گرفت", "پرداخت", "پرداختم", "خریدم", "خرید", "واریز", "پول داد"}
+        profile_terms = {"شماره تماس", "شماره موبایل", "شماره حساب", "شماره کارت", "دستمزد روزانه", "حساب"}
+        setup_terms = {" است", " هست", "می باشد", "میباشد", "کارگر", "کارفرما", "سرامیک کار", "فروشنده"}
+        has_money = any(t in chunk for t in money_terms)
+        has_financial_verb = any(v in chunk for v in financial_verbs)
+        has_profile = any(p in chunk for p in profile_terms)
+        has_setup = any(s in chunk for s in setup_terms)
+        return (has_money and has_financial_verb) or has_profile or has_setup
+
+    signalled = [c for c in candidate_chunks if _has_signal(c)]
+    if len(signalled) < 2:
+        return [text]
+    return signalled
 
 
 def _json_safe(value: Any) -> Any:

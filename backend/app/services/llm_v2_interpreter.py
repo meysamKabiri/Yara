@@ -268,6 +268,21 @@ class LLMv2Interpreter:
         raise LLMOutputParseError("Ollama output did not contain a valid JSON object")
 
     def _coerce(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
+        events = value.get("events")
+        if isinstance(events, list):
+            coerced_events = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                event_text = event.get("matched_text") or raw_text
+                coerced = self._coerce_single(event, event_text)
+                if event.get("matched_text"):
+                    coerced["matched_text"] = event["matched_text"]
+                coerced_events.append(coerced)
+            return {"events": coerced_events}
+        return self._coerce_single(value, raw_text)
+
+    def _coerce_single(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
         if _is_bare_entity(value):
             value = _wrap_bare_entity(value, raw_text)
         intent = value.get("intent")
@@ -290,7 +305,7 @@ class LLMv2Interpreter:
             intent = "SETUP"
             action = "UPDATE_ENTITY"
 
-        return {
+        result = {
             "intent": intent if intent in VALID_INTENTS else "NOTE",
             "action": action if action in VALID_ACTIONS else self._action_for_intent(intent),
             "entities": entities,
@@ -331,6 +346,9 @@ class LLMv2Interpreter:
                 value.get("reasoning_summary") or value.get("reasoning") or ""
             ),
         }
+        if value.get("matched_text"):
+            result["matched_text"] = value["matched_text"]
+        return result
 
     def _action_for_intent(self, intent: Any) -> str:
         if intent == "SET_ROLE":

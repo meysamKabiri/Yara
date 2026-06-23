@@ -107,6 +107,7 @@ class LLMv2Interpretation(BaseModel):
     financial: LLMv2Financial = LLMv2Financial()
     work: LLMv2Work = LLMv2Work()
     note: LLMv2Note = LLMv2Note()
+    matched_text: str | None = None
     confidence: float = 0.0
     ambiguity: bool = False
     missing_fields: list[str] = []
@@ -121,3 +122,9 @@ class LLMv2Interpretation(BaseModel):
     @classmethod
     def reasoning_fallback(cls, v: str | None) -> str:
         return v or ""
+
+
+class LLMv2MultiResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    events: list[LLMv2Interpretation]

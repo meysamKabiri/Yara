@@ -103,6 +103,22 @@ class LLMv2Validator:
 
         return interpretation
 
+    def validate_multi(
+        self,
+        raw: dict[str, Any],
+        entity_context: list[Worker],
+    ) -> list[LLMv2Interpretation]:
+        events = raw.get("events")
+        if not isinstance(events, list) or not events:
+            return [self.validate(raw, entity_context)]
+        results: list[LLMv2Interpretation] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            validated = self.validate(event, entity_context)
+            results.append(validated)
+        return results
+
     def resolve_entities(
         self,
         interpretation: LLMv2Interpretation,
