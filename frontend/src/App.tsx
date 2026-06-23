@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { BarChart3, Bell, Home, Users } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, BarChart3, Bell, Home, Users } from "lucide-react";
 import {
   api,
   FinancialDirection,
@@ -13,17 +13,18 @@ import {
   Project,
   ProjectDetail,
   RawEntry,
-  TraceDetail,
   Worker,
   WorkerState,
   WorkLog,
-  subscribeToTraceIds,
 } from "./api";
-import { TraceViewer } from "./components/TraceViewer";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PeoplePage } from "./pages/PeoplePage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ReportsPage } from "./pages/ReportsPage";
+import { JobDetailPage } from "./observability/pages/JobDetailPage";
+import { JobsPage } from "./observability/pages/JobsPage";
+import { useJobEventStream } from "./observability/hooks/useJobEventStream";
+import { toJobState, useNaturalInputJob } from "./observability/hooks/useNaturalInputJob";
 import { DomainUIController } from "./ui/DomainUIController";
 import { SetupEntity } from "./types/domain";
 
@@ -40,21 +41,27 @@ type Route =
   | { name: "project"; projectId: number | null }
   | { name: "people" }
   | { name: "person"; personId: number }
-  | { name: "reports" };
+  | { name: "reports" }
+  | { name: "jobs" }
+  | { name: "job"; jobId: string };
 
 function parseRoute(pathname: string): Route {
   const projectMatch = pathname.match(/^\/projects\/(\d+)/);
   const personMatch = pathname.match(/^\/people\/(\d+)/);
+  const jobMatch = pathname.match(/^\/jobs\/([^/]+)/);
   if (projectMatch) return { name: "project", projectId: Number(projectMatch[1]) };
   if (personMatch) return { name: "person", personId: Number(personMatch[1]) };
+  if (jobMatch) return { name: "job", jobId: decodeURIComponent(jobMatch[1]) };
   if (pathname === "/people") return { name: "people" };
   if (pathname === "/reports") return { name: "reports" };
+  if (pathname === "/jobs") return { name: "jobs" };
   return { name: "dashboard" };
 }
 
 function NavIcon({ name }: { name: string }) {
   if (name === "home") return <Home aria-hidden="true" size={19} />;
   if (name === "users") return <Users aria-hidden="true" size={19} />;
+  if (name === "activity") return <Activity aria-hidden="true" size={19} />;
   return <BarChart3 aria-hidden="true" size={19} />;
 }
 
@@ -148,24 +155,39 @@ function App() {
   const [projectFinancials, setProjectFinancials] = useState<Record<number, ProjectCardFinancials>>({});
   const [naturalText, setNaturalText] = useState("");
   const [pendingInterpretations, setPendingInterpretations] = useState<PendingInterpretation[]>([]);
+  const [naturalInputJobId, setNaturalInputJobId] = useState<string | null>(null);
   const [setupEditEntities, setSetupEditEntities] = useState<Record<number, SetupEntity[]>>({});
   const [candidateSelections, setCandidateSelections] = useState<Record<number, string>>({});
   const [unknownEntityForms, setUnknownEntityForms] = useState<Record<number, UnknownEntityForm>>({});
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [latestTrace, setLatestTrace] = useState<TraceDetail | null>(null);
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
   const activeProjectId = routeProjectId ?? selectedProjectId ?? null;
   const openDebtCount = Object.values(projectFinancials).filter((item) => item.debt > 0).length;
+  const naturalInputJob = useNaturalInputJob(naturalInputJobId);
+  const refreshNaturalInputJob = useCallback(() => {
+    void naturalInputJob.refresh();
+  }, [naturalInputJob.refresh]);
+  const naturalInputStream = useJobEventStream(
+    naturalInputJobId,
+    refreshNaturalInputJob,
+    naturalInputJob.status,
+  );
+  const naturalInputJobState = useMemo(() => {
+    const baseState = naturalInputJob.job ? toJobState(naturalInputJob.job.status, Boolean(naturalInputJobId)) : toJobState(null, Boolean(naturalInputJobId));
+    if ((baseState === "SUBMITTED" || baseState === "IDLE") && naturalInputStream.events.length) return "PROCESSING";
+    return baseState;
+  }, [naturalInputJob.job, naturalInputJobId, naturalInputStream.events.length]);
 
   const navItems = useMemo(
     () => [
       { label: "خانه", path: "/dashboard", active: route.name === "dashboard" || route.name === "project", icon: "home" },
       { label: "افراد", path: "/people", active: route.name === "people" || route.name === "person", icon: "users" },
       { label: "گزارش‌ها", path: "/reports", active: route.name === "reports", icon: "reports" },
+      { label: "Jobs", path: "/jobs", active: route.name === "jobs" || route.name === "job", icon: "activity" },
     ],
     [route.name],
   );
@@ -184,63 +206,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    let isMounted = true;
-
-    const pending = new Set<string>();
-    const seen = new Set<string>();
-
-    let timer: number | null = null;
-
-    const processBatch = async () => {
-      if (!isMounted) return;
-
-      const batch = Array.from(pending);
-      pending.clear();
-
-      for (const traceId of batch) {
-        if (seen.has(traceId)) continue;
-        seen.add(traceId);
-
-        try {
-          const trace = await api.getTrace(traceId);
-
-          if (!isMounted) return;
-
-          setLatestTrace(trace);
-        } catch (err) {
-          if (!isMounted) return;
-
-          setLatestTrace({
-            trace_id: traceId,
-            events: [],
-          });
-        }
-      }
-    };
-
-    const unsubscribe = subscribeToTraceIds((traceId: string) => {
-      pending.add(traceId);
-
-      if (!timer) {
-        timer = window.setTimeout(() => {
-          processBatch();
-          timer = null;
-        }, 300); // slightly safer throttle
-      }
-    });
-
-    return () => {
-      isMounted = false;
-      pending.clear();
-      seen.clear();
-
-      if (timer) clearTimeout(timer);
-
-      unsubscribe?.();
-    };
-  }, []);
-
-  useEffect(() => {
     if (projects.length > 0) loadProjectFinancials(projects);
   }, [projects]);
 
@@ -251,6 +216,13 @@ function App() {
   useEffect(() => {
     if (activeProjectId) loadProjectData(activeProjectId);
   }, [activeProjectId]);
+
+  useEffect(() => {
+    if (naturalInputJob.state !== "DONE") return;
+    const interpretations = naturalInputJob.interpretations;
+    setPendingInterpretations(interpretations);
+    setNaturalInputJobId(null);
+  }, [naturalInputJob.state, naturalInputJob.job?.job_id, naturalInputJob.job?.updated_at]);
 
   function navigate(path: string, replace = false) {
     if (replace) window.history.replaceState({}, "", path);
@@ -339,10 +311,11 @@ function App() {
     }
     if (!naturalText.trim()) return;
     const submittedText = naturalText.trim();
-    await runAction("در حال پردازش ورودی", async () => {
+    await runAction("در حال ارسال ورودی", async () => {
       setSuccessMessage(null);
-      const result = await api.processNaturalInput(activeProjectId, submittedText);
-      setPendingInterpretations(result.interpretations);
+      setPendingInterpretations([]);
+      const job = await api.processNaturalInput(activeProjectId, submittedText);
+      setNaturalInputJobId(job.job_id);
       setNaturalText("");
     });
   }
@@ -370,6 +343,7 @@ function App() {
       });
       await api.confirmPendingInterpretation(interpretation.id, { create_new: true });
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -379,21 +353,39 @@ function App() {
 
   async function confirmFinancialTransaction(
     interpretation: PendingInterpretation,
-    data: { entity_id: number; amount: string; direction: string; payment_method: string },
+    data: { entity_id?: number | null; amount: string; direction: string; payment_method: string; create_new_entity?: boolean; entity_name?: string; project_role?: string },
   ) {
     if (!activeProjectId) return;
     await runAction("در حال تایید", async () => {
-      await api.updatePendingInterpretation(interpretation.id, {
-        suggested_entity_id: data.entity_id,
-        extracted_amount: data.amount || null,
-        financial_direction: data.direction as FinancialDirection,
-        payment_method: data.payment_method as PaymentType,
-      });
-      await api.confirmPendingInterpretation(interpretation.id, {
-        entity_id: data.entity_id,
-        confirmed: true,
-      });
+      if (data.create_new_entity) {
+        await api.updatePendingInterpretation(interpretation.id, {
+          extracted_amount: data.amount || null,
+          financial_direction: data.direction as FinancialDirection,
+          payment_method: data.payment_method as PaymentType,
+        });
+        const resolution = await api.confirmPendingInterpretation(interpretation.id, {
+          create_new: true,
+          name: data.entity_name,
+          role: data.project_role,
+        }) as EntityResolutionResult;
+        await api.confirmPendingInterpretation(interpretation.id, {
+          entity_id: resolution.entity_id,
+          confirmed: true,
+        });
+      } else {
+        await api.updatePendingInterpretation(interpretation.id, {
+          suggested_entity_id: data.entity_id!,
+          extracted_amount: data.amount || null,
+          financial_direction: data.direction as FinancialDirection,
+          payment_method: data.payment_method as PaymentType,
+        });
+        await api.confirmPendingInterpretation(interpretation.id, {
+          entity_id: data.entity_id,
+          confirmed: true,
+        });
+      }
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -430,6 +422,7 @@ function App() {
         confirmed: true,
       });
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -439,27 +432,41 @@ function App() {
 
   async function confirmEntityUpdateAction(
     interpretation: PendingInterpretation,
-    data: { name: string; phone: string | null; accountNumber: string | null; role: string; roleDetail: string | null },
+    data: { entityId?: number | null; name: string; phone: string | null; accountNumber: string | null; dailyRate: string | null; role: string; roleDetail: string | null; create_new_entity?: boolean; entity_name?: string; project_role?: string; field_updates?: Record<string, unknown> },
   ) {
     if (!activeProjectId) return;
     await runAction("در حال تایید", async () => {
       const updates: Record<string, string | null> = {};
       if (data.phone) updates.phone = data.phone;
       if (data.accountNumber) updates.account_number = data.accountNumber;
+      if (data.dailyRate) updates.daily_rate = data.dailyRate;
       if (data.role) updates.project_role = data.role;
       if (data.roleDetail) updates.role_detail = data.roleDetail;
 
-      await api.updatePendingInterpretation(interpretation.id, {
-        extracted_entities: [
-          {
-            ...firstEntity(interpretation),
-            name: data.name,
-            field_updates: updates,
-          },
-        ],
-      });
-      await api.confirmPendingInterpretation(interpretation.id, {});
+      if (data.create_new_entity) {
+        await api.confirmPendingInterpretation(interpretation.id, {
+          create_new: true,
+          name: data.entity_name || data.name,
+          role: data.project_role || data.role,
+          field_updates: data.field_updates,
+        });
+      } else {
+        await api.updatePendingInterpretation(interpretation.id, {
+          extracted_entities: [
+            {
+              ...firstEntity(interpretation),
+              name: data.name,
+              field_updates: updates,
+            },
+          ],
+        });
+        await api.confirmPendingInterpretation(interpretation.id, {
+          entity_id: data.entityId,
+          confirmed: true,
+        });
+      }
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -500,6 +507,7 @@ function App() {
       if (interpretation.canonical_event_type === "FINANCIAL_EVENT") await confirmFinancialInterpretation(interpretation, payload);
       else await api.confirmPendingInterpretation(interpretation.id, payload);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -532,6 +540,7 @@ function App() {
       if (interpretation.canonical_event_type === "FINANCIAL_EVENT") await confirmFinancialInterpretation(interpretation, payload);
       else await api.confirmPendingInterpretation(interpretation.id, payload);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -560,6 +569,7 @@ function App() {
       if (interpretation.canonical_event_type === "FINANCIAL_EVENT") await confirmFinancialInterpretation(interpretation, payload);
       else await api.confirmPendingInterpretation(interpretation.id, payload);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
       setSuccessMessage("ثبت شد");
@@ -597,6 +607,7 @@ function App() {
     await runAction("در حال حذف برداشت", async () => {
       await api.discardPendingInterpretation(interpretation.id);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+      setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
     });
   }
@@ -614,7 +625,7 @@ function App() {
           rawEntries={rawEntries}
           text={naturalText}
           examples={exampleInputs}
-          isLoading={loadingAction === "در حال پردازش ورودی"}
+          isLoading={loadingAction === "در حال ارسال ورودی"}
           onBack={() => navigate("/dashboard")}
           onTextChange={setNaturalText}
           onSubmit={submitNaturalInput}
@@ -628,6 +639,8 @@ function App() {
       return <PeoplePage workers={workers} workerStates={workerStates} payments={payments} workLogs={workLogs} invoices={invoices} summary={operatingSummary} selectedPersonId={route.name === "person" ? route.personId : null} onOpenPerson={(personId) => navigate(`/people/${personId}`)} onBackToPeople={() => navigate("/people")} onUpdateWorker={updateWorkerProfile} />;
     }
     if (route.name === "reports") return <ReportsPage projects={projects} project={projectDetail} summary={operatingSummary} workers={workers} workerStates={workerStates} payments={payments} invoices={invoices} />;
+    if (route.name === "jobs") return <JobsPage onOpenJob={(jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)} />;
+    if (route.name === "job") return <JobDetailPage jobId={route.jobId} onBack={() => navigate("/jobs")} />;
     return (
       <DashboardPage
         projects={projects}
@@ -665,13 +678,17 @@ function App() {
         {error && <div className="error-banner">{error}</div>}
         {loadingAction && <div className="loading-banner">{loadingAction}...</div>}
         {renderPage()}
-        {/* <TraceViewer trace={latestTrace} /> */}
       </section>
 
       <DomainUIController
         interpretations={pendingInterpretations}
+        jobState={naturalInputJobState}
+        jobEvents={naturalInputStream.events}
+        jobConnectionState={naturalInputStream.connectionState}
+        jobError={naturalInputJob.error ?? naturalInputStream.error}
         workers={workers}
         activeProjectId={activeProjectId}
+        projectName={projectDetail?.name ?? null}
         isLoading={isLoading}
         setupEditEntities={setupEditEntities}
         candidateSelections={candidateSelections}

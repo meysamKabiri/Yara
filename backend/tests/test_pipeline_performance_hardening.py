@@ -2,6 +2,7 @@ from time import perf_counter
 from typing import Any
 
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 
 from app.core.observability.performance_logger import latest_performance_events
 
@@ -49,12 +50,7 @@ def test_shadow_interpreter_executes_once_per_financial_request(
 
     monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", fake_interpret)
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
+    submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     assert calls == 1
 
 
@@ -84,12 +80,7 @@ def test_governance_evaluates_once_per_financial_request(
 
     monkeypatch.setattr(original, counting_evaluate)
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
+    submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     assert calls == 1
 
 
@@ -102,12 +93,7 @@ def test_performance_metrics_are_recorded(client: TestClient, monkeypatch) -> No
         lambda self, raw_text, project_id: _shadow_result(),
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
+    submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     events = latest_performance_events()
     assert len(events) == before + 1
     assert events[-1]["legacy_duration_ms"] >= 0
@@ -124,13 +110,9 @@ def test_mocked_latency_remains_stable(client: TestClient, monkeypatch) -> None:
     )
 
     start = perf_counter()
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
+    submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     duration_ms = (perf_counter() - start) * 1000
 
-    assert response.status_code == 201
     assert duration_ms < 500
 
 
@@ -143,14 +125,13 @@ def test_role_only_setup_bypasses_slow_llm(client: TestClient, monkeypatch) -> N
     monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", slow_interpret)
 
     start = perf_counter()
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم کبیری کارفرمای پروژه است"},
+    interpretation = natural_input_interpretation(
+        client,
+        project["id"],
+        "میثم کبیری کارفرمای پروژه است",
     )
     duration_ms = (perf_counter() - start) * 1000
 
-    assert response.status_code == 201
-    interpretation = response.json()["interpretations"][0]
     assert interpretation["canonical_event_type"] == "SETUP_EVENT"
     assert interpretation["semantic_action"] == "SET_ROLE"
     assert interpretation["structured_interpretation"]["intent"] == "SET_ROLE"

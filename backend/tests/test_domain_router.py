@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 
 from app.services.domain_router_service import DomainRouterService, DomainType
 from app.services.entity_resolution_service import EntityResolutionService
@@ -32,6 +33,48 @@ def test_payment_routes_to_financial_schema() -> None:
     assert route["domain"] == DomainType.FINANCIAL.value
     assert route["required_schema"] == "financial_confirmation"
     assert route["ui_mode"] == "FinancialModal"
+
+
+def test_profile_update_fields_route_to_entity_update_schema_even_if_action_is_set_role() -> None:
+    route = DomainRouterService().route(
+        "شماره تماس میثم 09123456789",
+        {
+            "intent": "SETUP",
+            "action": "SET_ROLE",
+            "semantic_action": "SET_ROLE",
+            "entities": [
+                {
+                    "name": "میثم",
+                    "phone": "09123456789",
+                    "field_updates": {"phone": "09123456789"},
+                }
+            ],
+        },
+    )
+
+    assert route["domain"] == "ENTITY_UPDATE"
+    assert route["required_schema"] == "entity_update_confirmation"
+    assert route["ui_mode"] == "EntityUpdateModal"
+
+
+def test_account_update_fields_route_to_entity_update_schema() -> None:
+    route = DomainRouterService().route(
+        "شماره حساب میثم 6037991234567890",
+        {
+            "intent": "SETUP",
+            "action": "SET_ROLE",
+            "semantic_action": "SET_ROLE",
+            "extracted_entities": [
+                {
+                    "name": "میثم",
+                    "account_number": "6037991234567890",
+                }
+            ],
+        },
+    )
+
+    assert route["domain"] == "ENTITY_UPDATE"
+    assert route["ui_mode"] == "EntityUpdateModal"
 
 
 def test_mixed_sentence_requires_split_flow() -> None:
@@ -76,10 +119,7 @@ def test_mixed_pending_interpretation_blocks_confirmation(client: TestClient, mo
         },
     )
 
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "علی کارفرمای پروژه است و 50 میلیون به حساب پروژه واریز کرد"},
-    ).json()["interpretations"][0]
+    pending = natural_input_interpretation(client, project["id"], "علی کارفرمای پروژه است و 50 میلیون به حساب پروژه واریز کرد")
 
     assert pending["domain_route"]["domain"] == "MIXED"
     response = client.post(f"/pending-interpretations/{pending['id']}/confirm")
@@ -91,3 +131,102 @@ def test_invalid_project_path_is_not_defaulted(client: TestClient) -> None:
     response = client.post("/projects/1/natural-input", json={"text": "از علی 50 میلیون گرفتم بابت پروژه"})
 
     assert response.status_code == 404
+
+
+def test_field_updates_role_only_does_not_route_entity_update() -> None:
+    route = DomainRouterService().route(
+        "نقش کارگر به علی تخصیص داده شد",
+        {
+            "intent": "SET_ROLE",
+            "action": "SET_ROLE",
+            "entities": [
+                {"name": "علی", "field_updates": {"role": "WORKER"}}
+            ],
+        },
+    )
+    assert route["domain"] == DomainType.SETUP.value
+    assert route["ui_mode"] == "SetupModal"
+
+
+def test_field_updates_project_role_does_not_route_entity_update() -> None:
+    route = DomainRouterService().route(
+        "علی به عنوان کارفرما اضافه شد",
+        {
+            "intent": "SET_ROLE",
+            "action": "SET_ROLE",
+            "entities": [
+                {"name": "علی", "field_updates": {"project_role": "CLIENT"}}
+            ],
+        },
+    )
+    assert route["domain"] == DomainType.SETUP.value
+    assert route["ui_mode"] == "SetupModal"
+
+
+def test_field_updates_role_detail_does_not_route_entity_update() -> None:
+    route = DomainRouterService().route(
+        "جعفری لوله کش به پروژه اضافه شد",
+        {
+            "intent": "SET_ROLE",
+            "action": "SET_ROLE",
+            "entities": [
+                {"name": "جعفری", "field_updates": {"role_detail": "لوله کش"}}
+            ],
+        },
+    )
+    assert route["domain"] == DomainType.SETUP.value
+    assert route["ui_mode"] == "SetupModal"
+
+
+def test_field_updates_phone_routes_to_entity_update() -> None:
+    route = DomainRouterService().route(
+        "شماره تماس علی 09123456789",
+        {
+            "intent": "SETUP",
+            "action": "SET_ROLE",
+            "entities": [
+                {
+                    "name": "علی",
+                    "field_updates": {"phone": "09123456789"},
+                }
+            ],
+        },
+    )
+    assert route["domain"] == "ENTITY_UPDATE"
+    assert route["ui_mode"] == "EntityUpdateModal"
+
+
+def test_field_updates_account_number_routes_to_entity_update() -> None:
+    route = DomainRouterService().route(
+        "شماره حساب علی 6037991234567890",
+        {
+            "intent": "SETUP",
+            "action": "SET_ROLE",
+            "entities": [
+                {
+                    "name": "علی",
+                    "field_updates": {"account_number": "6037991234567890"},
+                }
+            ],
+        },
+    )
+    assert route["domain"] == "ENTITY_UPDATE"
+    assert route["ui_mode"] == "EntityUpdateModal"
+
+
+def test_field_updates_daily_rate_routes_to_entity_update() -> None:
+    route = DomainRouterService().route(
+        "دستمزد روزانه علی 1200000 تومان",
+        {
+            "intent": "SETUP",
+            "action": "SET_ROLE",
+            "entities": [
+                {
+                    "name": "علی",
+                    "field_updates": {"daily_rate": 1200000},
+                }
+            ],
+        },
+    )
+    assert route["domain"] == "ENTITY_UPDATE"
+    assert route["ui_mode"] == "EntityUpdateModal"

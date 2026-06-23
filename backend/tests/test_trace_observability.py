@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 
 
 def test_every_response_includes_trace_id_header(client: TestClient) -> None:
@@ -12,13 +13,13 @@ def test_domain_route_trace_event_is_recorded(client: TestClient) -> None:
     trace_id = "trace-domain-test"
     project = client.post("/projects", json={"name": "trace"}, headers={"X-Trace-Id": trace_id}).json()
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم کبیری کارفرمای پروژه است"},
+    job = submit_natural_input(
+        client,
+        project["id"],
+        "میثم کبیری کارفرمای پروژه است",
         headers={"X-Trace-Id": trace_id},
     )
-
-    assert response.headers["X-Trace-Id"] == trace_id
+    assert job["trace_id"] == trace_id
     trace = client.get(f"/traces/{trace_id}").json()
     assert any(event["event"] == "DOMAIN_ROUTED" for event in trace["events"])
 
@@ -38,11 +39,12 @@ def test_financial_confirmation_trace_records_resolution_execution_and_db_write(
         "app.api.projects.extract_graph",
         lambda text: {"intent": "PAYMENT", "entity": "علی", "confidence": 0.9},
     )
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از علی 50 میلیون گرفتم بابت پروژه"},
+    pending = natural_input_interpretation(
+        client,
+        project["id"],
+        "از علی 50 میلیون گرفتم بابت پروژه",
         headers={"X-Trace-Id": trace_id},
-    ).json()["interpretations"][0]
+    )
 
     client.post(
         f"/pending-interpretations/{pending['id']}/confirm",

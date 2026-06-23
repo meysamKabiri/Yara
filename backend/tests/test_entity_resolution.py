@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 
 from app.models.core import Payment, Project, Worker, WorkerType
 from app.services.entity_resolution_service import EntityResolutionService
@@ -102,10 +103,7 @@ def test_create_new_financial_confirm_resolves_only_without_payment(
         "app.api.projects.extract_graph",
         lambda text: {"intent": "PAYMENT", "entities": [], "confidence": 0.9},
     )
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از جعفری 25 میلیون سیم خریدم و پرداخت کردم"},
-    ).json()["interpretations"][0]
+    pending = natural_input_interpretation(client, project["id"], "از جعفری 25 میلیون سیم خریدم و پرداخت کردم")
 
     resolution = client.post(
         f"/pending-interpretations/{pending['id']}/confirm",

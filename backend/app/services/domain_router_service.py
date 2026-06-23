@@ -7,11 +7,21 @@ from typing import Any
 
 from app.core.trace_events import TraceEvent, trace_event
 
+_PROFILE_FIELD_KEYS = {"phone", "account_number", "accountNumber", "card_number", "cardNumber", "daily_rate", "dailyRate", "notes"}
+
+
+def _field_updates_has_profile_keys(field_updates: dict) -> bool:
+    return any(
+        field_updates.get(key) not in (None, "")
+        for key in _PROFILE_FIELD_KEYS
+    )
+
 
 class DomainType(StrEnum):
     SETUP = "SETUP"
     FINANCIAL = "FINANCIAL"
     MIXED = "MIXED"
+    ENTITY_UPDATE = "ENTITY_UPDATE"
 
 
 class DomainRouterService:
@@ -24,10 +34,12 @@ class DomainRouterService:
     SETUP_SCHEMA = "setup_confirmation"
     FINANCIAL_SCHEMA = "financial_confirmation"
     MIXED_SCHEMA = "split_confirmation"
+    ENTITY_UPDATE_SCHEMA = "entity_update_confirmation"
 
     SETUP_UI = "SetupModal"
     FINANCIAL_UI = "FinancialModal"
     MIXED_UI = "SplitFlow"
+    ENTITY_UPDATE_UI = "EntityUpdateModal"
 
     _SETUP_ACTIONS = {"ADD_ENTITY", "UPDATE_ENTITY", "ENTITY_UPDATE", "SET_ROLE", "SETUP"}
     _FINANCIAL_ACTIONS = {
@@ -75,9 +87,14 @@ class DomainRouterService:
         start = perf_counter()
         text = self._normalize(raw_user_text)
         interpretation = llm_interpretation or {}
+        has_profile_update = self._has_profile_update_fields(interpretation)
         setup_score = self._setup_score(text, interpretation)
         financial_score = self._financial_score(text, interpretation)
 
+        if has_profile_update and financial_score == 0:
+            result = self._result(DomainType.ENTITY_UPDATE, min(0.95, 0.75 + setup_score * 0.05))
+            trace_event(TraceEvent.DOMAIN_ROUTED, result, start_time=start)
+            return result
         if setup_score > 0 and financial_score > 0:
             result = self._result(DomainType.MIXED, 0.9)
             trace_event(TraceEvent.DOMAIN_ROUTED, result, start_time=start)
@@ -101,8 +118,11 @@ class DomainRouterService:
         entities = interpretation.get("entities")
         if isinstance(entities, list):
             for entity in entities:
-                if isinstance(entity, dict) and (
-                    entity.get("field_updates")
+                if not isinstance(entity, dict):
+                    continue
+                field_updates = entity.get("field_updates")
+                if (
+                    (isinstance(field_updates, dict) and _field_updates_has_profile_keys(field_updates))
                     or entity.get("phone")
                     or entity.get("account_number")
                     or entity.get("daily_rate")
@@ -130,7 +150,28 @@ class DomainRouterService:
             score += 1
         return score
 
+    def _has_profile_update_fields(self, interpretation: dict[str, Any]) -> bool:
+        for entity in (interpretation.get("entities") or interpretation.get("extracted_entities") or []):
+            if not isinstance(entity, dict):
+                continue
+            field_updates = entity.get("field_updates")
+            if isinstance(field_updates, dict) and _field_updates_has_profile_keys(field_updates):
+                return True
+            if any(
+                entity.get(key) not in (None, "")
+                for key in ("phone", "account_number", "card_number", "daily_rate", "notes")
+            ):
+                return True
+        return False
+
     def _result(self, domain: DomainType, confidence: float) -> dict[str, Any]:
+        if domain == DomainType.ENTITY_UPDATE:
+            return {
+                "domain": domain.value,
+                "confidence": confidence,
+                "required_schema": self.ENTITY_UPDATE_SCHEMA,
+                "ui_mode": self.ENTITY_UPDATE_UI,
+            }
         if domain == DomainType.FINANCIAL:
             return {
                 "domain": domain.value,

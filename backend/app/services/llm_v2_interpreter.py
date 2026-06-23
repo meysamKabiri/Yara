@@ -1,12 +1,31 @@
 import json
+import os
+import re
 import urllib.error
 import urllib.request
+from time import perf_counter
 from typing import Any, cast
 
+from app.core.observability.emitter import emit_event
+from app.core.trace_context import get_job_id, get_trace_id
+from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen3:8b"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "15"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "200"))
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
+
+
+def _emit_event(event_name, payload=None, duration_ms=None, dedupe_key=None):
+    try:
+        trace_id = get_trace_id()
+        job_id = get_job_id()
+        if trace_id and job_id:
+            emit_event(trace_id, job_id, event_name, payload, duration_ms, dedupe_key)
+    except Exception:
+        pass
 
 VALID_INTENTS = {"SET_ROLE", "SETUP", "WORK", "FINANCIAL", "NOTE", "DOCUMENT"}
 VALID_ACTIONS = {
@@ -19,6 +38,126 @@ VALID_PROJECT_ROLES = {"CLIENT", "DAILY_WORKER", "SKILLED_WORKER", "VENDOR", "OT
 VALID_DIRECTIONS = {"IN", "OUT", "NONE"}
 VALID_PAYMENT_METHODS = {"CASH", "BANK_TRANSFER", "CHECK", "OTHER"}
 VALID_WORK_UNITS = {"day", "meter", "item", "project", "custom"}
+PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+_BARE_ENTITY_KEYS = {
+    "name", "kind", "project_role", "role_detail",
+    "phone", "account_number", "daily_rate", "notes", "field_updates",
+}
+_WRAPPER_KEYS = {"intent", "action", "entities", "financial", "work", "note"}
+
+
+def _is_bare_entity(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if any(value.get(k) for k in _WRAPPER_KEYS):
+        return False
+    name = value.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    overlap = _BARE_ENTITY_KEYS & set(value.keys())
+    return len(overlap) >= 2
+
+
+def _has_profile_fields(value: dict) -> bool:
+    field_updates = value.get("field_updates") or {}
+    if isinstance(field_updates, dict) and any(v not in (None, "") for v in field_updates.values()):
+        return True
+    return any(
+        value.get(k) not in (None, "")
+        for k in ("phone", "account_number", "daily_rate", "notes")
+    )
+
+
+_FINANCIAL_AMOUNT_UNITS = {"تومان", "تومن", "ریال", "هزار", "میلیون", "میلیارد"}
+
+_FINANCIAL_PURCHASE_VERBS = {"خریدم", "خرید کردم", "فاکتور"}
+_FINANCIAL_IN_VERBS = {"گرفتم", "گرفت", "دریافت", "دریافت کردم", "واریز", "واریز کرد", "واریز شده"}
+_FINANCIAL_OUT_VERBS = {"دادم", "داد", "پرداخت", "پرداخت کردم", "پول داد"}
+_FINANCIAL_VERBS = _FINANCIAL_PURCHASE_VERBS | _FINANCIAL_IN_VERBS | _FINANCIAL_OUT_VERBS | {"چک", "بدهکار", "طلبکار"}
+
+
+def _has_financial_signal(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    has_unit = any(u in normalized for u in _FINANCIAL_AMOUNT_UNITS)
+    has_verb = any(v in normalized for v in _FINANCIAL_VERBS)
+    if has_unit and has_verb:
+        return True
+    if has_unit and re.search(r"\d{4,}", normalized):
+        return True
+    return False
+
+
+def _infer_financial_action(raw_text: str) -> str:
+    normalized = normalize_text(raw_text)
+    for verb in _FINANCIAL_PURCHASE_VERBS:
+        if verb in normalized:
+            return "PURCHASE_PAID"
+    for verb in _FINANCIAL_IN_VERBS:
+        if verb in normalized:
+            return "PAYMENT_IN"
+    for verb in _FINANCIAL_OUT_VERBS:
+        if verb in normalized:
+            return "PAYMENT_OUT"
+    return "PAYMENT_IN"
+
+
+def _wrap_bare_entity(value: dict, raw_text: str = "") -> dict:
+    supported = {"name", "kind", "project_role", "role_detail", "phone", "account_number", "daily_rate", "notes", "field_updates"}
+    clean = {k: v for k, v in value.items() if k in supported}
+
+    if _has_profile_fields(value):
+        return {
+            "intent": "SETUP",
+            "action": "UPDATE_ENTITY",
+            "entities": [clean],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": float(value.get("confidence", 0.8) or 0.8),
+            "ambiguity": bool(value.get("ambiguity")),
+            "missing_fields": [],
+            "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
+        }
+
+    if raw_text and _has_financial_signal(raw_text):
+        amount = parse_persian_money(raw_text)
+        action = _infer_financial_action(raw_text)
+        direction = "IN" if action == "PAYMENT_IN" else "OUT"
+        return {
+            "intent": "FINANCIAL",
+            "action": action,
+            "entities": [clean],
+            "financial": {
+                "amount": amount,
+                "direction": direction,
+                "payment_method": None,
+                "due_date_text": None,
+            },
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": float(value.get("confidence", 0.8) or 0.8),
+            "ambiguity": bool(value.get("ambiguity")),
+            "missing_fields": [],
+            "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
+        }
+
+    return {
+        "intent": "SET_ROLE",
+        "action": "SET_ROLE",
+        "entities": [clean],
+        "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": None},
+        "confidence": float(value.get("confidence", 0.8) or 0.8),
+        "ambiguity": bool(value.get("ambiguity")),
+        "missing_fields": [],
+        "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
+    }
+
+
+class LLMOutputParseError(ValueError):
+    pass
 
 
 class LLMv2Interpreter:
@@ -27,16 +166,44 @@ class LLMv2Interpreter:
             parsed = self._generate(raw_text, project_id)
             if not isinstance(parsed, dict):
                 return self._fallback(raw_text, "model returned non-object JSON")
-            return self._coerce(parsed)
-        except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, TypeError):
+
+            normalize_start = perf_counter()
+            result = self._coerce(parsed, raw_text)
+            normalize_ms = (perf_counter() - normalize_start) * 1000
+
+            _emit_event("INTERPRETATION_NORMALIZED", {
+                "semantic_action": result.get("action"),
+                "domain": result.get("intent"),
+            }, duration_ms=normalize_ms)
+
+            timings = {
+                "normalization_duration_ms": round(normalize_ms, 1),
+                **(getattr(self, "_last_timings", {})),
+            }
+            result["_timings"] = timings
+            return result
+        except (OSError, TimeoutError, urllib.error.URLError, TypeError):
             return self._fallback(raw_text, "shadow interpreter failed")
 
     def _generate(self, raw_text: str, project_id: int) -> Any:
+        _emit_event("LLM_REQUEST_STARTED", {
+            "model": OLLAMA_MODEL,
+            "timeout": OLLAMA_TIMEOUT_SECONDS,
+            "num_predict": OLLAMA_NUM_PREDICT,
+            "prompt_length": len(raw_text),
+        })
+        ollama_start = perf_counter()
+
         payload = json.dumps(
             {
                 "model": OLLAMA_MODEL,
-                "prompt": f"{LLM_V2_PROMPT}\n\nProject ID: {project_id}\nNote:\n{raw_text}",
+                "prompt": f"/no_think\n{LLM_V2_PROMPT}\n\nProject ID: {project_id}\nNote:\n{raw_text}",
                 "stream": False,
+                "format": "json",
+                "options": {
+                    "temperature": OLLAMA_TEMPERATURE,
+                    "num_predict": OLLAMA_NUM_PREDICT,
+                },
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -45,11 +212,64 @@ class LLMv2Interpreter:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
             ollama_body = json.loads(response.read().decode("utf-8"))
-        return json.loads(ollama_body.get("response", ""))
+        ollama_ms = (perf_counter() - ollama_start) * 1000
 
-    def _coerce(self, value: dict[str, Any]) -> dict[str, Any]:
+        _emit_event("OLLAMA_RESPONSE_RECEIVED", {
+            "model": OLLAMA_MODEL,
+            "response_length": len(str(ollama_body.get("response", ""))),
+            "thinking_length": len(str(ollama_body.get("thinking", ""))),
+            "total_duration": ollama_body.get("total_duration"),
+        }, duration_ms=ollama_ms)
+
+        parse_start = perf_counter()
+        parsed = self._parse_ollama_json(ollama_body)
+        parse_ms = (perf_counter() - parse_start) * 1000
+
+        used_field = "response" if ollama_body.get("response") and str(ollama_body.get("response", "")).strip() else "thinking"
+        _emit_event("LLM_JSON_PARSED", {
+            "keys_parsed": list(parsed.keys()) if isinstance(parsed, dict) else [],
+            "used_response_field": used_field,
+        }, duration_ms=parse_ms)
+
+        self._last_timings = {
+            "prompt_length": len(raw_text),
+            "ollama_http_duration_ms": round(ollama_ms, 1),
+            "json_parse_duration_ms": round(parse_ms, 1),
+        }
+        return parsed
+
+    def _parse_ollama_json(self, ollama_body: dict[str, Any]) -> Any:
+        response_text = ollama_body.get("response")
+        thinking_text = ollama_body.get("thinking")
+        content = response_text if isinstance(response_text, str) and response_text.strip() else thinking_text
+        if not isinstance(content, str) or not content.strip():
+            raise LLMOutputParseError("Ollama returned empty response and thinking fields")
+        return self._extract_json(content)
+
+    def _extract_json(self, content: str) -> Any:
+        text = content.strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char not in "{[":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        raise LLMOutputParseError("Ollama output did not contain a valid JSON object")
+
+    def _coerce(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
+        if _is_bare_entity(value):
+            value = _wrap_bare_entity(value, raw_text)
         intent = value.get("intent")
         action = value.get("action")
         raw_financial = value.get("financial")
@@ -64,10 +284,16 @@ class LLMv2Interpreter:
         work_description = work.get("description")
         note_text = note.get("text")
 
+        entities = self._entities(value.get("entities"))
+        self._normalize_profile_update_fields(raw_text, entities)
+        if self._has_profile_update_fields(entities):
+            intent = "SETUP"
+            action = "UPDATE_ENTITY"
+
         return {
             "intent": intent if intent in VALID_INTENTS else "NOTE",
             "action": action if action in VALID_ACTIONS else self._action_for_intent(intent),
-            "entities": self._entities(value.get("entities")),
+            "entities": entities,
             "financial": {
                 "amount": self._number_or_none(financial.get("amount")),
                 "direction": direction if direction in VALID_DIRECTIONS else "NONE",
@@ -182,6 +408,100 @@ class LLMv2Interpreter:
         if not isinstance(value, list):
             return []
         return [str(item) for item in value]
+
+    def _normalize_profile_update_fields(self, raw_text: str, entities: list[dict[str, Any]]) -> None:
+        normalized_text = " ".join((raw_text or "").replace("\u200c", " ").split())
+        compact_text = normalized_text.translate(PERSIAN_DIGITS).replace(" ", "")
+        account_number = (
+            self._longest_digit_sequence(compact_text, min_length=8, max_length=26)
+            if self._has_account_intent(normalized_text)
+            else None
+        )
+        phone = self._phone_sequence(compact_text) if self._has_phone_intent(normalized_text) else None
+        if not entities:
+            name = self._profile_update_name(normalized_text, [account_number, phone])
+            if name is None or (account_number is None and phone is None):
+                return
+            entities.append(
+                {
+                    "name": name,
+                    "kind": "PERSON",
+                    "project_role": "OTHER",
+                    "role_detail": None,
+                    "phone": None,
+                    "account_number": None,
+                    "daily_rate": None,
+                    "notes": None,
+                    "field_updates": {},
+                }
+            )
+        first_entity = entities[0]
+        field_updates = first_entity.get("field_updates")
+        if not isinstance(field_updates, dict):
+            field_updates = {}
+            first_entity["field_updates"] = field_updates
+
+        if self._has_account_intent(normalized_text) and not first_entity.get("account_number"):
+            if account_number is not None:
+                first_entity["account_number"] = account_number
+                field_updates["account_number"] = account_number
+
+        if self._has_phone_intent(normalized_text) and not first_entity.get("phone"):
+            if phone is not None:
+                first_entity["phone"] = phone
+                field_updates["phone"] = phone
+
+        if not field_updates:
+            first_entity["field_updates"] = None
+
+    def _has_profile_update_fields(self, entities: list[dict[str, Any]]) -> bool:
+        for entity in entities:
+            field_updates = entity.get("field_updates")
+            if isinstance(field_updates, dict) and any(value not in (None, "") for value in field_updates.values()):
+                return True
+            if any(entity.get(key) not in (None, "") for key in ("phone", "account_number", "daily_rate", "notes")):
+                return True
+        return False
+
+    def _has_account_intent(self, text: str) -> bool:
+        normalized = text.lower()
+        return any(
+            term in normalized
+            for term in ("شماره حساب", "شماره کارت", "حساب", "کارت", "شبا", "account", "card")
+        )
+
+    def _has_phone_intent(self, text: str) -> bool:
+        normalized = text.lower()
+        return any(
+            term in normalized
+            for term in ("شماره تماس", "شماره موبایل", "موبایل", "تلفن", "phone", "mobile")
+        )
+
+    def _longest_digit_sequence(self, text: str, *, min_length: int, max_length: int) -> str | None:
+        matches = [match.group() for match in re.finditer(r"\d+", text)]
+        candidates = [match for match in matches if min_length <= len(match) <= max_length]
+        if not candidates:
+            return None
+        return max(candidates, key=len)
+
+    def _phone_sequence(self, text: str) -> str | None:
+        match = re.search(r"09\d{9,12}", text)
+        return match.group() if match is not None else None
+
+    def _profile_update_name(self, text: str, values: list[str | None]) -> str | None:
+        candidate = text
+        for value in values:
+            if value:
+                candidate = candidate.replace(value, " ")
+        candidate = re.sub(r"[۰-۹٠-٩0-9]{4,}", " ", candidate)
+        candidate = re.sub(
+            r"شماره\s+حساب|شماره\s+کارت|شماره\s+تماس|شماره\s+موبایل|حساب|کارت|شبا|موبایل|تلفن|iban|account|card|phone|mobile|برای|به",
+            " ",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        name = re.sub(r"\s+", " ", candidate).strip()
+        return name or None
 
     def _fallback(self, raw_text: str, reason: str) -> dict[str, Any]:
         return {

@@ -1,6 +1,7 @@
 from typing import Any
 
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 from sqlalchemy import func, select
 
 from app.models.core import Payment, ShadowInterpretationLog, Worker, WorkLog
@@ -81,13 +82,8 @@ def test_shadow_runs_alongside_legacy_and_creates_log(
 
     monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", fake_interpret)
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
-    assert response.json()["interpretations"][0]["canonical_event_type"] == "FINANCIAL_EVENT"
+    interpretation = natural_input_interpretation(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
+    assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
     assert calls == [("میثم ۲۰۰ میلیون پول داد", project["id"])]
 
     logs = _shadow_logs(client)
@@ -109,12 +105,7 @@ def test_shadow_does_not_execute_or_modify_domain_state(
         lambda self, raw_text, project_id: _shadow_result(),
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
+    submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     session_factory = client.app.state.testing_session_factory
     with session_factory() as db:
         assert db.scalar(select(func.count()).select_from(Worker)) == 0
@@ -135,13 +126,7 @@ def test_shadow_failure_does_not_change_legacy_response(
 
     monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", fail_interpret)
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
-    interpretation = response.json()["interpretations"][0]
+    interpretation = natural_input_interpretation(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
     assert interpretation["extracted_amount"] == "200000000.00"
     assert _shadow_logs(client) == []
@@ -158,13 +143,7 @@ def test_financial_input_produces_valid_legacy_and_shadow_outputs(
         lambda self, raw_text, project_id: _shadow_result(),
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
-    legacy = response.json()["interpretations"][0]
+    legacy = natural_input_interpretation(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     shadow = _shadow_logs(client)[0].shadow_json
     assert legacy["canonical_event_type"] == "FINANCIAL_EVENT"
     assert legacy["extracted_amount"] == "200000000.00"

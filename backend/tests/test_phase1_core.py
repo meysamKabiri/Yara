@@ -25,6 +25,7 @@ from app.services.semantic_normalizer import (
     CanonicalEventType,
     SemanticNormalizerService,
 )
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations
 
 
 def create_project(client: TestClient) -> dict:
@@ -34,11 +35,7 @@ def create_project(client: TestClient) -> dict:
 
 
 def create_interpretation(client: TestClient, project_id: int, text: str) -> dict:
-    response = client.post(f"/projects/{project_id}/natural-input", json={"text": text})
-    assert response.status_code == 201
-    interpretations = response.json()["interpretations"]
-    assert interpretations
-    return interpretations[0]
+    return natural_input_interpretation(client, project_id, text)
 
 
 def confirm_interpretation(client: TestClient, interpretation: dict) -> dict:
@@ -1446,13 +1443,11 @@ def test_multiple_amount_message_creates_multiple_pending_interpretations(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از علی 50 میلیون گرفتم و 20 میلیون به هادی دادم"},
+    interpretations = natural_input_interpretations(
+        client,
+        project["id"],
+        "از علی 50 میلیون گرفتم و 20 میلیون به هادی دادم",
     )
-
-    assert response.status_code == 201
-    interpretations = response.json()["interpretations"]
     assert len(interpretations) == 2
     assert client.get(f"/projects/{project['id']}/payments").json() == []
 
@@ -1949,13 +1944,11 @@ def test_multiple_extracted_actions_create_independent_interpretations(
         },
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "۱ میلیون و ۲ میلیون دادم به جوشکار"},
+    interpretations = natural_input_interpretations(
+        client,
+        project["id"],
+        "۱ میلیون و ۲ میلیون دادم به جوشکار",
     )
-
-    assert response.status_code == 201
-    interpretations = response.json()["interpretations"]
     assert len(interpretations) == 2
     first = confirm_interpretation(client, interpretations[0])
     assert first["payments"][0]["amount"] == "1000000.00"
@@ -2335,3 +2328,37 @@ def test_daily_worker_rate_work_accrual_and_payment_reduction(
     assert summary["total_work_amount"] == "4800000.00"
     assert summary["total_paid_out"] == "2000000.00"
     assert summary["open_payables"] == "2800000.00"
+
+
+def test_create_new_daily_worker_with_daily_rate(client: TestClient) -> None:
+    project = create_project(client)
+    pi = natural_input_interpretation(client, project["id"], "دستمزد روزانه مش رحیم 1200000 تومان است")
+    assert pi["semantic_action"] == "ENTITY_UPDATE"
+    assert pi["canonical_event_type"] == "SETUP_EVENT"
+    assert pi["extracted_entities"][0]["daily_rate"] == 1200000
+    assert pi["extracted_entities"][0]["project_role"] == "DAILY_WORKER"
+
+    response = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={
+            "create_new": True,
+            "name": "مش رحیم",
+            "role": "DAILY_WORKER",
+            "field_updates": {"daily_rate": 1200000},
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    if body.get("status") == "ENTITY_RESOLVED":
+        response = client.post(
+            f"/pending-interpretations/{pi['id']}/confirm",
+            json={"entity_id": body["entity_id"], "confirmed": True},
+        )
+        assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    worker = next((w for w in workers if w["name"] == "مش رحیم"), None)
+    assert worker is not None
+    assert worker["type"] == "DAILY_WORKER"
+    assert worker["daily_rate"] == "1200000.00"

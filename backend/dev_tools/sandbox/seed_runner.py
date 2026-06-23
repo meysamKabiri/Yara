@@ -1,5 +1,6 @@
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -7,8 +8,19 @@ from sqlalchemy import select
 
 from app.api import projects as project_api
 from app.db.session import SessionLocal
-from app.models.core import HistoryEntry, Invoice, Payment, Project, Worker, WorkerState
-from app.schemas.projects import NaturalInputCreate, PendingInterpretationConfirm, ProjectCreate
+from app.jobs import natural_input_job
+from app.models.core import (
+    HistoryEntry,
+    Invoice,
+    NaturalInputJob,
+    NaturalInputJobStatus,
+    Payment,
+    PendingInterpretation,
+    Project,
+    Worker,
+    WorkerState,
+)
+from app.schemas.projects import PendingInterpretationConfirm, ProjectCreate
 from app.services.entity_normalizer import normalize_name
 from app.services.persian_money_engine import parse_persian_money
 from dev_tools.sandbox.scenarios import get_scenario
@@ -56,14 +68,38 @@ def _run_steps(
             project = _get_or_create_project(db, scenario["project_name"])
             trace = []
             for step in steps:
-                draft = project_api.process_natural_input(
-                    project.id,
-                    NaturalInputCreate(text=step["text"]),
-                    db,
+                job_id = str(uuid.uuid4())
+                db.add(
+                    NaturalInputJob(
+                        job_id=job_id,
+                        project_id=project.id,
+                        status=NaturalInputJobStatus.PENDING,
+                    )
+                )
+                db.commit()
+                original_worker_session_local = natural_input_job.SessionLocal
+                natural_input_job.SessionLocal = SessionLocal
+                try:
+                    job_result = natural_input_job.process_natural_input_job(
+                        job_id,
+                        project.id,
+                        step["text"],
+                    )
+                finally:
+                    natural_input_job.SessionLocal = original_worker_session_local
+                interpretation_ids = [
+                    item["id"] for item in job_result.get("result", {}).get("interpretations", [])
+                ]
+                interpretations = list(
+                    db.scalars(
+                        select(PendingInterpretation).where(
+                            PendingInterpretation.id.in_(interpretation_ids)
+                        )
+                    )
                 )
                 confirmed_results = [
                     _confirm_interpretation(db, interpretation)
-                    for interpretation in draft.interpretations
+                    for interpretation in interpretations
                 ]
                 trace.append(
                     {

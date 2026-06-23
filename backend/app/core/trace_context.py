@@ -11,6 +11,7 @@ from starlette.responses import Response
 
 
 _trace_id: ContextVar[str | None] = ContextVar("trace_id", default=None)
+_job_id: ContextVar[str | None] = ContextVar("job_id", default=None)
 
 
 def new_trace_id() -> str:
@@ -21,12 +22,34 @@ def get_trace_id() -> str | None:
     return _trace_id.get()
 
 
+def current_trace_id() -> str | None:
+    return get_trace_id()
+
+
 def set_trace_id(trace_id: str) -> Any:
     return _trace_id.set(trace_id)
 
 
 def reset_trace_id(token: Any) -> None:
     _trace_id.reset(token)
+
+
+def get_job_id() -> str | None:
+    return _job_id.get()
+
+
+def set_job_id(job_id: str | None) -> Any:
+    return _job_id.set(job_id)
+
+
+def reset_job_id(token: Any) -> None:
+    _job_id.reset(token)
+
+
+def set_trace_context(job_id: str | None, trace_id: str | None) -> tuple[Any | None, Any | None]:
+    trace_token = set_trace_id(trace_id) if trace_id is not None else None
+    job_token = set_job_id(job_id)
+    return job_token, trace_token
 
 
 class TraceIdFilter(logging.Filter):

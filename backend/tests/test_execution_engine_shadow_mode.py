@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 from sqlalchemy.orm import Session
 
 from app.models.core import (
@@ -92,10 +93,7 @@ def test_confirmation_runs_execution_engine_shadow_without_double_writing(
         lambda text: {"intent": "PAYMENT", "entity": "هادی پور", "confidence": 0.9},
     )
 
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم"},
-    ).json()["interpretations"][0]
+    pending = natural_input_interpretation(client, project["id"], "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم")
 
     with caplog.at_level(logging.INFO):
         resolution = client.post(
@@ -138,10 +136,7 @@ def test_execution_engine_is_primary_when_flag_is_on(
 
     monkeypatch.setattr("app.api.projects.ExecutionEngine", SpyExecutionEngine)
 
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم"},
-    ).json()["interpretations"][0]
+    pending = natural_input_interpretation(client, project["id"], "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم")
     resolution = client.post(
         f"/pending-interpretations/{pending['id']}/confirm",
         json={"selected_person_id": worker["id"]},
@@ -168,10 +163,7 @@ def test_legacy_primary_fallback_works_when_execution_engine_flag_is_off(
         lambda text: {"intent": "PAYMENT", "entity": "هادی پور", "confidence": 0.9},
     )
 
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم"},
-    ).json()["interpretations"][0]
+    pending = natural_input_interpretation(client, project["id"], "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم")
     confirmed = client.post(
         f"/pending-interpretations/{pending['id']}/confirm",
         json={"selected_person_id": worker["id"]},
@@ -193,10 +185,7 @@ def test_engine_primary_shadow_comparison_reports_matching_financial_output(
         "app.api.projects.extract_graph",
         lambda text: {"intent": "PAYMENT", "entity": "هادی پور", "confidence": 0.9},
     )
-    pending = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم"},
-    ).json()["interpretations"][0]
+    pending = natural_input_interpretation(client, project["id"], "از هادی پور 25 میلیون سیم خریدم و پرداخت کردم")
 
     with caplog.at_level(logging.INFO):
         resolution = client.post(

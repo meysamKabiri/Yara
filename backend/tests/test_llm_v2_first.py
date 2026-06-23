@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 from sqlalchemy import select
 
 from app.models.core import PendingInterpretation, PendingInterpretationStatus, Worker
@@ -48,9 +49,7 @@ def test_llm_v2_setup_adds_client_entity(client: TestClient, monkeypatch: pytest
     )
 
     project = client.post("/projects", json={"name": "test"}).json()
-    response = client.post(f"/projects/{project['id']}/natural-input", json={"text": "مش رحیم کارفرمای پروژه است"})
-    assert response.status_code == 201
-    interpretations = response.json()["interpretations"]
+    interpretations = natural_input_interpretations(client, project["id"], "مش رحیم کارفرمای پروژه است")
     assert len(interpretations) == 1
     pi = interpretations[0]
     assert pi["canonical_event_type"] == "SETUP_EVENT"
@@ -93,10 +92,7 @@ def test_llm_v2_role_only_statement_is_set_role_without_missing_fields(
     )
 
     project = client.post("/projects", json={"name": "role-only"}).json()
-    pi = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم کبیری کارفرمای پروژه است"},
-    ).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "میثم کبیری کارفرمای پروژه است")
 
     assert pi["canonical_event_type"] == "SETUP_EVENT"
     assert pi["semantic_action"] == "SET_ROLE"
@@ -128,7 +124,7 @@ def test_llm_v2_work_records_daily_labor(client: TestClient, monkeypatch: pytest
     )
 
     project = client.post("/projects", json={"name": "test2"}).json()
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "مش رحیم امروز کار کرد"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
     assert pi["canonical_event_type"] == "WORK_EVENT"
     assert pi["semantic_action"] == "INCREMENT"
     assert pi["structured_interpretation"]["intent"] == "WORK"
@@ -160,7 +156,7 @@ def test_llm_v2_financial_payment_out(client: TestClient, monkeypatch: pytest.Mo
         }),
     )
 
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "۱۰۰ میلیون دادم به نادری جوشکار"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "۱۰۰ میلیون دادم به نادری جوشکار")
     assert pi["canonical_event_type"] == "FINANCIAL_EVENT"
     assert pi["semantic_action"] == "PAYMENT"
     assert pi["extracted_amount"] == "100000000.00"
@@ -194,7 +190,7 @@ def test_llm_v2_financial_payment_in(client: TestClient, monkeypatch: pytest.Mon
         }),
     )
 
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "میثم ۲۰۰ میلیون پول داد"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     assert pi["financial_direction"] == "INCOMING"
 
     confirm = _confirm_financial(client, pi, {"selected_person_id": worker["id"]})
@@ -224,10 +220,7 @@ def test_llm_v2_repairs_project_account_deposit_with_missing_entity(
         }),
     )
 
-    pi = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم 300 میلیون به حساب پروژه واریز کرد"},
-    ).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "میثم 300 میلیون به حساب پروژه واریز کرد")
     entity = pi["extracted_entities"][0]
 
     assert pi["canonical_event_type"] == "FINANCIAL_EVENT"
@@ -262,7 +255,7 @@ def test_llm_v2_financial_debt(client: TestClient, monkeypatch: pytest.MonkeyPat
         }),
     )
 
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "۵ میلیون از هادی‌پور سیم خرید کردم نسیه"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "۵ میلیون از هادی‌پور سیم خرید کردم نسیه")
     assert pi["financial_direction"] == "DEBT"
     assert pi["semantic_action"] == "DEBT_CREATED"
 
@@ -291,12 +284,7 @@ def test_llm_v2_compact_prefix_vendor_name_requires_later_resolution(client: Tes
         }),
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
-    )
-    assert response.status_code == 201
-    pi = response.json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "از هادیپور ۵ میلیون سیم خریدم")
     assert pi["suggested_entity_id"] is None
     assert pi["matched_input_text"] is None
 
@@ -320,10 +308,7 @@ def test_llm_v2_named_vendor_auto_create_allows_unknown_kind(client: TestClient,
         }),
     )
 
-    pi = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادیپور ۵ میلیون سیم خریدم"},
-    ).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "از هادیپور ۵ میلیون سیم خریدم")
 
     assert pi["suggested_entity_id"] is None
     assert pi["extracted_entities"][0]["project_role"] == "VENDOR"
@@ -362,10 +347,7 @@ def test_llm_v2_paid_purchase_corrects_amount_direction_and_worker_role_conflict
         }),
     )
 
-    pi = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادی پور ۲ ملیون و ۳۵۰ هزار تومن خورطومی خریدم"},
-    ).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "از هادی پور ۲ ملیون و ۳۵۰ هزار تومن خورطومی خریدم")
 
     assert pi["semantic_action"] == "PURCHASE_PAID"
     assert pi["extracted_amount"] == "2350000.00"
@@ -416,10 +398,7 @@ def test_llm_v2_purchase_rejects_explicit_daily_worker_vendor_conflict(
         }),
     )
 
-    pi = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "از هادی پور ۲ میلیون و ۳۵۰ هزار تومن خورطومی خریدم"},
-    ).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "از هادی پور ۲ میلیون و ۳۵۰ هزار تومن خورطومی خریدم")
     edit = client.patch(
         f"/pending-interpretations/{pi['id']}",
         json={"suggested_entity_id": daily_worker["id"]},
@@ -453,7 +432,7 @@ def test_llm_v2_note_creates_no_state(client: TestClient, monkeypatch: pytest.Mo
     )
 
     project = client.post("/projects", json={"name": "test6"}).json()
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "فردا صبح زود شروع کنیم"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "فردا صبح زود شروع کنیم")
     assert pi["canonical_event_type"] == "NOTE_EVENT"
 
     confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
@@ -481,7 +460,7 @@ def test_llm_v2_structured_interpretation_stored(client: TestClient, monkeypatch
     )
 
     project = client.post("/projects", json={"name": "test7"}).json()
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "نادری جوشکار ۲۰ متر جوش داد"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "نادری جوشکار ۲۰ متر جوش داد")
 
     si = pi["structured_interpretation"]
     assert si["intent"] == "WORK"
@@ -522,9 +501,7 @@ def test_llm_v2_add_entity_with_existing_phone_update_is_coerced_to_update(
         }),
     )
 
-    response = client.post(f"/projects/{project['id']}/natural-input", json={"text": "شماره تماس میثم 09123456789"})
-    assert response.status_code == 201
-    pi = response.json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "شماره تماس میثم 09123456789")
 
     assert pi["suggested_entity_id"] is None
     assert pi["semantic_action"] == "ENTITY_UPDATE"
@@ -575,7 +552,7 @@ def test_llm_v2_existing_account_number_update_does_not_create_duplicate(
         }),
     )
 
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "شماره حساب میثم 45734643565444"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "شماره حساب میثم 45734643565444")
     unresolved = client.post(f"/pending-interpretations/{pi['id']}/confirm")
     assert unresolved.status_code == 400
     assert unresolved.json()["detail"]["status"] == "NEEDS_SELECTION"
@@ -621,7 +598,7 @@ def test_llm_v2_existing_daily_rate_update_does_not_change_role(
         }),
     )
 
-    pi = client.post(f"/projects/{project['id']}/natural-input", json={"text": "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است"}).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است")
     unresolved = client.post(f"/pending-interpretations/{pi['id']}/confirm")
     assert unresolved.status_code == 400
     assert unresolved.json()["detail"]["status"] == "NEEDS_SELECTION"
@@ -667,10 +644,7 @@ def test_llm_v2_partial_setup_creation_is_blocked_until_confirmation_resolution(
         }),
     )
 
-    pi = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم کارگر پروژه است"},
-    ).json()["interpretations"][0]
+    pi = natural_input_interpretation(client, project["id"], "میثم کارگر پروژه است")
 
     entity = pi["extracted_entities"][0]
     assert pi["suggested_entity_id"] is None
@@ -706,3 +680,147 @@ def _make_worker(client: TestClient, name: str, worker_type: str, project_id: in
     response = client.post(f"/projects/{project_id}/workers", json={"name": name, "type": worker_type})
     assert response.status_code == 201
     return response.json()
+
+
+def test_counterparty_partial_client_match_preselects_existing_client(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partial client match (score 0.7) preselects existing project client when only one client exists."""
+    project = client.post("/projects", json={"name": "partial client"}).json()
+    _make_worker(client, "میثم کبیری", "CLIENT", project["id"])
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PAYMENT",
+            "entities": [{"name": "میثم", "kind": "PERSON", "project_role": "CLIENT", "role_detail": None}],
+            "financial": {"amount": 300000000, "direction": "IN", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "میثم پول واریز کرد",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "میثم ۳۰۰ میلیون به حساب پروژه واریز کرد")
+
+    assert pi["suggested_entity_id"] is not None, "Should preselect existing CLIENT on partial match"
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert workers[0]["id"] == pi["suggested_entity_id"]
+
+
+def test_counterparty_unknown_vendor_creates_new_draft(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Purchase from unknown vendor with no matching worker creates create-new draft (null suggested_entity_id)."""
+    project = client.post("/projects", json={"name": "unknown vendor"}).json()
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "هادی پور", "kind": "PERSON", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 25000000, "direction": "OUT", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "هادی پور سیم فروخت",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "از هادی پور ۲۵ میلیون سیم خریدم و پرداخت کردم")
+
+    assert pi["suggested_entity_id"] is None, "Should not preselect when no matching vendor exists"
+
+
+def test_counterparty_existing_vendor_preselects(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Purchase from existing vendor preselects that vendor."""
+    project = client.post("/projects", json={"name": "existing vendor"}).json()
+    vendor = _make_worker(client, "هادی پور", "VENDOR", project["id"])
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "هادی پور", "kind": "PERSON", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 25000000, "direction": "OUT", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "هادی پور سیم فروخت",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "از هادی پور ۲۵ میلیون سیم خریدم و پرداخت کردم")
+
+    assert pi["suggested_entity_id"] == vendor["id"], "Should preselect existing vendor on exact name match"
+
+
+def test_counterparty_outgoing_unknown_person_creates_draft(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outgoing payment to unknown person does not preselect (create-new OTHER draft)."""
+    project = client.post("/projects", json={"name": "unknown person"}).json()
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PAYMENT_OUT",
+            "entities": [{"name": "علی احمدی", "kind": "PERSON", "project_role": "OTHER", "role_detail": None}],
+            "financial": {"amount": 5000000, "direction": "OUT", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "به علی احمدی پول دادم",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "به علی احمدی ۵ میلیون دادم")
+
+    assert pi["suggested_entity_id"] is None, "Should not preselect for unknown person with no role evidence"
+    entities = pi.get("extracted_entities") or []
+    assert len(entities) > 0, f"Expected at least one extracted entity, got {entities}"
+    assert entities[0]["name"] == "علی احمدی"
+
+
+def test_counterparty_low_confidence_ambiguous_does_not_preselect(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Low-confidence partial match below threshold does not auto-select."""
+    project = client.post("/projects", json={"name": "low conf"}).json()
+    _make_worker(client, "محمد رضایی", "VENDOR", project["id"])
+    _make_worker(client, "محمد کریمی", "VENDOR", project["id"])
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "محمد", "kind": "PERSON", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 1000000, "direction": "OUT", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.95,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "به محمد پول دادم",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "به محمد ۱ میلیون دادم")
+
+    assert pi["suggested_entity_id"] is None, "Should not auto-select when multiple ambiguous candidates exist"

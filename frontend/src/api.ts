@@ -217,8 +217,8 @@ export type PendingInterpretation = {
   domain_route: {
     domain: "SETUP" | "FINANCIAL" | "ENTITY_UPDATE" | "MIXED";
     confidence: number;
-    required_schema: "setup_confirmation" | "financial_confirmation" | "split_confirmation";
-    ui_mode: "SetupModal" | "FinancialModal" | "SplitFlow";
+    required_schema: "setup_confirmation" | "entity_update_confirmation" | "financial_confirmation" | "split_confirmation";
+    ui_mode: "SetupModal" | "EntityUpdateModal" | "FinancialModal" | "SplitFlow";
   } | null;
   status: PendingInterpretationStatus;
   created_at: string;
@@ -235,6 +235,7 @@ export type PendingInterpretationConfirm = {
   name?: string | null;
   role?: string | null;
   role_detail?: string | null;
+  field_updates?: Record<string, unknown> | null;
 };
 
 export type EntityResolutionResult = {
@@ -282,6 +283,32 @@ export type TraceDetail = {
   events: TraceEvent[];
 };
 
+export type JobStatus = "PENDING" | "RUNNING" | "DONE" | "FAILED";
+
+export type JobState = "IDLE" | "SUBMITTED" | "PROCESSING" | "DONE" | "FAILED";
+
+export type NaturalInputJobRecord = {
+  job_id: string;
+  status: JobStatus;
+  project_id?: number | null;
+  trace_id?: string | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  duration_ms?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  events_summary?: Array<{
+    event: string;
+    duration_ms: number | null;
+  }>;
+};
+
+export type JobEvent = TraceEvent & {
+  job_id?: string;
+  sequence_number?: number;
+  timestamp?: string | number | null;
+};
+
 /* =========================================================
    REQUEST WRAPPER
 ========================================================= */
@@ -299,7 +326,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const traceId = response.headers.get("X-Trace-Id");
 
   // Only emit for NON-read-only debug endpoints
-  const isTraceRead = path.startsWith("/traces/");
+  const isTraceRead =
+    path.startsWith("/traces/") ||
+    path === "/jobs" ||
+    path.startsWith("/jobs/") ||
+    path.startsWith("/natural-input-jobs/");
 
   if (traceId && !isTraceRead) {
     emitTrace(traceId);
@@ -429,8 +460,20 @@ export const api = {
 
   getTrace: (traceId: string) => request<TraceDetail>(`/traces/${traceId}`),
 
+  listJobs: () => request<NaturalInputJobRecord[]>("/jobs"),
+
+  getNaturalInputJob: (jobId: string) =>
+    request<NaturalInputJobRecord>(`/natural-input-jobs/${encodeURIComponent(jobId)}`),
+
+  listJobEvents: async (jobId: string) => {
+    const result = await request<JobEvent[] | { events: JobEvent[] }>(
+      `/jobs/${encodeURIComponent(jobId)}/events`,
+    );
+    return Array.isArray(result) ? result : result.events;
+  },
+
   processNaturalInput: (projectId: number, text: string) =>
-    request<NaturalInputInterpretationResult>(`/projects/${projectId}/natural-input`, {
+    request<NaturalInputJobRecord>(`/projects/${projectId}/natural-input`, {
       method: "POST",
       body: JSON.stringify({ text }),
     }),

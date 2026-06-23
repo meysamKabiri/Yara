@@ -1,7 +1,30 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
+
+_PROFILE_FIELDS = {"phone", "account_number", "card_number", "daily_rate", "notes"}
+
+
+def _extracted_entities_have_profile_fields(entities: list[dict] | None) -> bool:
+    if not entities:
+        return False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        field_updates = entity.get("field_updates")
+        if isinstance(field_updates, dict) and any(
+            field_updates.get(key) not in (None, "")
+            for key in _PROFILE_FIELDS
+        ):
+            return True
+        if any(
+            entity.get(key) not in (None, "")
+            for key in _PROFILE_FIELDS
+        ):
+            return True
+    return False
 
 from app.models.core import (
     CounterpartyType,
@@ -276,16 +299,36 @@ class PendingInterpretationRead(BaseModel):
         if self.domain_route is None:
             from app.services.domain_router_service import DomainRouterService
 
+            route_input = {
+                "semantic_action": self.semantic_action,
+                "action": self.semantic_action,
+                "entities": self.extracted_entities or [],
+                "extracted_entities": self.extracted_entities or [],
+                "financial": {
+                    "amount": self.extracted_amount,
+                    "direction": self.financial_direction.value if self.financial_direction is not None else None,
+                },
+            }
+            if isinstance(self.structured_interpretation, dict):
+                route_input.update(self.structured_interpretation)
+                route_input.setdefault("semantic_action", self.semantic_action)
+                route_input.setdefault("action", self.semantic_action)
+                if not route_input.get("entities"):
+                    route_input["entities"] = self.extracted_entities or []
+                if not route_input.get("extracted_entities"):
+                    route_input["extracted_entities"] = self.extracted_entities or []
             self.domain_route = DomainRouteRead(
                 **DomainRouterService().route(
                     self.raw_input_text,
-                    self.structured_interpretation
-                    or {
-                        "semantic_action": self.semantic_action,
-                        "action": self.semantic_action,
-                    },
+                    route_input,
                 )
             )
+        if (
+            self.domain_route.domain == "ENTITY_UPDATE"
+            and self.semantic_action in {"SET_ROLE", "SETUP", "UPDATE_ENTITY"}
+            and _extracted_entities_have_profile_fields(self.extracted_entities)
+        ):
+            self.semantic_action = "ENTITY_UPDATE"
         return self
 
 
@@ -306,12 +349,15 @@ class PendingInterpretationUpdate(BaseModel):
 
 class PendingInterpretationConfirm(BaseModel):
     entity_id: int | None = None
+    person_id: int | None = None
     selected_person_id: int | None = None
+    selected_entity_id: int | None = None
     confirmed: bool = False
     create_new: bool = False
     name: str | None = None
     role: str | None = None
     role_detail: str | None = None
+    field_updates: dict[str, Any] | None = None
 
 
 class EntityResolutionResult(BaseModel):

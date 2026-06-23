@@ -7,6 +7,7 @@ interface SetupModalProps {
   interpretation: PendingInterpretation;
   workers: Worker[];
   activeProjectId: number | null;
+  projectName?: string | null;
   isLoading: boolean;
   onConfirm: (entities: SetupEntity[]) => void;
   onDiscard: () => void;
@@ -54,6 +55,7 @@ function extractSetupEntities(interpretation: PendingInterpretation): SetupEntit
 export function SetupModal({
   interpretation,
   activeProjectId,
+  projectName,
   isLoading,
   onConfirm,
   onDiscard,
@@ -116,7 +118,7 @@ export function SetupModal({
             </label>
             <label>
               پروژه
-              <input value={activeProjectId ? `پروژه ${activeProjectId}` : "ثبت نشده"} readOnly />
+              <input value={projectName || (activeProjectId ? `پروژه ${activeProjectId}` : "ثبت نشده")} readOnly />
             </label>
           </div>
         </div>
