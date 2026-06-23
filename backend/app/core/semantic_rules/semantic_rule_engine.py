@@ -75,6 +75,10 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
     "FINANCIAL_EVENT": {
         "rule_id": "FINANCIAL_RULE_01",
         "event_type": "FINANCIAL_EVENT",
+        "deprecated_scope": (
+            "Phase 4: financial actions here are legacy pre-confirmation hints only. "
+            "They must not be used for final payment, invoice, method, direction, or balance writes."
+        ),
         "triggers": {
             "keywords": [
                 "دادم",
@@ -93,10 +97,15 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
                 "میلیون",
                 "ملیون",
                 "تومان",
+                "kharidam",
+                "pardakht",
+                "gereftam",
+                "million",
             ],
             "patterns": ["money", "cash_movement", "settlement"],
         },
         "actions": {
+            "_deprecated": True,
             "PURCHASE_PAID": ["خرید", "خرید کردم"],
             "DEBT_CREATED": ["فاکتور", "بدهی", "حساب شد", "نسیه", "ندادم"],
             "CHECK_PAYMENT": ["چک"],
@@ -312,16 +321,20 @@ class SemanticRuleEngine:
         if event_type == CanonicalEventType.SETUP:
             return "ENTITY_UPDATE" if self.has_entity_update_meaning(normalized_text) else "SETUP"
         if event_type == CanonicalEventType.FINANCIAL:
-            if self.has_check_payment_meaning(normalized_text):
-                return "CHECK_PAYMENT"
-            if self.has_debt_meaning(normalized_text):
-                return "DEBT_CREATED"
-            if self.has_paid_purchase_meaning(normalized_text):
-                return "PURCHASE_PAID"
-            return "PAYMENT"
+            return self._deprecated_financial_action_hint(normalized_text)
         if event_type == CanonicalEventType.WORK:
             return "INCREMENT"
         return "NOTE"
+
+    def _deprecated_financial_action_hint(self, normalized_text: str) -> str:
+        """Legacy pre-confirmation hint; ExecutionEngine owns final financial effects."""
+        if self.has_check_payment_meaning(normalized_text):
+            return "CHECK_PAYMENT"
+        if self.has_debt_meaning(normalized_text):
+            return "DEBT_CREATED"
+        if self.has_paid_purchase_meaning(normalized_text):
+            return "PURCHASE_PAID"
+        return "PAYMENT"
 
     def note_allowed(self, text: str, context: list[Worker]) -> bool:
         normalized = self._normalize(text)
@@ -522,6 +535,11 @@ class SemanticRuleEngine:
                 "چک",
                 "واریز",
                 "پول",
+                "گرفتم",
+                "kharid",
+                "kharidam",
+                "pardakht",
+                "gereftam",
             },
         )
 
@@ -551,13 +569,17 @@ class SemanticRuleEngine:
         return any(phrase in normalized_text for phrase in phrases)
 
     def _has_purchase_meaning(self, normalized_text: str) -> bool:
-        return self._contains_phrase(normalized_text, ["خرید", "خریدم", "خرید کردم"])
+        return self._contains_phrase(
+            normalized_text,
+            ["خرید", "خریدم", "خرید کردم", "kharid", "kharidam", "kharid kardam"],
+        )
 
     def _has_money_amount(self, normalized_text: str) -> bool:
         return bool(
             re.search(
-                r"\d+(?:\.\d+)?\s*(میلیون|میلیونی|میلیارد|میلیاردی|هزار|تومان)",
+                r"\d+(?:\.\d+)?\s*(میلیون|میلیونی|میلیارد|میلیاردی|هزار|تومان|million|billion|thousand)",
                 normalized_text,
+                re.IGNORECASE,
             )
         )
 
@@ -569,15 +591,16 @@ class SemanticRuleEngine:
     ) -> list[str]:
         if event_type != CanonicalEventType.FINANCIAL:
             return []
+        notes = ["financial action is a deprecated pre-confirmation hint; ExecutionEngine owns final writes"]
         if action == "PURCHASE_PAID":
-            return ["money amount + purchase phrase implies paid purchase by default"]
+            return [*notes, "money amount + purchase phrase suggests paid purchase"]
         if action in {"DEBT_CREATED", "CHECK_PAYMENT", "DEFERRED_PAYMENT"}:
-            return ["unpaid/debt/check terms override paid purchase"]
+            return [*notes, "unpaid/debt/check terms suggest non-cash payment handling"]
         if self._has_purchase_meaning(normalized_text) and not self._has_money_amount(
             normalized_text
         ):
-            return ["purchase phrase without money amount is not treated as payment or debt"]
-        return []
+            return [*notes, "purchase phrase without money amount is not treated as payment or debt"]
+        return notes
 
     def _entity_names(self, llm_output: dict[str, Any]) -> list[str]:
         names: list[str] = []

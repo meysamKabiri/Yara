@@ -6,8 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core import llm_cache as llm_cache_module
 from app.db.base import Base
 from app.db.session import get_db_session
+from app.jobs import natural_input_job
 from app.main import app
 
 
@@ -18,6 +20,7 @@ def _mock_llm_v2_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     Tests that want to test LLM v2 behavior should explicitly mock
     LLMv2Interpreter.interpret with their expected output.
     """
+    llm_cache_module._LLM_CACHE.clear()
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
         lambda self, raw_text, project_id: {
@@ -58,10 +61,22 @@ def client() -> Generator[TestClient, None, None]:
         finally:
             db.close()
 
+    class ImmediateQueue:
+        def enqueue(self, func: str, *, args: tuple, job_id: str) -> None:
+            previous_session_local = natural_input_job.SessionLocal
+            natural_input_job.SessionLocal = TestingSessionLocal
+            try:
+                natural_input_job.process_natural_input_job(*args)
+            finally:
+                natural_input_job.SessionLocal = previous_session_local
+
     app.dependency_overrides[get_db_session] = override_get_db_session
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("app.api.projects.get_queue", lambda: ImmediateQueue())
     with TestClient(app) as test_client:
         test_client.app.state.testing_session_factory = TestingSessionLocal
         yield test_client
         del test_client.app.state.testing_session_factory
+    monkeypatch.undo()
     app.dependency_overrides.clear()
     Base.metadata.drop_all(bind=engine)

@@ -1,10 +1,11 @@
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from uuid import uuid4
 
 from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Numeric, String, Text
 from sqlalchemy import Enum as SqlEnum
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base, TimestampMixin
 
@@ -40,6 +41,13 @@ class PendingInterpretationStatus(StrEnum):
     CONFIRMED = "CONFIRMED"
     EDITED = "EDITED"
     DISCARDED = "DISCARDED"
+
+
+class NaturalInputJobStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    DONE = "DONE"
+    FAILED = "FAILED"
 
 
 class WorkerType(StrEnum):
@@ -115,6 +123,7 @@ class Project(TimestampMixin, Base):
     financial_migration_logs: Mapped[list["FinancialMigrationLog"]] = relationship(
         back_populates="project"
     )
+    natural_input_jobs: Mapped[list["NaturalInputJob"]] = relationship(back_populates="project")
 
 
 class RawEntry(TimestampMixin, Base):
@@ -332,6 +341,36 @@ class PendingInterpretation(TimestampMixin, Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="pending_interpretations")
+
+
+class NaturalInputJob(TimestampMixin, Base):
+    __tablename__ = "natural_input_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    trace_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+        default=lambda: str(uuid4()),
+    )
+    status: Mapped[NaturalInputJobStatus] = mapped_column(
+        SqlEnum(NaturalInputJobStatus, native_enum=False, length=20),
+        default=NaturalInputJobStatus.PENDING,
+        nullable=False,
+    )
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="natural_input_jobs")
+
+    @validates("trace_id")
+    def _validate_trace_id(self, _: str, trace_id: str) -> str:
+        if not trace_id:
+            raise ValueError("NaturalInputJob requires exactly one trace_id")
+        return trace_id
 
 
 class ShadowInterpretationLog(TimestampMixin, Base):

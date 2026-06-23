@@ -9,6 +9,7 @@ class RequestCache:
     governance_result: dict[str, Any] | None = None
     timings_ms: dict[str, float] = field(default_factory=dict)
     decision_logs: list[dict[str, Any]] = field(default_factory=list)
+    llm_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def get_legacy_result(self) -> Any:
         return self.legacy_result
@@ -36,6 +37,13 @@ class RequestCache:
 
     def add_decision_log(self, payload: dict[str, Any]) -> None:
         self.decision_logs.append(payload)
+
+    def get_llm_result(self, key: str) -> dict[str, Any] | None:
+        return self.llm_results.get(key)
+
+    def set_llm_result(self, key: str, value: dict[str, Any]) -> dict[str, Any]:
+        self.llm_results[key] = value
+        return value
 
 
 def new_request_cache() -> RequestCache:

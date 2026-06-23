@@ -6,6 +6,8 @@ Do NOT look for specific Persian keywords. Understand the meaning.
 
 Return STRICT JSON only. No markdown. No explanation outside JSON.
 
+CRITICAL: You MUST always return the FULL wrapper object with "intent", "action", "entities", "financial", "work", "note", "confidence", "ambiguity", "missing_fields", and "reasoning_summary". NEVER return a bare entity object. A bare entity like {"name": "...", "project_role": "..."} will be rejected and treated as NOTE. Always wrap the entity inside {"intent": "...", "action": "...", "entities": [bare_entity], ...}.
+
 Schema:
 {
   "intent": "SET_ROLE | SETUP | WORK | FINANCIAL | NOTE | DOCUMENT",
@@ -105,6 +107,8 @@ Rules:
 6. For purchases: if the text implies immediate payment, use PURCHASE_PAID. If it implies credit/debt, use DEBT_CREATED.
 7. Role-only statements such as "کارفرمای پروژه است", "کارگر است", or "فروشنده است" must be SET_ROLE + SET_ROLE. Do not use UPDATE_ENTITY and do not add missing_fields.
 8. Profile/contact/rate/note updates must be SETUP + UPDATE_ENTITY, not FINANCIAL, WORK, or SET_ROLE. Only use UPDATE_ENTITY when phone, account/card number, daily_rate, notes, or field_updates are explicitly present.
+8a. For bank/account/card profile updates such as "شماره حساب میثم 6037991234567890", "شماره کارت علی ...", or "حساب هادی ...", put the numeric value in both entities[0].account_number and entities[0].field_updates.account_number. Do not leave account_number null.
+8b. For phone/contact updates such as "شماره تماس میثم 09123456789", put the numeric value in both entities[0].phone and entities[0].field_updates.phone.
 9. For daily worker wage phrases such as "دستمزد روزانه مش رحیم ۱۲۰۰۰۰۰ تومان است" or "روزی یک میلیون و دویست به مش رحیم می‌دیم", set daily_rate and field_updates.daily_rate.
 10. missing_fields must not include phone, account_number, or role_detail for SET_ROLE + SET_ROLE.
 11. Return valid JSON only."""

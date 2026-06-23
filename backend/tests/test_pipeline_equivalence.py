@@ -3,6 +3,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app.core import unified_pipeline
+from tests.natural_input_helpers import natural_input_interpretation
 
 
 def _create_project(client: TestClient, name: str) -> dict[str, Any]:
@@ -85,12 +86,9 @@ def test_natural_input_route_matches_unified_pipeline_output(
     route_project = _create_project(client, "Route")
     direct_project = _create_project(client, "Direct")
 
-    route_response = client.post(
-        f"/projects/{route_project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
+    route_item = _normalize_interpretation(
+        natural_input_interpretation(client, route_project["id"], "میثم ۲۰۰ میلیون پول داد")
     )
-    assert route_response.status_code == 201
-    route_item = _normalize_interpretation(route_response.json()["interpretations"][0])
 
     session_factory = client.app.state.testing_session_factory
     with session_factory() as db:
@@ -122,13 +120,7 @@ def test_unified_pipeline_preserves_setup_confirmation_data(
     )
     project = _create_project(client, "Setup")
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "کارفرمای پروژه میثم است"},
-    )
-
-    assert response.status_code == 201
-    item = response.json()["interpretations"][0]
+    item = natural_input_interpretation(client, project["id"], "کارفرمای پروژه میثم است")
     assert item["canonical_event_type"] == "SETUP_EVENT"
     assert item["semantic_action"] == "SETUP"
     assert item["extracted_entities"][0]["name"] == "میثم"

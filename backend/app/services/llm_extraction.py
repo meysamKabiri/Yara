@@ -4,7 +4,7 @@ import urllib.request
 from typing import Any
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen3:8b"
+OLLAMA_MODEL = "qwen3:4b"
 
 SYSTEM_PROMPT = """You are a raw contractor note extraction engine.
 
@@ -107,7 +107,13 @@ def extract(text: str) -> list[dict[str, Any]]:
         if not isinstance(events, list):
             return _fallback_note(text)
         return events
-    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, TypeError):
+    except (
+        OSError,
+        TimeoutError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        TypeError,
+    ):
         return _fallback_note(text)
 
 
@@ -117,7 +123,13 @@ def extract_graph(text: str) -> dict[str, Any]:
         if not isinstance(parsed, dict):
             return _fallback_graph_note(text)
         return parsed
-    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, TypeError):
+    except (
+        OSError,
+        TimeoutError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        TypeError,
+    ):
         return _fallback_graph_note(text)
 
 

@@ -1,6 +1,7 @@
 from typing import Any
 
 from fastapi.testclient import TestClient
+from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 from sqlalchemy import select
 
 from app.models.core import FinancialMigrationLog, Project
@@ -47,12 +48,7 @@ def test_financial_input_logs_migration_decision_in_off_mode(
         lambda self, raw_text, project_id: _shadow_result(),
     )
 
-    response = client.post(
-        f"/projects/{project['id']}/natural-input",
-        json={"text": "میثم ۲۰۰ میلیون پول داد"},
-    )
-
-    assert response.status_code == 201
+    submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
     session_factory = client.app.state.testing_session_factory
     with session_factory() as db:
         logs = list(db.scalars(select(FinancialMigrationLog)))

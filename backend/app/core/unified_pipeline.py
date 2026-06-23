@@ -12,13 +12,16 @@ from sqlalchemy.orm import Session
 from app.core.feature_flags import get_financial_migration_mode
 from app.core.governance.governance_context_builder import GovernanceContextBuilder
 from app.core.governance.unified_governance_engine import UnifiedGovernanceEngine
+from app.core.llm_cache import get_llm_cache, llm_cache_key, set_llm_cache
 from app.core.observability.decision_logger import (
     flush_decision_logs,
     queue_financial_decision,
     queue_shadow_decision,
 )
+from app.core.observability.emitter import emit_event
 from app.core.observability.performance_logger import record_pipeline_performance
 from app.core.runtime.request_cache import RequestCache, new_request_cache
+from app.core.trace_context import get_job_id, get_trace_id
 from app.core.validation.financial_validator import decimal_or_none
 from app.dev_tools.semantic_firewall.firewall import (
     SemanticFirewallError,
@@ -45,6 +48,16 @@ from app.services.semantic_normalizer import CanonicalEventType, SemanticNormali
 logger = logging.getLogger(__name__)
 
 
+def _emit_event(event_name, payload=None, duration_ms=None, dedupe_key=None):
+    try:
+        trace_id = get_trace_id()
+        job_id = get_job_id()
+        if trace_id and job_id:
+            emit_event(trace_id, job_id, event_name, payload, duration_ms, dedupe_key)
+    except Exception:
+        pass
+
+
 def process_input(
     db: Session,
     project_id: int,
@@ -58,9 +71,31 @@ def process_input(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
+    fast_setup = _build_role_assignment_interpretation(project_id, text, entity_context)
+    if fast_setup is not None:
+        db.add(fast_setup)
+        db.commit()
+        db.refresh(fast_setup)
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _emit_event("PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "fast_setup",
+        })
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_setup]
 
     llm_v2_start = perf_counter()
-    llm_v2_result = _safe_llm_v2_result(text, project_id)
+    llm_v2_result = _safe_llm_v2_result(text, project_id, cache)
     cache.set_timing("llm_v2_duration_ms", _elapsed_ms(llm_v2_start))
 
     llm_v2_valid = False
@@ -102,6 +137,10 @@ def process_input(
         db.commit()
         for interpretation in interpretations:
             db.refresh(interpretation)
+        _emit_event("PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": len(interpretations),
+            "path": "llm_v2_primary",
+        })
         record_pipeline_performance(
             project_id=project_id,
             input_text=text,
@@ -121,6 +160,10 @@ def process_input(
         db.add(profile_update)
         db.commit()
         db.refresh(profile_update)
+        _emit_event("PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "profile_update",
+        })
         return [profile_update]
 
     legacy_start = perf_counter()
@@ -195,6 +238,11 @@ def process_input(
     for interpretation in interpretations:
         db.refresh(interpretation)
 
+    _emit_event("PENDING_INTERPRETATION_SAVED", {
+        "interpretation_count": len(interpretations),
+        "path": "legacy",
+    })
+
     _run_shadow_interpretation(db, project_id, text, _shadow_legacy_payload(legacy_interpretations), cache, shadow_result)
     record_pipeline_performance(
         project_id=project_id,
@@ -206,6 +254,108 @@ def process_input(
         fallback_required=fallback_required,
     )
     return interpretations
+
+
+def _is_role_compatible(worker_type: str, expected_role: str | None) -> bool:
+    if expected_role is None or expected_role == "OTHER":
+        return True
+    if expected_role == "VENDOR" and worker_type == "VENDOR":
+        return True
+    if expected_role == "CLIENT" and worker_type == "CLIENT":
+        return True
+    if worker_type == expected_role:
+        return True
+    return False
+
+
+def _expected_financial_role(
+    entities_json: list[dict[str, Any]] | None,
+    semantic_action: str | None,
+    financial_direction: Any,
+) -> str | None:
+    if not entities_json:
+        return None
+    first = entities_json[0]
+    role = first.get("project_role") or first.get("type")
+    if role:
+        return role
+    if semantic_action in ("PURCHASE_PAID", "PURCHASE", "PURCHASE_UNPAID"):
+        return "VENDOR"
+    if financial_direction == FinancialDirection.INCOMING:
+        return "CLIENT"
+    return None
+
+
+def _resolve_financial_counterparty(
+    entities_json: list[dict[str, Any]] | None,
+    entity_context: list[Worker],
+    canonical_type: str,
+    semantic_action: str | None,
+    financial_direction: Any,
+) -> int | None:
+    if canonical_type != "FINANCIAL_EVENT" or not entities_json:
+        return None
+    first = entities_json[0]
+    candidates = first.get("candidate_matches")
+    if not isinstance(candidates, list):
+        candidates = []
+    expected_role = _expected_financial_role(entities_json, semantic_action, financial_direction)
+    entity_name = first.get("name")
+    if isinstance(entity_name, str):
+        entity_name = entity_name.strip()
+    else:
+        entity_name = ""
+
+    clients = [w for w in entity_context if w.type.value == "CLIENT"]
+
+    # 1. exact match + role compatible
+    for c in candidates:
+        if (
+            isinstance(c, dict)
+            and c.get("match_type") == "exact"
+            and isinstance(c.get("person_id"), int)
+        ):
+            worker = next((w for w in entity_context if w.id == c["person_id"]), None)
+            if worker is not None and _is_role_compatible(worker.type.value, expected_role):
+                return worker.id
+
+    # 2. single role-compatible partial >= 0.75
+    viable = []
+    for c in candidates:
+        if not isinstance(c, dict) or not isinstance(c.get("person_id"), int):
+            continue
+        score = c.get("score", 0)
+        if not isinstance(score, (int, float)):
+            continue
+        worker = next((w for w in entity_context if w.id == c["person_id"]), None)
+        if worker is not None and _is_role_compatible(worker.type.value, expected_role):
+            viable.append((c, worker, score))
+    if len(viable) == 1:
+        _, worker, score = viable[0]
+        if score >= 0.75:
+            return worker.id
+
+    # 3. CLIENT rule: partial >= 0.60 when exactly one project client
+    if expected_role == "CLIENT" and len(clients) == 1:
+        client = clients[0]
+        client_in_candidates = any(c.get("person_id") == client.id for c in candidates)
+        if client_in_candidates:
+            return client.id
+        if entity_name:
+            from app.services.entity_normalizer import match_score
+            if match_score(entity_name, client.name) >= 0.60:
+                return client.id
+
+    # 4. exact name match in entity_context (role-compatible)
+    if entity_name:
+        name_match = next(
+            (w for w in entity_context if w.name == entity_name and _is_role_compatible(w.type.value, expected_role)),
+            None,
+        )
+        if name_match is not None:
+            return name_match.id
+
+    return None
 
 
 def _build_llm_v2_interpretations(
@@ -241,9 +391,20 @@ def _build_llm_v2_interpretations(
         if interpretation.intent == LLMv2Intent.SET_ROLE and resolution["candidates"]:
             entity_dict["requires_confirmation"] = True
             entity_dict["candidate_matches"] = resolution["candidates"]
-        if interpretation.intent == LLMv2Intent.SETUP and resolution["requires_confirmation"]:
-            _mark_entity_creation_blocked(entity_dict, raw_text, resolution["candidates"])
-            blocked_due_to_ambiguity = True
+        has_profile_fields = bool(
+            isinstance(entity.field_updates, dict) and entity.field_updates
+            or entity.phone is not None
+            or entity.account_number is not None
+            or entity.daily_rate is not None
+            or entity.notes is not None
+        )
+        if interpretation.intent == LLMv2Intent.SETUP and resolution["candidates"]:
+            if has_profile_fields:
+                entity_dict["requires_confirmation"] = True
+                entity_dict["candidate_matches"] = resolution["candidates"]
+            elif resolution["requires_confirmation"]:
+                _mark_entity_creation_blocked(entity_dict, raw_text, resolution["candidates"])
+                blocked_due_to_ambiguity = True
         if entity.phone is not None:
             entity_dict["phone"] = entity.phone
         if entity.account_number is not None:
@@ -318,6 +479,14 @@ def _build_llm_v2_interpretations(
                 }
         elif entities_json:
             entities_json[0] = {**entities_json[0], "project_role": "VENDOR", "type": "VENDOR"}
+
+    if canonical_type == "FINANCIAL_EVENT" and entities_json and "candidate_matches" not in entities_json[0]:
+        fin_name = entities_json[0].get("name")
+        if isinstance(fin_name, str) and fin_name.strip():
+            fin_resolution = resolve_candidates(fin_name.strip(), entity_context)
+            if fin_resolution["candidates"]:
+                entities_json[0]["candidate_matches"] = fin_resolution["candidates"]
+
     payment_method = (
         _llm_v2_payment_method(interpretation.financial.payment_method, action_str)
         if canonical_type == "FINANCIAL_EVENT"
@@ -340,6 +509,10 @@ def _build_llm_v2_interpretations(
     if amount is not None:
         amount = Decimal(str(amount))
 
+    suggested_entity_id = _resolve_financial_counterparty(
+        entities_json, entity_context, canonical_type, semantic_action, financial_direction
+    )
+
     quantity = interpretation.work.quantity
     if quantity is not None:
         quantity = Decimal(str(quantity))
@@ -350,7 +523,7 @@ def _build_llm_v2_interpretations(
             raw_input_text=raw_text,
             canonical_event_type=canonical_type,
             semantic_action=semantic_action,
-            suggested_entity_id=None,
+            suggested_entity_id=suggested_entity_id,
             matched_input_text=None,
             extracted_entities=entities_json or None,
             extracted_amount=amount,
@@ -445,22 +618,28 @@ def _build_profile_update_interpretation(
     if not name:
         return None
     resolution = resolve_candidates(name, entity_context)
+    role = "DAILY_WORKER" if "daily_rate" in updates else "OTHER"
     extracted_entity = {
         "name": name,
-        "type": "OTHER",
-        "project_role": "OTHER",
+        "type": role,
+        "project_role": role,
         "field_updates": updates,
         **updates,
     }
+    suggested_id = None
     if resolution["candidates"]:
         extracted_entity["requires_confirmation"] = True
         extracted_entity["candidate_matches"] = resolution["candidates"]
+        if len(resolution["candidates"]) == 1:
+            only = resolution["candidates"][0]
+            if only.get("match_type") == "exact" and isinstance(only.get("person_id"), int):
+                suggested_id = only["person_id"]
     return PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="SETUP_EVENT",
         semantic_action="ENTITY_UPDATE",
-        suggested_entity_id=None,
+        suggested_entity_id=suggested_id,
         matched_input_text=None,
         extracted_entities=[extracted_entity],
         extracted_amount=None,
@@ -475,12 +654,99 @@ def _build_profile_update_interpretation(
     )
 
 
+def _build_role_assignment_interpretation(
+    project_id: int,
+    raw_text: str,
+    entity_context: list[Worker],
+) -> PendingInterpretation | None:
+    if _text_has_financial_signal(raw_text) or not _is_role_only_assignment_text(raw_text):
+        return None
+    extracted = PersianRoleExtractor().extract(raw_text)
+    if extracted is None or extracted.confidence < 0.75:
+        return None
+    role = extracted.worker_type.value
+    resolution = resolve_candidates(extracted.name, entity_context)
+    entity: dict[str, Any] = {
+        "name": extracted.name,
+        "kind": "PERSON",
+        "project_role": role,
+        "role_detail": extracted.role_phrase if role == "SKILLED_WORKER" else None,
+        "type": role,
+    }
+    if resolution["candidates"]:
+        entity["requires_confirmation"] = True
+        entity["candidate_matches"] = resolution["candidates"]
+    structured = {
+        "intent": "SET_ROLE",
+        "action": "SET_ROLE",
+        "entities": [entity],
+        "financial": {
+            "amount": None,
+            "direction": "NONE",
+            "payment_method": None,
+            "due_date_text": None,
+        },
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": None},
+        "confidence": extracted.confidence,
+        "ambiguity": False,
+        "missing_fields": [],
+        "reasoning_summary": f"{extracted.name} نقش {extracted.role_phrase} دارد",
+    }
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type="SETUP_EVENT",
+        semantic_action="SET_ROLE",
+        suggested_entity_id=None,
+        matched_input_text=None,
+        extracted_entities=[entity],
+        extracted_amount=None,
+        extracted_quantity=None,
+        payment_method=None,
+        financial_direction=None,
+        due_date=None,
+        description=raw_text,
+        confidence=extracted.confidence,
+        structured_interpretation=structured,
+        status=PendingInterpretationStatus.PENDING,
+    )
+
+
+def _text_has_financial_signal(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    return any(
+        term in normalized
+        for term in [
+            "گرفتم",
+            "گرفت",
+            "پرداختم",
+            "پرداخت",
+            "خریدم",
+            "خرید",
+            "واریز",
+            "پول داد",
+            "چک",
+            "میلیون",
+            "تومان",
+            "تومن",
+        ]
+    )
+
+
+def _is_role_only_assignment_text(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    if any(term in normalized for term in ["اضافه", "امروز", "کار کرد", "کارکرد", "اومد", "آمد", "زد"]):
+        return False
+    return any(term in normalized for term in [" است", " هست", "می باشد", "میباشد"])
+
+
 def _coerce_llm_v2_profile_update_action(interpretation: Any) -> None:
     from app.schemas.llm_v2 import LLMv2Action, LLMv2Intent
 
     if (
-        interpretation.intent != LLMv2Intent.SETUP
-        or interpretation.action != LLMv2Action.ADD_ENTITY
+        interpretation.intent not in {LLMv2Intent.SETUP, LLMv2Intent.SET_ROLE}
+        or interpretation.action not in {LLMv2Action.ADD_ENTITY, LLMv2Action.SET_ROLE}
     ):
         return
 
@@ -490,6 +756,7 @@ def _coerce_llm_v2_profile_update_action(interpretation: Any) -> None:
             getattr(entity, key, None) is not None
             for key in ["phone", "account_number", "daily_rate", "notes"]
         ):
+            interpretation.intent = LLMv2Intent.SETUP
             interpretation.action = LLMv2Action.UPDATE_ENTITY
             return
 
@@ -629,11 +896,36 @@ def _llm_v2_interpreter() -> Any:
     return interpreter_class()
 
 
-def _safe_llm_v2_result(input_text: str, project_id: int) -> dict[str, Any]:
+def _safe_llm_v2_result(
+    input_text: str,
+    project_id: int,
+    request_cache: RequestCache | None = None,
+) -> dict[str, Any]:
+    cache_context = {"interpreter": "llm_v2"}
+    key = llm_cache_key(input_text, project_id, cache_context)
+    if request_cache is not None:
+        cached_request_result = request_cache.get_llm_result(key)
+        if cached_request_result is not None:
+            return cached_request_result
+    cached_result = get_llm_cache(key)
+    if cached_result is not None:
+        if request_cache is not None:
+            request_cache.set_llm_result(key, cached_result)
+        return cached_result
     try:
-        return _llm_v2_interpreter().interpret(input_text, project_id)
+        result = _llm_v2_interpreter().interpret(input_text, project_id)
+        timings = result.pop("_timings", None) if isinstance(result, dict) else None
+        if timings is not None and request_cache is not None:
+            for k, v in timings.items():
+                if isinstance(v, (int, float)):
+                    request_cache.set_timing(k, float(v))
+        if not result.get("_llm_v2_failed"):
+            set_llm_cache(key, result)
+            if request_cache is not None:
+                request_cache.set_llm_result(key, result)
+        return result
     except Exception:
-        return {
+        result = {
             "intent": "NOTE",
             "action": "NOTE",
             "entities": [],
@@ -649,6 +941,7 @@ def _safe_llm_v2_result(input_text: str, project_id: int) -> dict[str, Any]:
             "reasoning_summary": "LLM v2 interpreter failed",
             "_llm_v2_failed": True,
         }
+        return result
 
 
 def _run_shadow_interpretation(
@@ -663,7 +956,7 @@ def _run_shadow_interpretation(
         if shadow_result is not None and shadow_result.get("_llm_v2_failed") is True:
             return
         if shadow_result is None:
-            shadow_result = _safe_llm_v2_result(input_text, project_id)
+            shadow_result = _safe_llm_v2_result(input_text, project_id, cache)
             if shadow_result.get("_llm_v2_failed"):
                 return
         queue_shadow_decision(
