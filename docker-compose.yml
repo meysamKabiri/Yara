@@ -1,0 +1,35 @@
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: yara_postgres
+    environment:
+      POSTGRES_DB: yara_dev
+      POSTGRES_USER: yara
+      POSTGRES_PASSWORD: yara_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - yara_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yara -d yara_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: yara_redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - yara_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  yara_postgres_data:
+  yara_redis_data:

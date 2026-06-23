@@ -26,3 +26,6 @@ backend/app/dev_tools/semantic_firewall/semantic_failures.json
 # Local generated files
 backend/dump.rdb
 frontend/tsconfig.tsbuildinfo
+
+# Docker volumes (created at runtime)
+.yara_volumes/
