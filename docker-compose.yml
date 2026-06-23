@@ -1,3 +1,17 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev
+  REDIS_URL: redis://redis:6379
+  OLLAMA_BASE_URL: http://host.docker.internal:11434
+  OLLAMA_MODEL: qwen3:4b
+  OLLAMA_TIMEOUT_SECONDS: "15"
+  OLLAMA_NUM_PREDICT: "200"
+  PYTHONPATH: /app
+  PYTHONUNBUFFERED: "1"
+
+x-backend-build: &backend-build
+  context: ./backend
+  dockerfile: Dockerfile
+
 services:
 
   postgres:
@@ -29,6 +43,64 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  migrate:
+    build: *backend-build
+    container_name: yara_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *backend-env
+    command: alembic upgrade head
+
+  seed:
+    build: *backend-build
+    container_name: yara_seed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *backend-env
+    command: python dev_tools/sandbox/seed_runner.py
+
+  api:
+    build: *backend-build
+    container_name: yara_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build: *backend-build
+    container_name: yara_worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *backend-env
+    volumes:
+      - ./backend:/app
+    command: rq worker llm_tasks --url redis://redis:6379
 
 volumes:
   yara_postgres_data:
