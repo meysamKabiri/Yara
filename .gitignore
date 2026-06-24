@@ -24,6 +24,7 @@ backend/dev_tools/sandbox/last_status.json
 backend/app/dev_tools/semantic_firewall/semantic_failures.json
 
 # Local generated files
+dump.rdb
 backend/dump.rdb
 frontend/tsconfig.tsbuildinfo
 

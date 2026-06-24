@@ -278,6 +278,22 @@ export type TraceEvent = {
   created_at: number;
 };
 
+export type MetricTraceEvent = {
+  trace_id: string;
+  event_name: string;
+  event_group: string;
+  event_index: number;
+  timestamp: string;
+  duration_ms: number | null;
+  payload: Record<string, unknown>;
+};
+
+export type TraceMetricsResponse = {
+  trace_id: string;
+  total_duration_ms: number;
+  events: MetricTraceEvent[];
+};
+
 export type TraceDetail = {
   trace_id: string;
   events: TraceEvent[];
@@ -459,6 +475,9 @@ export const api = {
     request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
 
   getTrace: (traceId: string) => request<TraceDetail>(`/traces/${traceId}`),
+
+  getTraceMetrics: (traceId: string) =>
+    request<TraceMetricsResponse>(`/metrics/trace/${encodeURIComponent(traceId)}`),
 
   listJobs: () => request<NaturalInputJobRecord[]>("/jobs"),
 

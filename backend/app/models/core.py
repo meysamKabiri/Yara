@@ -1,9 +1,10 @@
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+import uuid
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, Uuid
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -398,3 +399,26 @@ class FinancialMigrationLog(TimestampMixin, Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="financial_migration_logs")
+
+
+class TraceEvent(TimestampMixin, Base):
+    __tablename__ = "trace_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    trace_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_name: Mapped[str] = mapped_column(String, nullable=False)
+    event_group: Mapped[str] = mapped_column(String, nullable=False)
+    event_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (
+        Index("ix_trace_events_trace_id_idx", "trace_id", "event_index"),
+    )
+
+
+class TraceEventCounter(Base):
+    __tablename__ = "trace_event_counter"
+
+    trace_id: Mapped[str] = mapped_column(String, primary_key=True)
+    counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

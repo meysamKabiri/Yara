@@ -71,7 +71,8 @@ def process_input(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
-    fast_setup = _build_role_assignment_interpretation(project_id, text, entity_context)
+    chunks = _split_multi_event_text(text)
+    fast_setup = None if len(chunks) > 1 else _build_role_assignment_interpretation(project_id, text, entity_context)
     if fast_setup is not None:
         db.add(fast_setup)
         db.commit()
@@ -95,7 +96,7 @@ def process_input(
         return [fast_setup]
 
     llm_v2_start = perf_counter()
-    llm_v2_result = _safe_llm_v2_result(text, project_id, cache)
+    llm_v2_result = _safe_llm_v2_result(text, project_id, cache, db=db)
     cache.set_timing("llm_v2_duration_ms", _elapsed_ms(llm_v2_start))
 
     llm_v2_valid = False
@@ -152,6 +153,20 @@ def process_input(
 
     fallback_required = True
     _debug_print("llm_v2_fallback", {"reason": "LLM v2 invalid or failed"})
+
+    if len(chunks) > 1:
+        _emit_event("MULTI_EVENT_SPLIT_APPLIED", {"chunk_count": len(chunks)})
+        interpretations = _process_split_fallback_chunks(
+            db,
+            project_id,
+            text,
+            chunks,
+            entity_context,
+            cache,
+            total_start,
+        )
+        if interpretations:
+            return interpretations
 
     profile_update = _build_profile_update_interpretation(project_id, text, entity_context)
     if profile_update is not None:
@@ -252,6 +267,138 @@ def process_input(
         fallback_required=fallback_required,
     )
     return interpretations
+
+
+def _process_split_fallback_chunks(
+    db: Session,
+    project_id: int,
+    raw_text: str,
+    chunks: list[str],
+    entity_context: list[Worker],
+    cache: RequestCache,
+    total_start: float,
+) -> list[PendingInterpretation]:
+    interpretations: list[PendingInterpretation] = []
+    legacy_duration_ms = 0.0
+    llm_duration_ms = cache.timings_ms.get("llm_v2_duration_ms", 0.0)
+
+    for chunk in chunks:
+        chunk_llm_start = perf_counter()
+        chunk_llm_result = _safe_llm_v2_result(chunk, project_id, cache, db=db)
+        llm_duration_ms += _elapsed_ms(chunk_llm_start)
+        chunk_interpretations = _validated_llm_v2_chunk_interpretations(
+            project_id,
+            raw_text,
+            chunk,
+            chunk_llm_result,
+            entity_context,
+        )
+        if chunk_interpretations:
+            interpretations.extend(chunk_interpretations)
+            continue
+
+        profile_update = _build_profile_update_interpretation(project_id, chunk, entity_context)
+        if profile_update is not None:
+            _retarget_interpretation_to_raw_text(profile_update, raw_text, chunk)
+            interpretations.append(profile_update)
+            continue
+
+        fast_setup = _build_role_assignment_interpretation(project_id, chunk, entity_context)
+        if fast_setup is not None:
+            _retarget_interpretation_to_raw_text(fast_setup, raw_text, chunk)
+            interpretations.append(fast_setup)
+            continue
+
+        legacy_start = perf_counter()
+        graph = _extract_graph(chunk)
+        canonical_event = SemanticNormalizerService().normalize(graph, chunk, entity_context)
+        try:
+            firewall_decision = SemanticFirewallService().validate(
+                canonical_event,
+                chunk,
+                entity_context,
+                graph,
+            )
+        except SemanticFirewallError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        canonical_event = firewall_decision.event
+        chunk_legacy = _build_legacy_pending_interpretations(
+            project_id,
+            chunk,
+            graph,
+            canonical_event,
+            entity_context,
+        )
+        _block_ambiguous_setup_creations(chunk_legacy, entity_context)
+        for interpretation in chunk_legacy:
+            _retarget_interpretation_to_raw_text(interpretation, raw_text, chunk)
+        interpretations.extend(chunk_legacy)
+        legacy_duration_ms += _elapsed_ms(legacy_start)
+
+    if not interpretations:
+        return []
+
+    cache.set_timing("llm_v2_duration_ms", llm_duration_ms)
+    cache.set_timing("legacy_duration_ms", legacy_duration_ms)
+    cache.set_timing("governance_duration_ms", 0.0)
+    cache.set_legacy_result(_shadow_legacy_payload(interpretations))
+
+    for interpretation in interpretations:
+        db.add(interpretation)
+    db.commit()
+    for interpretation in interpretations:
+        db.refresh(interpretation)
+
+    _emit_event("PENDING_INTERPRETATION_SAVED", {
+        "interpretation_count": len(interpretations),
+        "path": "split_fallback",
+    })
+    record_pipeline_performance(
+        project_id=project_id,
+        input_text=raw_text,
+        total_duration_ms=_elapsed_ms(total_start),
+        legacy_duration_ms=legacy_duration_ms,
+        shadow_duration_ms=llm_duration_ms,
+        governance_duration_ms=0.0,
+        fallback_required=True,
+    )
+    return interpretations
+
+
+def _validated_llm_v2_chunk_interpretations(
+    project_id: int,
+    raw_text: str,
+    chunk: str,
+    llm_v2_result: dict[str, Any],
+    entity_context: list[Worker],
+) -> list[PendingInterpretation]:
+    if llm_v2_result.get("_llm_v2_failed"):
+        return []
+    try:
+        validator = LLMv2Validator()
+        if "events" in llm_v2_result:
+            validated = validator.validate_multi(llm_v2_result, entity_context)
+        else:
+            validated = [validator.validate(llm_v2_result, entity_context)]
+    except LLMv2ValidationError:
+        return []
+    interpretations = _build_llm_v2_interpretations(project_id, raw_text, validated, entity_context)
+    for interpretation in interpretations:
+        if interpretation.matched_input_text is None:
+            interpretation.matched_input_text = chunk
+    return interpretations
+
+
+def _retarget_interpretation_to_raw_text(
+    interpretation: PendingInterpretation,
+    raw_text: str,
+    chunk: str,
+) -> None:
+    interpretation.raw_input_text = raw_text
+    interpretation.matched_input_text = chunk
 
 
 def _is_role_compatible(worker_type: str, expected_role: str | None) -> bool:
@@ -915,6 +1062,7 @@ def _safe_llm_v2_result(
     input_text: str,
     project_id: int,
     request_cache: RequestCache | None = None,
+    db: Session | None = None,
 ) -> dict[str, Any]:
     cache_context = {"interpreter": "llm_v2"}
     key = llm_cache_key(input_text, project_id, cache_context)
@@ -928,7 +1076,7 @@ def _safe_llm_v2_result(
             request_cache.set_llm_result(key, cached_result)
         return cached_result
     try:
-        result = _llm_v2_interpreter().interpret(input_text, project_id)
+        result = _llm_v2_interpreter().interpret(input_text, project_id, db=db)
         timings = result.pop("_timings", None) if isinstance(result, dict) else None
         if timings is not None and request_cache is not None:
             for k, v in timings.items():
@@ -971,7 +1119,7 @@ def _run_shadow_interpretation(
         if shadow_result is not None and shadow_result.get("_llm_v2_failed") is True:
             return
         if shadow_result is None:
-            shadow_result = _safe_llm_v2_result(input_text, project_id, cache)
+            shadow_result = _safe_llm_v2_result(input_text, project_id, cache, db=db)
             if shadow_result.get("_llm_v2_failed"):
                 return
         queue_shadow_decision(
@@ -1024,13 +1172,13 @@ def _split_multi_event_text(text: str) -> list[str]:
     or profile-update signal.  This avoids over-splitting names or descriptions.
     Returns [text] when no viable split is found.
     """
-    normalized = normalize_text(text)
     separators = re.compile(r"[.\n;؛]")
-    candidate_chunks = [c.strip() for c in separators.split(normalized) if c.strip()]
+    candidate_chunks = [c.strip() for c in separators.split(text) if c.strip()]
     if len(candidate_chunks) < 2:
         return [text]
 
     def _has_signal(chunk: str) -> bool:
+        chunk = normalize_text(chunk)
         money_terms = {"تومان", "تومن", "میلیون", "میلیارد", "ریال"}
         financial_verbs = {"دادم", "داد", "گرفتم", "گرفت", "پرداخت", "پرداختم", "خریدم", "خرید", "واریز", "پول داد"}
         profile_terms = {"شماره تماس", "شماره موبایل", "شماره حساب", "شماره کارت", "دستمزد روزانه", "حساب"}
@@ -1060,5 +1208,5 @@ def _json_safe(value: Any) -> Any:
 
 
 def _debug_print(label: str, payload: dict[str, Any]) -> None:
-    if os.environ.get("YARA_DEBUG_MODE", "").lower() == "true":
-        print(f"[YARA_DEBUG] {label}: {payload}")
+    from app.core.logger import log_event
+    log_event(event=f"debug.{label}", payload=payload)

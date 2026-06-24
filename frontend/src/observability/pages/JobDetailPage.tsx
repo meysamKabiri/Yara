@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { JobEvent } from "../../api";
+import { TraceTimeline } from "../../components/TraceTimeline";
 import { EventDetailPanel } from "../components/EventDetailPanel";
 import { EventTimeline } from "../components/EventTimeline";
 import { JobStatusBadge } from "../components/JobStatusBadge";
@@ -89,6 +90,8 @@ export function JobDetailPage({
         />
         <EventDetailPanel event={selectedEvent} />
       </div>
+
+      <TraceTimeline traceId={job?.trace_id ?? null} />
     </div>
   );
 }

@@ -1,8 +1,8 @@
-import logging
 from inspect import signature
 from time import perf_counter
 
 from app.core import unified_pipeline
+from app.core.event_tracker import track_event, track_timed_event
 from app.core.observability.emitter import emit_event
 from app.core.runtime.request_cache import new_request_cache
 from app.core.trace_context import (
@@ -14,9 +14,6 @@ from app.core.trace_context import (
 from app.db.session import SessionLocal
 from app.models.core import NaturalInputJob, NaturalInputJobStatus
 from app.schemas.projects import PendingInterpretationRead
-
-
-logger = logging.getLogger(__name__)
 
 
 FINAL_JOB_STATUSES = {NaturalInputJobStatus.DONE, NaturalInputJobStatus.FAILED}
@@ -44,6 +41,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
             job.trace_id = new_trace_id()
             db.flush()
         trace_id = job.trace_id
+        track_event(db=db, trace_id=trace_id, event_name="job.started", payload={"job_id": job_id, "project_id": project_id})
         job_token, trace_token = set_trace_context(job_id, trace_id)
         if job.status == NaturalInputJobStatus.RUNNING:
             emit_event(
@@ -91,7 +89,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         request_cache = new_request_cache()
         interpretations = _process_input_once(db, project_id, text, request_cache)
         failed_llm_result = _failed_llm_result(request_cache)
-        if failed_llm_result is not None:
+        if failed_llm_result is not None and not interpretations:
             emit_event(
                 trace_id,
                 job_id,
@@ -105,6 +103,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
                 dedupe_key="llm-failed",
             )
             llm_finished = True
+            track_event(db=db, trace_id=trace_id, event_name="job.llm_failed", payload={"error": failed_llm_result.get("reasoning_summary")})
             raise RuntimeError(
                 str(failed_llm_result.get("reasoning_summary") or "LLM output parsing failed")
             )
@@ -127,17 +126,6 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         )
         llm_finished = True
 
-        logger.info(
-            "job_completed prompt_length=%s ollama_http_duration_ms=%s "
-            "json_parse_duration_ms=%s normalization_duration_ms=%s "
-            "pipeline_duration_ms=%s interpretation_count=%s",
-            timings.get("prompt_length", "?"),
-            timings.get("ollama_http_duration_ms", "?"),
-            timings.get("json_parse_duration_ms", "?"),
-            timings.get("normalization_duration_ms", "?"),
-            round(pipeline_duration_ms, 1),
-            len(interpretations),
-        )
         result = {
             "interpretations": [
                 PendingInterpretationRead.model_validate(interpretation).model_dump(mode="json")
@@ -167,6 +155,12 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
             {"project_id": project_id, "status": NaturalInputJobStatus.DONE.value},
             dedupe_key="job-completed",
         )
+        track_event(db=db, trace_id=trace_id, event_name="job.completed", payload={
+            "job_id": job_id,
+            "project_id": project_id,
+            "interpretation_count": len(interpretations),
+            "pipeline_duration_ms": round(pipeline_duration_ms, 1),
+        })
         return {"job_id": job_id, "status": "DONE", "result": result, "trace_id": job.trace_id}
 
     except Exception as e:
@@ -200,6 +194,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
                 duration_ms=(perf_counter() - commit_start) * 1000,
             )
         if trace_id is not None:
+            track_event(db=db, trace_id=trace_id, event_name="job.failed", payload={"job_id": job_id, "error": str(e)})
             emit_event(
                 trace_id,
                 job_id,

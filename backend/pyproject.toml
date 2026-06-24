@@ -21,6 +21,8 @@ dev = [
 
 [project.scripts]
 yara = "dev_cli:main"
+yara-worker = "app.scripts.start_worker:main"
+yara-migrate = "app.scripts.run_migrations:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

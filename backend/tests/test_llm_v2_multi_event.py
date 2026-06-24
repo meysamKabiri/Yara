@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 import pytest
+from app.core.trace_events import get_trace_events
 from tests.natural_input_helpers import natural_input_interpretations, natural_input_result, natural_input_interpretation
 
 
@@ -315,3 +316,66 @@ def test_multi_event_single_legacy_compat(client: TestClient, monkeypatch: pytes
     assert pis[0]["canonical_event_type"] == "FINANCIAL_EVENT"
     assert pis[0]["financial_direction"] == "OUTGOING"
     assert pis[0]["extracted_amount"] == "100000000.00"
+
+
+def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient) -> None:
+    project = client.post("/projects", json={"name": "runtime-split-financial"}).json()
+
+    result = natural_input_result(
+        client,
+        project["id"],
+        "میثم 300 میلیون به حساب پروژه واریز کرد. به علی احمدی 5 میلیون دادم. از هادی پور 25 میلیون سیم خریدم و پرداخت کردم.",
+        headers={"X-Trace-Id": "trace-runtime-split-financial"},
+    )
+
+    pis = result["interpretations"]
+    assert len(pis) == 3
+    assert all(pi["matched_input_text"] is not None for pi in pis)
+    assert [pi["extracted_amount"] for pi in pis] == [
+        "300000000.00",
+        "5000000.00",
+        "25000000.00",
+    ]
+    assert [pi["financial_direction"] for pi in pis] == [
+        "INCOMING",
+        "OUTGOING",
+        "OUTGOING",
+    ]
+    assert [pi["payment_method"] for pi in pis] == [
+        "BANK_TRANSFER",
+        "CASH",
+        "CASH",
+    ]
+    assert pis[1]["extracted_entities"][0]["name"] == "علی احمدی"
+    assert pis[1]["extracted_entities"][0]["project_role"] == "OTHER"
+    assert pis[2]["semantic_action"] == "PURCHASE_PAID"
+    assert pis[2]["extracted_entities"][0]["project_role"] == "VENDOR"
+
+    events = get_trace_events("trace-runtime-split-financial")
+    split_event = next(event for event in events if event["event"] == "MULTI_EVENT_SPLIT_APPLIED")
+    assert split_event["payload"]["chunk_count"] == 3
+
+
+def test_runtime_split_fallback_keeps_setup_phone_and_account_events(client: TestClient) -> None:
+    project = client.post("/projects", json={"name": "runtime-split-profile"}).json()
+
+    result = natural_input_result(
+        client,
+        project["id"],
+        "میثم کبیری کارفرمای پروژه است\nشماره تماس میثم 09123456789\nشماره حساب میثم 6037991234567890",
+        headers={"X-Trace-Id": "trace-runtime-split-profile"},
+    )
+
+    pis = result["interpretations"]
+    assert len(pis) == 3
+    assert all(pi["matched_input_text"] is not None for pi in pis)
+    assert pis[0]["semantic_action"] == "SET_ROLE"
+    assert pis[0]["extracted_entities"][0]["project_role"] == "CLIENT"
+    assert pis[1]["semantic_action"] == "ENTITY_UPDATE"
+    assert pis[1]["extracted_entities"][0]["phone"] == "09123456789"
+    assert pis[2]["semantic_action"] == "ENTITY_UPDATE"
+    assert pis[2]["extracted_entities"][0]["account_number"] == "6037991234567890"
+
+    events = get_trace_events("trace-runtime-split-profile")
+    split_event = next(event for event in events if event["event"] == "MULTI_EVENT_SPLIT_APPLIED")
+    assert split_event["payload"]["chunk_count"] == 3

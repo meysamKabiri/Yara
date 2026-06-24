@@ -17,6 +17,18 @@ SQLAlchemy 2.x, Alembic, Pydantic v2, and Python 3.12+.
 
 See `backend/README.md` for local setup, verification commands, and migration workflow.
 
+## Development Startup
+
+Use one command for the full local development environment:
+
+```bash
+./start.sh
+```
+
+Reset the database with `./reset-db.sh` and load demo data with `./seed-demo.sh`.
+See `docs/dev-docker.md` for the Docker service graph, health checks, and
+fully dockerized frontend option.
+
 ## Frontend
 
 The minimal Phase 1 MVP frontend lives in `frontend/` and uses React,

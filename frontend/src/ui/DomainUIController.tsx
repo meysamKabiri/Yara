@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { JobEvent, JobState, PendingInterpretation, Worker } from "../api";
 import { JobProgressPanel } from "../observability/components/JobProgressPanel";
 import { ROLE_OPTIONS } from "../constants";
@@ -225,6 +225,163 @@ function textValue(value: unknown): string | null {
   return null;
 }
 
+function moneyLabel(value: string | null): string | null {
+  if (!value) return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  return `${new Intl.NumberFormat("fa-IR").format(numeric)} تومان`;
+}
+
+function paymentMethodLabel(method: string | null): string | null {
+  if (method === "CASH") return "نقدی";
+  if (method === "BANK_TRANSFER") return "انتقال بانکی";
+  if (method === "CHECK") return "چک";
+  if (method === "OTHER") return "سایر";
+  return null;
+}
+
+function statusLabel(status: PendingInterpretation["status"]): string {
+  if (status === "CONFIRMED") return "تایید شد";
+  if (status === "DISCARDED") return "حذف شد";
+  return "در انتظار تایید";
+}
+
+function profileFieldKind(interpretation: PendingInterpretation): "phone" | "account" | null {
+  const entities = [...(interpretation.extracted_entities ?? []), ...structuredEntities(interpretation)];
+  for (const entity of entities) {
+    const updates = typeof entity.field_updates === "object" && entity.field_updates !== null
+      ? entity.field_updates as Record<string, unknown>
+      : {};
+    if (textValue(updates.phone ?? entity.phone)) return "phone";
+    if (textValue(updates.account_number ?? updates.accountNumber ?? entity.account_number ?? entity.accountNumber)) return "account";
+  }
+  return null;
+}
+
+function interpretationLabel(interpretation: PendingInterpretation): string {
+  const profileKind = profileFieldKind(interpretation);
+  if (profileKind === "phone") return "ثبت شماره تماس";
+  if (profileKind === "account") return "ثبت شماره حساب";
+  if (interpretation.semantic_action === "PURCHASE_PAID") return "خرید پرداخت‌شده";
+  if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
+    if (interpretation.financial_direction === "INCOMING") return "دریافت از کارفرما / دریافتی";
+    if (interpretation.financial_direction === "OUTGOING") return "پرداختی";
+    return "رویداد مالی";
+  }
+  if (interpretation.canonical_event_type === "SETUP_EVENT" || isRoleAssignment(interpretation)) return "تعریف طرف حساب";
+  return "مورد پیشنهادی";
+}
+
+function reviewText(interpretation: PendingInterpretation): string {
+  return interpretation.matched_input_text || interpretation.description || interpretation.raw_input_text;
+}
+
+function roleForCreate(interpretation: PendingInterpretation): string {
+  return preferredEntityType(interpretation) || "OTHER";
+}
+
+function canCompactConfirm(interpretation: PendingInterpretation): boolean {
+  const kind = getModalKind(interpretation);
+  if (kind === "FINANCIAL") {
+    return Boolean(
+      interpretation.extracted_amount
+      && interpretation.financial_direction
+      && interpretation.payment_method
+      && (interpretation.suggested_entity_id || !isUnknownEntity(interpretation)),
+    );
+  }
+  if (kind === "PROFILE") {
+    return Boolean(interpretation.suggested_entity_id && hasProfileUpdateFields(interpretation));
+  }
+  if (kind === "ROLE_OR_SETUP") return setupEntities(interpretation).length > 0;
+  if (kind === "NOTE") return true;
+  return false;
+}
+
+interface MultiInterpretationReviewProps {
+  interpretations: PendingInterpretation[];
+  projectName?: string | null;
+  isLoading: boolean;
+  onEdit: (interpretation: PendingInterpretation) => void;
+  onConfirm: (interpretation: PendingInterpretation) => void;
+  onDiscard: (interpretation: PendingInterpretation) => void;
+}
+
+function MultiInterpretationReview({
+  interpretations,
+  projectName,
+  isLoading,
+  onEdit,
+  onConfirm,
+  onDiscard,
+}: MultiInterpretationReviewProps) {
+  return (
+    <section className="multi-review">
+      <div className="multi-review-header">
+        <div>
+          <span className="eyebrow">هوش مصنوعی {interpretations.length} مورد از متن شما پیدا کرد</span>
+          <h3>موارد پیشنهادی</h3>
+          <p>لطفاً هر مورد را بررسی و تایید کنید.</p>
+        </div>
+      </div>
+      <div className="multi-review-list">
+        {interpretations.map((interpretation) => {
+          const counterparty = entityName(interpretation);
+          const canConfirm = canCompactConfirm(interpretation);
+          return (
+            <article className="multi-review-card" key={interpretation.id}>
+              <div className="multi-review-card-main">
+                <div className="multi-review-card-topline">
+                  <strong>{interpretationLabel(interpretation)}</strong>
+                  <span className={`status-badge status-${interpretation.status.toLowerCase()}`}>
+                    {canConfirm ? statusLabel(interpretation.status) : "نیاز به اصلاح"}
+                  </span>
+                </div>
+                <p>{reviewText(interpretation)}</p>
+                <dl className="multi-review-meta">
+                  {interpretation.extracted_amount && (
+                    <>
+                      <dt>مبلغ</dt>
+                      <dd>{moneyLabel(interpretation.extracted_amount)}</dd>
+                    </>
+                  )}
+                  <dt>طرف حساب</dt>
+                  <dd>{counterparty}</dd>
+                  {interpretation.canonical_event_type === "FINANCIAL_EVENT" && (
+                    <>
+                      <dt>روش پرداخت</dt>
+                      <dd>{paymentMethodLabel(interpretation.payment_method) ?? "ثبت نشده"}</dd>
+                    </>
+                  )}
+                  <dt>پروژه</dt>
+                  <dd>{projectName || `پروژه ${interpretation.project_id}`}</dd>
+                </dl>
+              </div>
+              <div className="multi-review-actions">
+                {canConfirm ? (
+                  <button className="primary-action" type="button" onClick={() => onConfirm(interpretation)} disabled={isLoading}>
+                    تایید
+                  </button>
+                ) : (
+                  <button className="primary-action" type="button" onClick={() => onEdit(interpretation)} disabled={isLoading}>
+                    نیاز به اصلاح
+                  </button>
+                )}
+                <button type="button" onClick={() => onEdit(interpretation)} disabled={isLoading}>
+                  ویرایش
+                </button>
+                <button className="danger-action" type="button" onClick={() => onDiscard(interpretation)} disabled={isLoading}>
+                  حذف
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function newEntityForm(interpretation: PendingInterpretation): UnknownEntityForm {
   const entity = setupEntities(interpretation)[0];
   return {
@@ -305,6 +462,12 @@ export function DomainUIController({
   const safeWorkers = workers ?? [];
   const isJobActive = jobState && jobState !== "IDLE";
   const isJobDone = jobState === "DONE";
+  const [editingInterpretationId, setEditingInterpretationId] = useState<number | null>(null);
+  const editingInterpretation = editingInterpretationId
+    ? safeInterpretations.find((interpretation) => interpretation.id === editingInterpretationId) ?? null
+    : null;
+  const shouldShowMultiReview = safeInterpretations.length > 1 && editingInterpretation === null;
+  const visibleInterpretations = editingInterpretation ? [editingInterpretation] : safeInterpretations;
 
   const splitSetupData = useRef<{
     name: string;
@@ -316,14 +479,52 @@ export function DomainUIController({
 
   if (safeInterpretations.length === 0 && !isJobActive) return null;
 
+  function confirmFromReview(interpretation: PendingInterpretation) {
+    const kind = getModalKind(interpretation);
+    if (kind === "FINANCIAL") {
+      onConfirmFinancialTransaction(interpretation, {
+        entity_id: interpretation.suggested_entity_id,
+        amount: interpretation.extracted_amount ?? "",
+        direction: interpretation.financial_direction ?? "",
+        payment_method: interpretation.payment_method ?? "",
+        create_new_entity: !interpretation.suggested_entity_id && !isUnknownEntity(interpretation),
+        entity_name: entityName(interpretation),
+        project_role: roleForCreate(interpretation),
+      });
+      return;
+    }
+    if (kind === "PROFILE") {
+      const entity = firstEntity(interpretation);
+      const updates = typeof entity.field_updates === "object" && entity.field_updates !== null
+        ? entity.field_updates as Record<string, unknown>
+        : {};
+      onConfirmEntityUpdate(interpretation, {
+        entityId: interpretation.suggested_entity_id,
+        name: entityName(interpretation),
+        phone: textValue(updates.phone ?? entity.phone),
+        accountNumber: textValue(updates.account_number ?? entity.account_number),
+        dailyRate: textValue(updates.daily_rate ?? entity.daily_rate),
+        role: preferredEntityType(interpretation),
+        roleDetail: textValue(updates.role_detail ?? entity.role_detail),
+        field_updates: updates,
+      });
+      return;
+    }
+    if (kind === "ROLE_OR_SETUP") {
+      onConfirmSetupEntities(interpretation, setupEntities(interpretation));
+      return;
+    }
+    onConfirm(interpretation, { confirmed: true });
+  }
+
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="interpretation-title">
       <section className="confirmation-modal">
         <div className="modal-header">
           <div>
-            <span className="eyebrow">{isJobDone ? "تایید" : "پردازش زنده"}</span>
-            <h2 id="interpretation-title">{isJobDone ? "مورد پیشنهادی را قبل از ثبت بررسی کنید" : "درخواست شما در صف پردازش است"}</h2>
-            <p>{isJobDone ? "هیچ چیزی بدون تایید شما در دفتر پروژه ثبت نمی‌شود." : "پردازش هوش مصنوعی غیرهمزمان انجام می‌شود؛ تایید فقط بعد از پایان Job فعال می‌شود."}</p>
+            <span className="eyebrow">{safeInterpretations.length > 0 ? "تایید" : "پردازش زنده"}</span>
+            <h2 id="interpretation-title">{safeInterpretations.length > 0 ? "مورد پیشنهادی را قبل از ثبت بررسی کنید" : "درخواست شما در صف پردازش است"}</h2>
+            <p>{safeInterpretations.length > 0 ? "هیچ چیزی بدون تایید شما در دفتر پروژه ثبت نمی‌شود." : "پردازش هوش مصنوعی غیرهمزمان انجام می‌شود؛ تایید فقط بعد از پایان Job فعال می‌شود."}</p>
           </div>
         </div>
 
@@ -334,10 +535,26 @@ export function DomainUIController({
           </>
         )}
 
-        {!isJobDone && isJobActive ? null : (
+        {!isJobDone && isJobActive ? null : shouldShowMultiReview ? (
+          <MultiInterpretationReview
+            interpretations={safeInterpretations}
+            projectName={projectName}
+            isLoading={isLoading}
+            onEdit={(interpretation) => setEditingInterpretationId(interpretation.id)}
+            onConfirm={confirmFromReview}
+            onDiscard={onDiscard}
+          />
+        ) : (
 
         <div className="interpretation-stack">
-          {safeInterpretations.map((interpretation) => {
+          {editingInterpretation && safeInterpretations.length > 1 && (
+            <div className="multi-edit-toolbar">
+              <button type="button" onClick={() => setEditingInterpretationId(null)} disabled={isLoading}>
+                بازگشت به فهرست موارد
+              </button>
+            </div>
+          )}
+          {visibleInterpretations.map((interpretation) => {
             const kind = getModalKind(interpretation);
             const candidates = candidateMatches(interpretation, safeWorkers);
             const isRole = isRoleAssignment(interpretation);

@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.event_tracker import track_timed_event
 from app.core.trace_events import TraceEvent, trace_error, trace_event
 from app.models.core import (
     FinancialDirection,
@@ -53,7 +54,18 @@ class ExecutionEngine:
         - NOT use semantic rules
         - ONLY execute confirmed structured data
         """
+        return track_timed_event(
+            db=db,
+            event_name="execution_engine.execute",
+            fn=lambda: self._execute_impl(confirmed_interpretation, db, state),
+        )
 
+    def _execute_impl(
+        self,
+        confirmed_interpretation: ConfirmedFinancialInterpretation,
+        db: Session,
+        state: WorkerState | None,
+    ) -> dict[str, Any]:
         start = perf_counter()
         action = confirmed_interpretation.semantic_action
         direction = self._direction(confirmed_interpretation.financial_direction)

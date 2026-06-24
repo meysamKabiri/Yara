@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException, status
 from sqlalchemy import func, select
 
+from app.core.event_tracker import track_event, track_timed_event
 from app.core.queue import get_queue
 from app.core.observability.emitter import persist_job_event
 from app.core.trace_context import get_trace_id
@@ -540,7 +541,7 @@ def _build_pending_interpretations(
         elif effective_action == "PURCHASE_PAID":
             payment_method = PaymentType.CASH.value
         elif effective_type == CanonicalEventType.FINANCIAL:
-            payment_method = PaymentType.BANK_TRANSFER.value
+            payment_method = _financial_payment_method_from_text(raw_text)
         incoming_project_payment = (
             detect_incoming_project_payment(raw_text)
             if effective_type == CanonicalEventType.FINANCIAL
@@ -648,12 +649,41 @@ def _draft_entities(
         if parsed_setup_entities:
             return parsed_setup_entities
     entity_name = canonical_event.entity_name or _graph_entity_name(graph)
+    if entity_name is None and canonical_event.type == CanonicalEventType.FINANCIAL:
+        entity_name = _plain_outgoing_payment_counterparty_name(raw_text)
     if entity_name is None:
         return []
     role_guess = _graph_role_guess(graph)
     if role_guess is None and canonical_event.type == CanonicalEventType.FINANCIAL:
         role_guess = _pending_financial_role_guess(raw_text, canonical_event.action)
     return [_pending_entity_dict(entity_name, role_guess or "OTHER")]
+
+
+def _financial_payment_method_from_text(raw_text: str) -> str:
+    normalized = normalize_text(raw_text)
+    bank_signals = ["حساب", "کارت", "واریز", "انتقال", "بانکی"]
+    if any(signal in normalized for signal in bank_signals):
+        return PaymentType.BANK_TRANSFER.value
+    if any(signal in normalized for signal in ["چک", "سفته"]):
+        return PaymentType.CHECK.value
+    return PaymentType.CASH.value
+
+
+def _plain_outgoing_payment_counterparty_name(raw_text: str) -> str | None:
+    normalized = normalize_text(raw_text)
+    if not any(verb in normalized for verb in ["دادم", "پرداخت کردم", "پرداختم"]):
+        return None
+    if any(signal in normalized for signal in ["خرید", "خریدم", "واریز", "حساب پروژه"]):
+        return None
+
+    match = re.search(
+        r"\bبه\s+(?P<name>.+?)\s+(?:\d|[۰-۹]|[٠-٩]|یک|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|صد|هزار|میلیون|میلیارد)",
+        normalized,
+    )
+    if match is None:
+        return None
+    name = re.sub(r"\s+", " ", match.group("name")).strip(" ،,")
+    return name or None
 
 
 def _pending_financial_role_guess(raw_text: str, action: str) -> str | None:
@@ -986,6 +1016,7 @@ def create_project(payload: ProjectCreate, db: DbSession) -> Project:
     db.add(project)
     db.commit()
     db.refresh(project)
+    track_event(db=db, event_name="db.project_created", payload={"project_id": project.id, "name": project.name})
     return project
 
 
@@ -1061,6 +1092,7 @@ def process_natural_input(
         {"job_id": job_id, "trace_id": trace_id, "project_id": project_id, "dedupe_key": "job-created"},
     )
     persist_job_event(job_id, created_event)
+    track_event(db=db, event_name="db.job_created", payload={"job_id": job_id, "project_id": project_id})
 
     queue = get_queue()
     try:
@@ -1068,16 +1100,19 @@ def process_natural_input(
             "app.jobs.natural_input_job.process_natural_input_job",
             args=(job_id, project_id, payload.text),
             job_id=job_id,
+            meta={"trace_id": trace_id},
         )
     except Exception as exc:
         job.status = NaturalInputJobStatus.FAILED
         job.error = str(exc)
         db.commit()
+        track_event(db=db, event_name="db.job_enqueue_failed", payload={"job_id": job_id, "error": str(exc)})
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to enqueue natural input job",
         ) from exc
 
+    track_event(db=db, event_name="db.job_enqueued", payload={"job_id": job_id, "project_id": project_id})
     return {"job_id": job_id, "status": "PENDING", "trace_id": trace_id}
 
 
@@ -1340,7 +1375,7 @@ def confirm_pending_interpretation(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
             )
-        route = _domain_route(interpretation)
+        route = _domain_route(interpretation, db=db)
         if route["domain"] == DomainType.MIXED.value:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -1356,6 +1391,11 @@ def confirm_pending_interpretation(
                     "stage": "entity_resolution",
                 },
                 start_time=db_write_start,
+            )
+            track_event(
+                db=db,
+                event_name="db.entity_resolved",
+                payload={"interpretation_id": interpretation.id, "entity_id": resolution_result["entity_id"]},
             )
             return EntityResolutionResult(
                 status="ENTITY_RESOLVED",
@@ -1374,10 +1414,16 @@ def confirm_pending_interpretation(
             start_time=db_write_start,
         )
         db.refresh(interpretation)
+        track_event(
+            db=db,
+            event_name="db.interpretation_confirmed",
+            payload={"interpretation_id": interpretation.id, "project_id": interpretation.project_id},
+        )
         if not _execution_engine_primary_enabled(interpretation):
             _run_execution_engine_shadow(db, interpretation, payload, result)
         return result
     except Exception as exc:
+        track_event(event_name="db.confirmation_failed", payload={"interpretation_id": interpretation_id, "error": str(exc)})
         trace_error(exc, {"pending_interpretation_id": interpretation_id})
         raise
 
@@ -1400,7 +1446,7 @@ def _execute_pending_interpretation(
     payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
     _apply_create_new_confirmation_payload(interpretation, payload)
-    route = _domain_route(interpretation)
+    route = _domain_route(interpretation, db=db)
     if route["domain"] == DomainType.SETUP.value and _execution_engine_primary_enabled(
         interpretation
     ):
@@ -1480,7 +1526,7 @@ def _resolve_entity_phase_if_needed(
     )
 
 
-def _domain_route(interpretation: PendingInterpretation) -> dict[str, Any]:
+def _domain_route(interpretation: PendingInterpretation, db: Session | None = None) -> dict[str, Any]:
     route_input: dict[str, Any] = {
         "semantic_action": interpretation.semantic_action,
         "action": interpretation.semantic_action,
@@ -1502,6 +1548,7 @@ def _domain_route(interpretation: PendingInterpretation) -> dict[str, Any]:
     return DomainRouterService().route(
         interpretation.raw_input_text,
         route_input,
+        db=db,
     )
 
 

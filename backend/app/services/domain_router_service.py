@@ -4,8 +4,11 @@ import re
 from enum import StrEnum
 from time import perf_counter
 from typing import Any
+from sqlalchemy.orm import Session
 
+from app.core.event_tracker import track_timed_event
 from app.core.trace_events import TraceEvent, trace_event
+
 
 _PROFILE_FIELD_KEYS = {"phone", "account_number", "accountNumber", "card_number", "cardNumber", "daily_rate", "dailyRate", "notes"}
 
@@ -83,7 +86,16 @@ class DomainRouterService:
         "kharid",
     )
 
-    def route(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None) -> dict[str, Any]:
+    def route(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None, db: Session | None = None) -> dict[str, Any]:
+        if db is None:
+            return self._route_impl(raw_user_text, llm_interpretation)
+        return track_timed_event(
+            db=db,
+            event_name="domain_router.route",
+            fn=lambda: self._route_impl(raw_user_text, llm_interpretation),
+        )
+
+    def _route_impl(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None) -> dict[str, Any]:
         start = perf_counter()
         text = self._normalize(raw_user_text)
         interpretation = llm_interpretation or {}

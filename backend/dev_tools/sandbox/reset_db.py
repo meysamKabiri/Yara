@@ -22,10 +22,10 @@ def reset_database(*, verbose: bool = True) -> None:
     _assert_dev_database()
     if verbose:
         print("[RESET] Dropping tables...")
-    Base.metadata.drop_all(bind=engine)
+    Base.metadata.drop_all(bind=engine())
     if verbose:
         print("[RESET] Recreating schema...")
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine())
     if verbose:
         print("[OK] Reset complete")
 

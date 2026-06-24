@@ -1,17 +1,22 @@
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from time import perf_counter
 from typing import Any, cast
 
+from sqlalchemy.orm import Session
+
+from app.core.event_tracker import track_timed_event
 from app.core.observability.emitter import emit_event
 from app.core.trace_context import get_job_id, get_trace_id
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "15"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "200"))
@@ -161,7 +166,16 @@ class LLMOutputParseError(ValueError):
 
 
 class LLMv2Interpreter:
-    def interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def interpret(self, raw_text: str, project_id: int, db: Session | None = None) -> dict[str, Any]:
+        if db is None:
+            return self._interpret_impl(raw_text, project_id)
+        return track_timed_event(
+            db=db,
+            event_name="llm_v2_interpreter.interpret",
+            fn=lambda: self._interpret_impl(raw_text, project_id),
+        )
+
+    def _interpret_impl(self, raw_text: str, project_id: int) -> dict[str, Any]:
         try:
             parsed = self._generate(raw_text, project_id)
             if not isinstance(parsed, dict):
@@ -212,8 +226,24 @@ class LLMv2Interpreter:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
-            ollama_body = json.loads(response.read().decode("utf-8"))
+        attempt = 0
+        max_attempts = 3
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+                    ollama_body = json.loads(response.read().decode("utf-8"))
+                break
+            except (OSError, TimeoutError, urllib.error.URLError) as e:
+                attempt += 1
+                if attempt >= max_attempts:
+                    raise
+                delay = min(0.5 * (2 ** attempt), 5.0)
+                _emit_event("LLM_RETRY", {
+                    "attempt": attempt,
+                    "error": str(e),
+                    "max_attempts": max_attempts,
+                })
+                time.sleep(delay)
         ollama_ms = (perf_counter() - ollama_start) * 1000
 
         _emit_event("OLLAMA_RESPONSE_RECEIVED", {

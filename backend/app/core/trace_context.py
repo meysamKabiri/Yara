@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import uuid
 from contextvars import ContextVar
 from typing import Any
@@ -34,6 +33,10 @@ def reset_trace_id(token: Any) -> None:
     _trace_id.reset(token)
 
 
+def clear_trace_id() -> None:
+    _trace_id.set(None)
+
+
 def get_job_id() -> str | None:
     return _job_id.get()
 
@@ -50,25 +53,6 @@ def set_trace_context(job_id: str | None, trace_id: str | None) -> tuple[Any | N
     trace_token = set_trace_id(trace_id) if trace_id is not None else None
     job_token = set_job_id(job_id)
     return job_token, trace_token
-
-
-class TraceIdFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.trace_id = get_trace_id() or "-"
-        return True
-
-
-def configure_trace_logging() -> None:
-    root = logging.getLogger()
-    if not root.handlers:
-        logging.basicConfig(level=logging.INFO)
-    if not any(isinstance(item, TraceIdFilter) for item in root.filters):
-        root.addFilter(TraceIdFilter())
-    formatter = logging.Formatter("[%(trace_id)s] %(levelname)s %(name)s: %(message)s")
-    for handler in root.handlers:
-        if not any(isinstance(item, TraceIdFilter) for item in handler.filters):
-            handler.addFilter(TraceIdFilter())
-        handler.setFormatter(formatter)
 
 
 class TraceContextMiddleware(BaseHTTPMiddleware):

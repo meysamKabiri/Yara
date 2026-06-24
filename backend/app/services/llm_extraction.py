@@ -1,10 +1,12 @@
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen3:4b"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/generate"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
 
 SYSTEM_PROMPT = """You are a raw contractor note extraction engine.
 
