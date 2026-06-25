@@ -8,6 +8,9 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip(
 OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
 
+QWEN_JSON_MODE_PREFIX = """/no_think
+Return only valid JSON. Do not include reasoning, explanations, markdown, or thinking text."""
+
 SYSTEM_PROMPT = """You are a raw contractor note extraction engine.
 
 Your task is to extract raw spans from Persian and English contractor notes.
@@ -92,8 +95,10 @@ def extract(text: str) -> list[dict[str, Any]]:
         payload = json.dumps(
             {
                 "model": OLLAMA_MODEL,
-                "prompt": f"{SYSTEM_PROMPT}\n\nNote:\n{text}",
+                "prompt": f"{QWEN_JSON_MODE_PREFIX}\n\n{SYSTEM_PROMPT}\n\nNote:\n{text}",
                 "stream": False,
+                "format": "json",
+                "think": False,
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -139,8 +144,10 @@ def _generate_json(prompt: str, text: str) -> Any:
     payload = json.dumps(
         {
             "model": OLLAMA_MODEL,
-            "prompt": f"{prompt}\n\nNote:\n{text}",
+            "prompt": f"{QWEN_JSON_MODE_PREFIX}\n\n{prompt}\n\nNote:\n{text}",
             "stream": False,
+            "format": "json",
+            "think": False,
         }
     ).encode("utf-8")
     request = urllib.request.Request(

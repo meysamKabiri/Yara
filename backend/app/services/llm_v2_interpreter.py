@@ -17,9 +17,12 @@ from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
-OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "15"))
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "200"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
+
+QWEN_JSON_MODE_PREFIX = """/no_think
+Return only valid JSON. Do not include reasoning, explanations, markdown, or thinking text."""
 
 
 def _emit_event(db: Session | None, event_name, payload=None, duration_ms=None):
@@ -211,9 +214,10 @@ class LLMv2Interpreter:
         payload = json.dumps(
             {
                 "model": OLLAMA_MODEL,
-                "prompt": f"/no_think\n{LLM_V2_PROMPT}\n\nProject ID: {project_id}\nNote:\n{raw_text}",
+                "prompt": f"{QWEN_JSON_MODE_PREFIX}\n\n{LLM_V2_PROMPT}\n\nProject ID: {project_id}\nNote:\n{raw_text}",
                 "stream": False,
                 "format": "json",
+                "think": False,
                 "options": {
                     "temperature": OLLAMA_TEMPERATURE,
                     "num_predict": OLLAMA_NUM_PREDICT,

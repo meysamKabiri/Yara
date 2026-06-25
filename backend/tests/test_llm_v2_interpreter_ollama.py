@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.services.llm_v2_interpreter import LLMOutputParseError, LLMv2Interpreter, _is_bare_entity
@@ -34,6 +36,68 @@ def test_surrounding_text_json_is_extracted() -> None:
     )
 
     assert parsed == {"intent": "SETUP", "action": "UPDATE_ENTITY"}
+
+
+def test_qwen3_thinking_text_before_json_is_extracted_and_coerced() -> None:
+    parsed = LLMv2Interpreter()._parse_ollama_json(
+        {
+            "response": (
+                "Thinking...\n"
+                "I should infer the financial direction and amount.\n"
+                "</think>\n"
+                '{"intent":"FINANCIAL","action":"PAYMENT_IN","matched_text":"میثم 300 میلیون واریز کرد",'
+                '"entities":[{"name":"میثم","kind":"PERSON","project_role":"CLIENT"}],'
+                '"financial":{"amount":300000000,"direction":"IN","payment_method":"BANK_TRANSFER","due_date_text":null},'
+                '"work":{"quantity":null,"unit":null,"description":null},'
+                '"note":{"text":null},"confidence":0.9,"ambiguity":false,"missing_fields":[],'
+                '"reasoning_summary":"Payment entered the project."}'
+            ),
+            "thinking": "",
+        }
+    )
+
+    result = LLMv2Interpreter()._coerce(parsed, "میثم 300 میلیون واریز کرد")
+
+    assert result["intent"] == "FINANCIAL"
+    assert result["action"] == "PAYMENT_IN"
+    assert result["financial"]["amount"] == 300000000
+    assert result["financial"]["direction"] == "IN"
+    assert result["financial"]["payment_method"] == "BANK_TRANSFER"
+
+
+def test_generate_disables_qwen3_thinking_in_json_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "response": '{"intent":"NOTE","action":"NOTE"}',
+                    "thinking": "",
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    LLMv2Interpreter()._generate("سلام", project_id=1)
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["format"] == "json"
+    assert payload["think"] is False
+    assert str(payload["prompt"]).startswith("/no_think")
+    assert "Return only valid JSON" in str(payload["prompt"])
 
 
 def test_empty_response_and_thinking_fail_cleanly() -> None:
