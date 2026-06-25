@@ -22,15 +22,18 @@ export function TraceViewer({ trace }: TraceViewerProps) {
         <code>{trace.trace_id}</code>
       </div>
       <ol>
-        {trace.events.map((event, index) => (
-          <li key={`${event.event}-${index}`}>
-            <div>
-              <strong>{event.event}</strong>
-              {event.duration_ms !== null && <span>{event.duration_ms} ms</span>}
-            </div>
-            <p>{formatPayload(event.payload)}</p>
-          </li>
-        ))}
+        {trace.events.map((event, index) => {
+          const eventName = event.event || "UNKNOWN_EVENT";
+          return (
+            <li key={`${eventName}-${index}`}>
+              <div>
+                <strong>{eventName}</strong>
+                {event.duration_ms !== null && <span>{event.duration_ms} ms</span>}
+              </div>
+              <p>{formatPayload(event.payload)}</p>
+            </li>
+          );
+        })}
       </ol>
     </aside>
   );
