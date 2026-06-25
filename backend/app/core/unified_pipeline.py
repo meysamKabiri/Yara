@@ -643,6 +643,14 @@ def _build_one_llm_v2_interpretation(
         elif entities_json:
             entities_json[0] = {**entities_json[0], "project_role": "VENDOR", "type": "VENDOR"}
 
+    _repair_outgoing_unknown_counterparty_role(
+        entities_json,
+        canonical_type,
+        semantic_action,
+        financial_direction,
+        event_text,
+    )
+
     if canonical_type == "FINANCIAL_EVENT" and entities_json and "candidate_matches" not in entities_json[0]:
         fin_name = entities_json[0].get("name")
         if isinstance(fin_name, str) and fin_name.strip():
@@ -704,6 +712,43 @@ def _build_one_llm_v2_interpretation(
         confidence=interpretation.confidence,
         structured_interpretation=_json_safe(interpretation.model_dump()),
         status=PendingInterpretationStatus.PENDING,
+    )
+
+
+def _repair_outgoing_unknown_counterparty_role(
+    entities_json: list[dict[str, Any]],
+    canonical_type: str,
+    semantic_action: str | None,
+    financial_direction: Any,
+    raw_text: str,
+) -> None:
+    if (
+        canonical_type != "FINANCIAL_EVENT"
+        or semantic_action != "PAYMENT"
+        or financial_direction != FinancialDirection.OUTGOING
+        or not entities_json
+    ):
+        return
+    first = entities_json[0]
+    role = first.get("project_role") or first.get("type")
+    if role != "CLIENT" or _has_explicit_client_role_evidence(raw_text):
+        return
+    first["project_role"] = "OTHER"
+    first["type"] = "OTHER"
+
+
+def _has_explicit_client_role_evidence(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    return any(
+        term in normalized
+        for term in (
+            "کارفرما",
+            "کارفرمای پروژه",
+            "مالک",
+            "مالک پروژه",
+            "client",
+            "owner",
+        )
     )
 
 

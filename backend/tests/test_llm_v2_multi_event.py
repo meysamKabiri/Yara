@@ -347,6 +347,7 @@ def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient)
         "CASH",
     ]
     assert pis[1]["extracted_entities"][0]["name"] == "علی احمدی"
+    assert pis[0]["extracted_entities"][0]["project_role"] == "CLIENT"
     assert pis[1]["extracted_entities"][0]["project_role"] == "OTHER"
     assert pis[2]["semantic_action"] == "PURCHASE_PAID"
     assert pis[2]["extracted_entities"][0]["project_role"] == "VENDOR"
