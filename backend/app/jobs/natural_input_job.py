@@ -2,8 +2,7 @@ from inspect import signature
 from time import perf_counter
 
 from app.core import unified_pipeline
-from app.core.event_tracker import track_event, track_timed_event
-from app.core.observability.emitter import emit_event
+from app.core.observability_service import track_event
 from app.core.runtime.request_cache import new_request_cache
 from app.core.trace_context import (
     new_trace_id,
@@ -44,66 +43,25 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         track_event(db=db, trace_id=trace_id, event_name="job.started", payload={"job_id": job_id, "project_id": project_id})
         job_token, trace_token = set_trace_context(job_id, trace_id)
         if job.status == NaturalInputJobStatus.RUNNING:
-            emit_event(
-                trace_id,
-                job_id,
-                "JOB_RECOVERED_FROM_RUNNING",
-                {"project_id": project_id, "previous_status": NaturalInputJobStatus.RUNNING.value},
-                dedupe_key="job-recovered-from-running",
-            )
-        emit_event(
-            trace_id,
-            job_id,
-            "JOB_STARTED",
-            {"project_id": project_id},
-            dedupe_key="job-started",
-        )
+            track_event(db=db, trace_id=trace_id, event_name="JOB_RECOVERED_FROM_RUNNING", payload={"project_id": project_id, "previous_status": NaturalInputJobStatus.RUNNING.value})
+        track_event(db=db, trace_id=trace_id, event_name="JOB_STARTED", payload={"project_id": project_id})
         job.status = NaturalInputJobStatus.RUNNING
         job.error = None
         commit_start = perf_counter()
         db.commit()
-        emit_event(
-            trace_id,
-            job_id,
-            "DB_WRITE_SUCCESS",
-            {"project_id": project_id, "status": NaturalInputJobStatus.RUNNING.value},
-            duration_ms=(perf_counter() - commit_start) * 1000,
-        )
+        track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.RUNNING.value}, duration_ms=(perf_counter() - commit_start) * 1000)
 
-        emit_event(
-            trace_id,
-            job_id,
-            "DOMAIN_ROUTER_START",
-            {"project_id": project_id},
-            dedupe_key="domain-router-start",
-        )
-        emit_event(
-            trace_id,
-            job_id,
-            "LLM_STARTED",
-            {"project_id": project_id},
-            dedupe_key="llm-started",
-        )
+        track_event(db=db, trace_id=trace_id, event_name="DOMAIN_ROUTER_START", payload={"project_id": project_id})
+        track_event(db=db, trace_id=trace_id, event_name="LLM_STARTED", payload={"project_id": project_id})
         llm_started = True
         pipeline_start = perf_counter()
         request_cache = new_request_cache()
         interpretations = _process_input_once(db, project_id, text, request_cache)
         failed_llm_result = _failed_llm_result(request_cache)
         if failed_llm_result is not None and not interpretations:
-            emit_event(
-                trace_id,
-                job_id,
-                "LLM_FAILED",
-                {
-                    "project_id": project_id,
-                    "error_message": failed_llm_result.get("reasoning_summary")
-                    or "LLM output parsing failed",
-                },
-                duration_ms=(perf_counter() - pipeline_start) * 1000,
-                dedupe_key="llm-failed",
-            )
+            track_event(db=db, trace_id=trace_id, event_name="LLM_FAILED", payload={"project_id": project_id, "error_message": failed_llm_result.get("reasoning_summary") or "LLM output parsing failed"}, duration_ms=(perf_counter() - pipeline_start) * 1000)
             llm_finished = True
-            track_event(db=db, trace_id=trace_id, event_name="job.llm_failed", payload={"error": failed_llm_result.get("reasoning_summary")})
+            track_event(db=db, trace_id=trace_id, event_name="LLM_FAILED", payload={"error": failed_llm_result.get("reasoning_summary")})
             raise RuntimeError(
                 str(failed_llm_result.get("reasoning_summary") or "LLM output parsing failed")
             )
@@ -111,19 +69,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
 
         timings = dict(request_cache.timings_ms)
 
-        emit_event(
-            trace_id,
-            job_id,
-            "LLM_COMPLETED",
-            {
-                "project_id": project_id,
-                "interpretation_count": len(interpretations),
-                **timings,
-                "pipeline_duration_ms": round(pipeline_duration_ms, 1),
-            },
-            duration_ms=pipeline_duration_ms,
-            dedupe_key="llm-completed",
-        )
+        track_event(db=db, trace_id=trace_id, event_name="LLM_COMPLETED", payload={"project_id": project_id, "interpretation_count": len(interpretations), **timings, "pipeline_duration_ms": round(pipeline_duration_ms, 1)}, duration_ms=pipeline_duration_ms)
         llm_finished = True
 
         result = {
@@ -141,20 +87,8 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         job.error = None
         commit_start = perf_counter()
         db.commit()
-        emit_event(
-            trace_id,
-            job_id,
-            "DB_WRITE_SUCCESS",
-            {"project_id": project_id, "status": NaturalInputJobStatus.DONE.value},
-            duration_ms=(perf_counter() - commit_start) * 1000,
-        )
-        emit_event(
-            trace_id,
-            job_id,
-            "JOB_COMPLETED",
-            {"project_id": project_id, "status": NaturalInputJobStatus.DONE.value},
-            dedupe_key="job-completed",
-        )
+        track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.DONE.value}, duration_ms=(perf_counter() - commit_start) * 1000)
+        track_event(db=db, trace_id=trace_id, event_name="JOB_COMPLETED", payload={"project_id": project_id, "status": NaturalInputJobStatus.DONE.value})
         track_event(db=db, trace_id=trace_id, event_name="job.completed", payload={
             "job_id": job_id,
             "project_id": project_id,
@@ -166,13 +100,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
     except Exception as e:
         db.rollback()
         if trace_id is not None and llm_started and not llm_finished:
-            emit_event(
-                trace_id,
-                job_id,
-                "LLM_FAILED",
-                {"project_id": project_id, "error_message": str(e)},
-                dedupe_key="llm-failed",
-            )
+            track_event(db=db, trace_id=trace_id, event_name="LLM_FAILED", payload={"project_id": project_id, "error_message": str(e)})
             llm_finished = True
         job = db.query(NaturalInputJob).filter(NaturalInputJob.job_id == job_id).one_or_none()
         if job is not None:
@@ -186,22 +114,10 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
             job.result = failed_result
             commit_start = perf_counter()
             db.commit()
-            emit_event(
-                trace_id,
-                job_id,
-                "DB_WRITE_SUCCESS",
-                {"project_id": project_id, "status": NaturalInputJobStatus.FAILED.value},
-                duration_ms=(perf_counter() - commit_start) * 1000,
-            )
+            track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.FAILED.value}, duration_ms=(perf_counter() - commit_start) * 1000)
         if trace_id is not None:
             track_event(db=db, trace_id=trace_id, event_name="job.failed", payload={"job_id": job_id, "error": str(e)})
-            emit_event(
-                trace_id,
-                job_id,
-                "ERROR_OCCURRED",
-                {"project_id": project_id, "error_message": str(e)},
-                dedupe_key="job-error",
-            )
+            track_event(db=db, trace_id=trace_id, event_name="ERROR_OCCURRED", payload={"project_id": project_id, "error_message": str(e)})
         return {
             "job_id": job_id,
             "status": "FAILED",
@@ -219,13 +135,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
                 job.status = NaturalInputJobStatus.FAILED
                 job.error = job.error or "job exited before reaching a terminal state"
                 db.commit()
-                emit_event(
-                    job.trace_id,
-                    job_id,
-                    "JOB_FORCE_FAILED",
-                    {"project_id": project_id, "status": NaturalInputJobStatus.FAILED.value},
-                    dedupe_key="job-force-failed",
-                )
+                track_event(db=db, trace_id=job.trace_id, event_name="JOB_FORCE_FAILED", payload={"project_id": project_id, "status": NaturalInputJobStatus.FAILED.value})
         except Exception:
             db.rollback()
         if job_token is not None:

@@ -10,12 +10,11 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
-from app.core.event_tracker import track_event, track_timed_event
+from app.core.observability_service import track_event, track_timed_event
 from app.core.queue import get_queue
-from app.core.observability.emitter import persist_job_event
 from app.core.trace_context import get_trace_id
-from app.core.trace_events import TraceEvent, get_trace_events, trace_error, trace_event
 from app.dependencies.database import DbSession
 from app.models.core import (
     CounterpartyType,
@@ -1087,11 +1086,6 @@ def process_natural_input(
     )
     db.add(job)
     db.commit()
-    created_event = trace_event(
-        "JOB_CREATED",
-        {"job_id": job_id, "trace_id": trace_id, "project_id": project_id, "dedupe_key": "job-created"},
-    )
-    persist_job_event(job_id, created_event)
     track_event(db=db, event_name="db.job_created", payload={"job_id": job_id, "project_id": project_id})
 
     queue = get_queue()
@@ -1160,16 +1154,14 @@ def get_natural_input_job_events(job_id: str, db: DbSession) -> dict[str, Any]:
             detail="Job not found",
         )
     events = _job_persisted_events(job)
-    if not events:
-        events = [
-            event
-            for event in get_trace_events(job.trace_id)
-            if event.get("job_id") == job.job_id or event.get("payload", {}).get("job_id") == job.job_id
-        ]
+    if not events and job.trace_id is not None:
+        from app.core.event_tracker import get_trace_events
+
+        events = get_trace_events(job.trace_id, db=db)
     return {
         "job_id": job.job_id,
         "trace_id": job.trace_id,
-        "events": sorted(events, key=lambda event: event.get("sequence_number", 0)),
+        "events": sorted(events, key=lambda event: event.get("event_index", event.get("sequence_number", 0))),
     }
 
 
@@ -1195,14 +1187,14 @@ def mark_stale_natural_input_jobs_failed(
         previous_status = job.status.value if hasattr(job.status, "value") else job.status
         job.status = NaturalInputJobStatus.FAILED
         job.error = job.error or "Job expired or worker stopped before completion"
-        trace_event(
-            "JOB_EXPIRED",
-            {
+        track_event(
+            db=db,
+            trace_id=job.trace_id,
+            event_name="JOB_EXPIRED",
+            payload={
                 "job_id": job.job_id,
-                "trace_id": job.trace_id,
                 "project_id": job.project_id,
                 "previous_status": previous_status,
-                "dedupe_key": "job-expired",
             },
         )
     if stale_jobs:
@@ -1264,19 +1256,17 @@ def _job_persisted_events(job: NaturalInputJob) -> list[dict[str, Any]]:
 def _job_events_summary(job: NaturalInputJob) -> list[dict[str, Any]]:
     source_events = _job_persisted_events(job)
     if not source_events and job.trace_id is not None:
-        source_events = [
-            event
-            for event in get_trace_events(job.trace_id)
-            if event.get("job_id") == job.job_id or event.get("payload", {}).get("job_id") == job.job_id
-        ]
+        from app.core.event_tracker import get_trace_events
+
+        source_events = get_trace_events(job.trace_id)
     return [
         {
-            "event": event["event"],
-            "sequence_number": event.get("sequence_number"),
+            "event": event.get("event_name") or event["event"],
+            "sequence_number": event.get("event_index") or event.get("sequence_number"),
             "duration_ms": event.get("duration_ms"),
         }
         for event in source_events
-        if event.get("event") != "JOB_CREATED"
+        if event.get("event_name", event.get("event")) != "JOB_CREATED"
     ]
 
 
@@ -1384,13 +1374,14 @@ def confirm_pending_interpretation(
         resolution_result = _resolve_entity_phase_if_needed(db, interpretation, payload)
         if resolution_result is not None:
             db.commit()
-            trace_event(
-                TraceEvent.DB_WRITE_SUCCESS,
-                {
+            track_event(
+                db=db,
+                event_name="DB_WRITE_SUCCESS",
+                duration_ms=round((perf_counter() - db_write_start) * 1000, 3),
+                payload={
                     "pending_interpretation_id": interpretation.id,
                     "stage": "entity_resolution",
                 },
-                start_time=db_write_start,
             )
             track_event(
                 db=db,
@@ -1408,10 +1399,11 @@ def confirm_pending_interpretation(
         result = _execute_pending_interpretation(db, interpretation, payload)
         interpretation.status = PendingInterpretationStatus.CONFIRMED
         db.commit()
-        trace_event(
-            TraceEvent.DB_WRITE_SUCCESS,
-            {"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
-            start_time=db_write_start,
+        track_event(
+            db=db,
+            event_name="DB_WRITE_SUCCESS",
+            duration_ms=round((perf_counter() - db_write_start) * 1000, 3),
+            payload={"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
         )
         db.refresh(interpretation)
         track_event(
@@ -1423,8 +1415,8 @@ def confirm_pending_interpretation(
             _run_execution_engine_shadow(db, interpretation, payload, result)
         return result
     except Exception as exc:
-        track_event(event_name="db.confirmation_failed", payload={"interpretation_id": interpretation_id, "error": str(exc)})
-        trace_error(exc, {"pending_interpretation_id": interpretation_id})
+        track_event(db=db, event_name="db.confirmation_failed", payload={"interpretation_id": interpretation_id, "error": str(exc)})
+        track_event(db=db, event_name="ERROR_OCCURRED", payload={"pending_interpretation_id": interpretation_id, "error_message": str(exc)})
         raise
 
 
@@ -1627,7 +1619,6 @@ def _run_execution_engine_shadow(
     )
     if confirmed is None:
         return
-    transaction = db.begin_nested()
     try:
         state = _shadow_state_for_confirmed_person(db, confirmed)
         shadow_result = ExecutionEngine().execute_confirmed_interpretation(
@@ -1652,8 +1643,6 @@ def _run_execution_engine_shadow(
                 "project_id": interpretation.project_id,
             },
         )
-    finally:
-        transaction.rollback()
 
 
 def _execute_with_execution_engine_primary(

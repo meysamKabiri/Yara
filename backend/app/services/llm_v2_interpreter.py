@@ -9,9 +9,8 @@ from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
-from app.core.event_tracker import track_timed_event
-from app.core.observability.emitter import emit_event
-from app.core.trace_context import get_job_id, get_trace_id
+from app.core.observability_service import track_event, track_timed_event
+from app.core.trace_context import get_trace_id
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
 
@@ -23,12 +22,13 @@ OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "200"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
 
 
-def _emit_event(event_name, payload=None, duration_ms=None, dedupe_key=None):
+def _emit_event(db: Session | None, event_name, payload=None, duration_ms=None):
+    if db is None:
+        return
     try:
         trace_id = get_trace_id()
-        job_id = get_job_id()
-        if trace_id and job_id:
-            emit_event(trace_id, job_id, event_name, payload, duration_ms, dedupe_key)
+        if trace_id:
+            track_event(db=db, trace_id=trace_id, event_name=event_name, payload=payload, duration_ms=duration_ms)
     except Exception:
         pass
 
@@ -168,16 +168,16 @@ class LLMOutputParseError(ValueError):
 class LLMv2Interpreter:
     def interpret(self, raw_text: str, project_id: int, db: Session | None = None) -> dict[str, Any]:
         if db is None:
-            return self._interpret_impl(raw_text, project_id)
+            return self._interpret_impl(raw_text, project_id, db=None)
         return track_timed_event(
             db=db,
             event_name="llm_v2_interpreter.interpret",
-            fn=lambda: self._interpret_impl(raw_text, project_id),
+            fn=lambda: self._interpret_impl(raw_text, project_id, db=db),
         )
 
-    def _interpret_impl(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def _interpret_impl(self, raw_text: str, project_id: int, db: Session | None = None) -> dict[str, Any]:
         try:
-            parsed = self._generate(raw_text, project_id)
+            parsed = self._generate(raw_text, project_id, db=db)
             if not isinstance(parsed, dict):
                 return self._fallback(raw_text, "model returned non-object JSON")
 
@@ -185,7 +185,7 @@ class LLMv2Interpreter:
             result = self._coerce(parsed, raw_text)
             normalize_ms = (perf_counter() - normalize_start) * 1000
 
-            _emit_event("INTERPRETATION_NORMALIZED", {
+            _emit_event(db, "INTERPRETATION_NORMALIZED", {
                 "semantic_action": result.get("action"),
                 "domain": result.get("intent"),
             }, duration_ms=normalize_ms)
@@ -199,8 +199,8 @@ class LLMv2Interpreter:
         except (OSError, TimeoutError, urllib.error.URLError, TypeError):
             return self._fallback(raw_text, "shadow interpreter failed")
 
-    def _generate(self, raw_text: str, project_id: int) -> Any:
-        _emit_event("LLM_REQUEST_STARTED", {
+    def _generate(self, raw_text: str, project_id: int, db: Session | None = None) -> Any:
+        _emit_event(db, "LLM_REQUEST_STARTED", {
             "model": OLLAMA_MODEL,
             "timeout": OLLAMA_TIMEOUT_SECONDS,
             "num_predict": OLLAMA_NUM_PREDICT,
@@ -238,7 +238,7 @@ class LLMv2Interpreter:
                 if attempt >= max_attempts:
                     raise
                 delay = min(0.5 * (2 ** attempt), 5.0)
-                _emit_event("LLM_RETRY", {
+                _emit_event(db, "LLM_RETRY", {
                     "attempt": attempt,
                     "error": str(e),
                     "max_attempts": max_attempts,
@@ -246,7 +246,7 @@ class LLMv2Interpreter:
                 time.sleep(delay)
         ollama_ms = (perf_counter() - ollama_start) * 1000
 
-        _emit_event("OLLAMA_RESPONSE_RECEIVED", {
+        _emit_event(db, "OLLAMA_RESPONSE_RECEIVED", {
             "model": OLLAMA_MODEL,
             "response_length": len(str(ollama_body.get("response", ""))),
             "thinking_length": len(str(ollama_body.get("thinking", ""))),
@@ -258,7 +258,7 @@ class LLMv2Interpreter:
         parse_ms = (perf_counter() - parse_start) * 1000
 
         used_field = "response" if ollama_body.get("response") and str(ollama_body.get("response", "")).strip() else "thinking"
-        _emit_event("LLM_JSON_PARSED", {
+        _emit_event(db, "LLM_JSON_PARSED", {
             "keys_parsed": list(parsed.keys()) if isinstance(parsed, dict) else [],
             "used_response_field": used_field,
         }, duration_ms=parse_ms)

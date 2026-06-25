@@ -4,7 +4,7 @@ from time import perf_counter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.trace_events import TraceEvent, trace_event
+from app.core.observability_service import track_event
 from app.models.core import Worker, WorkerType
 from app.services.identity_key import generate_identity_key
 
@@ -43,15 +43,16 @@ class EntityResolutionService:
             "role": worker.type.value,
             "status": "RESOLVED",
         }
-        trace_event(
-            TraceEvent.ENTITY_RESOLVED,
-            {
+        track_event(
+            db=self.db,
+            event_name="ENTITY_RESOLVED",
+            duration_ms=round((perf_counter() - start) * 1000, 3),
+            payload={
                 "entity_id": result["entity_id"],
                 "is_new": result["is_new"],
                 "project_id": self.project_id,
                 "role": result["role"],
             },
-            start_time=start,
         )
         return result
 

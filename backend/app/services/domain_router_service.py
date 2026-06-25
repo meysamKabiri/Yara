@@ -6,8 +6,7 @@ from time import perf_counter
 from typing import Any
 from sqlalchemy.orm import Session
 
-from app.core.event_tracker import track_timed_event
-from app.core.trace_events import TraceEvent, trace_event
+from app.core.observability_service import track_event, track_timed_event
 
 
 _PROFILE_FIELD_KEYS = {"phone", "account_number", "accountNumber", "card_number", "cardNumber", "daily_rate", "dailyRate", "notes"}
@@ -88,14 +87,14 @@ class DomainRouterService:
 
     def route(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None, db: Session | None = None) -> dict[str, Any]:
         if db is None:
-            return self._route_impl(raw_user_text, llm_interpretation)
+            return self._route_impl(raw_user_text, llm_interpretation, db=None)
         return track_timed_event(
             db=db,
             event_name="domain_router.route",
-            fn=lambda: self._route_impl(raw_user_text, llm_interpretation),
+            fn=lambda: self._route_impl(raw_user_text, llm_interpretation, db=db),
         )
 
-    def _route_impl(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _route_impl(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None, db: Session | None = None) -> dict[str, Any]:
         start = perf_counter()
         text = self._normalize(raw_user_text)
         interpretation = llm_interpretation or {}
@@ -105,18 +104,22 @@ class DomainRouterService:
 
         if has_profile_update and financial_score == 0:
             result = self._result(DomainType.ENTITY_UPDATE, min(0.95, 0.75 + setup_score * 0.05))
-            trace_event(TraceEvent.DOMAIN_ROUTED, result, start_time=start)
+            if db is not None:
+                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
             return result
         if setup_score > 0 and financial_score > 0:
             result = self._result(DomainType.MIXED, 0.9)
-            trace_event(TraceEvent.DOMAIN_ROUTED, result, start_time=start)
+            if db is not None:
+                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
             return result
         if financial_score > 0:
             result = self._result(DomainType.FINANCIAL, min(0.95, 0.75 + financial_score * 0.05))
-            trace_event(TraceEvent.DOMAIN_ROUTED, result, start_time=start)
+            if db is not None:
+                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
             return result
         result = self._result(DomainType.SETUP, min(0.95, 0.75 + max(setup_score, 1) * 0.05))
-        trace_event(TraceEvent.DOMAIN_ROUTED, result, start_time=start)
+        if db is not None:
+            track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
         return result
 
     def _setup_score(self, text: str, interpretation: dict[str, Any]) -> int:

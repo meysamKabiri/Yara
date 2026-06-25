@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from contextvars import ContextVar
 from typing import Any
@@ -7,6 +8,9 @@ from typing import Any
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
+
+logger = logging.getLogger(__name__)
 
 
 _trace_id: ContextVar[str | None] = ContextVar("trace_id", default=None)
@@ -64,9 +68,7 @@ class TraceContextMiddleware(BaseHTTPMiddleware):
             try:
                 response = await call_next(request)
             except Exception as exc:
-                from app.core.trace_events import trace_error
-
-                trace_error(exc, {"path": str(request.url.path), "method": request.method})
+                logger.exception("Unhandled exception during request", extra={"path": str(request.url.path), "method": request.method})
                 raise
             response.headers["X-Trace-Id"] = trace_id
             return response
