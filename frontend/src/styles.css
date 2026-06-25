@@ -936,6 +936,18 @@ mark {
   color: #ffffff;
 }
 
+.primary-action--caution {
+  border-color: #b8860b;
+  box-shadow: 0 0 0 1px #b8860b;
+}
+
+.warning-dot {
+  color: #c99700;
+  font-size: 0.7rem;
+  margin-inline-start: 0.3rem;
+  cursor: help;
+}
+
 .danger-action {
   border-color: #c74343;
   color: #a72f2f;
@@ -1012,15 +1024,21 @@ mark {
 }
 
 .multi-review-header {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 1rem;
+  margin-bottom: 0.2rem;
 }
 
-.multi-review-header h3,
-.multi-review-header p {
-  margin: 0.2rem 0 0;
+.review-text-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #44515a;
+  line-height: 1.8;
+  margin: 0;
+}
+
+.amount-value {
+  font-weight: 700;
+  color: #1a5c3a;
 }
 
 .multi-review-list {
@@ -1049,12 +1067,6 @@ mark {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
-}
-
-.multi-review-card p {
-  color: #44515a;
-  line-height: 1.8;
-  margin: 0;
 }
 
 .multi-review-meta {

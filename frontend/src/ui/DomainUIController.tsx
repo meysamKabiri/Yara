@@ -232,19 +232,7 @@ function moneyLabel(value: string | null): string | null {
   return `${new Intl.NumberFormat("fa-IR").format(numeric)} تومان`;
 }
 
-function paymentMethodLabel(method: string | null): string | null {
-  if (method === "CASH") return "نقدی";
-  if (method === "BANK_TRANSFER") return "انتقال بانکی";
-  if (method === "CHECK") return "چک";
-  if (method === "OTHER") return "سایر";
-  return null;
-}
 
-function statusLabel(status: PendingInterpretation["status"]): string {
-  if (status === "CONFIRMED") return "تایید شد";
-  if (status === "DISCARDED") return "حذف شد";
-  return "در انتظار تایید";
-}
 
 function profileFieldKind(interpretation: PendingInterpretation): "phone" | "account" | null {
   const entities = [...(interpretation.extracted_entities ?? []), ...structuredEntities(interpretation)];
@@ -280,36 +268,23 @@ function roleForCreate(interpretation: PendingInterpretation): string {
   return preferredEntityType(interpretation) || "OTHER";
 }
 
-function canCompactConfirm(interpretation: PendingInterpretation): boolean {
-  const kind = getModalKind(interpretation);
-  if (kind === "FINANCIAL") {
-    return Boolean(
-      interpretation.extracted_amount
-      && interpretation.financial_direction
-      && interpretation.payment_method
-      && (interpretation.suggested_entity_id || !isUnknownEntity(interpretation)),
-    );
-  }
-  if (kind === "PROFILE") {
-    return Boolean(interpretation.suggested_entity_id && hasProfileUpdateFields(interpretation));
-  }
-  if (kind === "ROLE_OR_SETUP") return setupEntities(interpretation).length > 0;
-  if (kind === "NOTE") return true;
-  return false;
-}
-
 interface MultiInterpretationReviewProps {
   interpretations: PendingInterpretation[];
-  projectName?: string | null;
   isLoading: boolean;
   onEdit: (interpretation: PendingInterpretation) => void;
   onConfirm: (interpretation: PendingInterpretation) => void;
   onDiscard: (interpretation: PendingInterpretation) => void;
 }
 
+function needsReview(interpretation: PendingInterpretation): boolean {
+  return (
+    (interpretation.confidence !== null && interpretation.confidence < 0.5) ||
+    (interpretation.suggested_entity_id === null && entityName(interpretation) === "نامشخص")
+  );
+}
+
 function MultiInterpretationReview({
   interpretations,
-  projectName,
   isLoading,
   onEdit,
   onConfirm,
@@ -318,55 +293,40 @@ function MultiInterpretationReview({
   return (
     <section className="multi-review">
       <div className="multi-review-header">
-        <div>
-          <span className="eyebrow">هوش مصنوعی {interpretations.length} مورد از متن شما پیدا کرد</span>
-          <h3>موارد پیشنهادی</h3>
-          <p>لطفاً هر مورد را بررسی و تایید کنید.</p>
-        </div>
+        <span className="eyebrow">{interpretations.length} مورد شناسایی شد</span>
       </div>
       <div className="multi-review-list">
         {interpretations.map((interpretation) => {
           const counterparty = entityName(interpretation);
-          const canConfirm = canCompactConfirm(interpretation);
+          const isUnknownCounterparty = counterparty === "نامشخص";
+          const warning = needsReview(interpretation);
           return (
             <article className="multi-review-card" key={interpretation.id}>
               <div className="multi-review-card-main">
-                <div className="multi-review-card-topline">
-                  <strong>{interpretationLabel(interpretation)}</strong>
-                  <span className={`status-badge status-${interpretation.status.toLowerCase()}`}>
-                    {canConfirm ? statusLabel(interpretation.status) : "نیاز به اصلاح"}
-                  </span>
-                </div>
-                <p>{reviewText(interpretation)}</p>
+                <strong>
+                  {interpretationLabel(interpretation)}
+                  {warning && <span className="warning-dot" title="نیاز به بررسی">●</span>}
+                </strong>
+                <p className="review-text-preview">{reviewText(interpretation)}</p>
                 <dl className="multi-review-meta">
                   {interpretation.extracted_amount && (
                     <>
-                      <dt>مبلغ</dt>
-                      <dd>{moneyLabel(interpretation.extracted_amount)}</dd>
+                      <dt>مقدار</dt>
+                      <dd className="amount-value">{moneyLabel(interpretation.extracted_amount)}</dd>
                     </>
                   )}
-                  <dt>طرف حساب</dt>
-                  <dd>{counterparty}</dd>
-                  {interpretation.canonical_event_type === "FINANCIAL_EVENT" && (
+                  {!isUnknownCounterparty && (
                     <>
-                      <dt>روش پرداخت</dt>
-                      <dd>{paymentMethodLabel(interpretation.payment_method) ?? "ثبت نشده"}</dd>
+                      <dt>طرف حساب</dt>
+                      <dd>{counterparty}</dd>
                     </>
                   )}
-                  <dt>پروژه</dt>
-                  <dd>{projectName || `پروژه ${interpretation.project_id}`}</dd>
                 </dl>
               </div>
               <div className="multi-review-actions">
-                {canConfirm ? (
-                  <button className="primary-action" type="button" onClick={() => onConfirm(interpretation)} disabled={isLoading}>
-                    تایید
-                  </button>
-                ) : (
-                  <button className="primary-action" type="button" onClick={() => onEdit(interpretation)} disabled={isLoading}>
-                    نیاز به اصلاح
-                  </button>
-                )}
+                <button className={`primary-action${warning ? " primary-action--caution" : ""}`} type="button" onClick={() => onConfirm(interpretation)} disabled={isLoading}>
+                  تایید
+                </button>
                 <button type="button" onClick={() => onEdit(interpretation)} disabled={isLoading}>
                   ویرایش
                 </button>
@@ -522,9 +482,23 @@ export function DomainUIController({
       <section className="confirmation-modal">
         <div className="modal-header">
           <div>
-            <span className="eyebrow">{safeInterpretations.length > 0 ? "تایید" : "پردازش زنده"}</span>
-            <h2 id="interpretation-title">{safeInterpretations.length > 0 ? "مورد پیشنهادی را قبل از ثبت بررسی کنید" : "درخواست شما در صف پردازش است"}</h2>
-            <p>{safeInterpretations.length > 0 ? "هیچ چیزی بدون تایید شما در دفتر پروژه ثبت نمی‌شود." : "پردازش هوش مصنوعی غیرهمزمان انجام می‌شود؛ تایید فقط بعد از پایان Job فعال می‌شود."}</p>
+            <span className="eyebrow">بررسی</span>
+            {safeInterpretations.length > 1 ? (
+              <>
+                <h2 id="interpretation-title">بررسی موارد استخراج‌شده</h2>
+                <p>موارد زیر از متن شما شناسایی شد. لطفاً بررسی و تایید کنید</p>
+              </>
+            ) : safeInterpretations.length === 1 ? (
+              <>
+                <h2 id="interpretation-title">بررسی اطلاعات</h2>
+                <p>لطفاً اطلاعات استخراج‌شده را بررسی و تایید کنید</p>
+              </>
+            ) : (
+              <>
+                <h2 id="interpretation-title">درخواست شما در صف پردازش است</h2>
+                <p>پردازش غیرهمزمان انجام می‌شود؛ تایید بعد از پایان پردازش فعال می‌شود</p>
+              </>
+            )}
           </div>
         </div>
 
@@ -538,7 +512,6 @@ export function DomainUIController({
         {!isJobDone && isJobActive ? null : shouldShowMultiReview ? (
           <MultiInterpretationReview
             interpretations={safeInterpretations}
-            projectName={projectName}
             isLoading={isLoading}
             onEdit={(interpretation) => setEditingInterpretationId(interpretation.id)}
             onConfirm={confirmFromReview}
@@ -558,15 +531,6 @@ export function DomainUIController({
             const kind = getModalKind(interpretation);
             const candidates = candidateMatches(interpretation, safeWorkers);
             const isRole = isRoleAssignment(interpretation);
-
-            console.group(`DomainUIController[${interpretation.id}]`);
-            console.log('modalKind:', kind);
-            console.log('isRoleAssignment:', isRole);
-            console.log('candidates:', candidates.length);
-            console.log('domain:', interpretation.domain_route?.domain);
-            console.log('semantic_action:', interpretation.semantic_action);
-            console.log('canonical_event_type:', interpretation.canonical_event_type);
-            console.groupEnd();
 
             // MIXED
             if (kind === "MIXED") {

@@ -106,22 +106,22 @@ export function ProjectDetailPage({ project, summary, workLogs, payments, invoic
         <div className="section-title">
           <div>
             <span className="eyebrow">فعالیت اخیر</span>
-            <h2>خط زمان</h2>
+            <h2>تایم‌لاین</h2>
           </div>
         </div>
         <div className="timeline-list">
           {recent.map((entry) => {
             const meta = timelineMeta(entry);
             return (
-            <article className={`timeline-card ${meta.className}`} key={entry.id}>
-              <div className="timeline-icon"><meta.Icon aria-hidden="true" size={17} /></div>
-              <div>
-                <span>{date(entry.created_at)}</span>
-                <strong>{meta.label}</strong>
-                <small>{meta.detail}</small>
-                <p>{entry.input_text}</p>
-              </div>
-            </article>
+              <article className={`timeline-card ${meta.className}`} key={entry.id}>
+                <div className="timeline-icon"><meta.Icon aria-hidden="true" size={17} /></div>
+                <div>
+                  <span>{date(entry.created_at)}</span>
+                  <strong>{meta.label}</strong>
+                  <small>{meta.detail}</small>
+                  <p>{entry.input_text}</p>
+                </div>
+              </article>
             );
           })}
           {recent.length === 0 && rawEntries.length === 0 && <p className="empty-state">هنوز فعالیتی ثبت نشده است. از ورودی هوشمند بالا شروع کنید.</p>}
