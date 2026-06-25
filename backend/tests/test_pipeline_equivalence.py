@@ -81,7 +81,7 @@ def test_natural_input_route_matches_unified_pipeline_output(
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _financial_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
     route_project = _create_project(client, "Route")
     direct_project = _create_project(client, "Direct")

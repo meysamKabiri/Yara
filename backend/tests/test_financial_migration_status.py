@@ -45,7 +45,7 @@ def test_financial_input_logs_migration_decision_in_off_mode(
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
 
     submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")

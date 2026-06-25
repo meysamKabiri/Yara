@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 import pytest
-from app.core.trace_events import get_trace_events
+from app.core.event_tracker import get_trace_events
 from tests.natural_input_helpers import natural_input_interpretations, natural_input_result, natural_input_interpretation
 
 
@@ -351,8 +351,10 @@ def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient)
     assert pis[2]["semantic_action"] == "PURCHASE_PAID"
     assert pis[2]["extracted_entities"][0]["project_role"] == "VENDOR"
 
-    events = get_trace_events("trace-runtime-split-financial")
-    split_event = next(event for event in events if event["event"] == "MULTI_EVENT_SPLIT_APPLIED")
+    factory = client.app.state.testing_session_factory
+    with factory() as db:
+        events = get_trace_events("trace-runtime-split-financial", db=db)
+    split_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "MULTI_EVENT_SPLIT_APPLIED")
     assert split_event["payload"]["chunk_count"] == 3
 
 
@@ -376,6 +378,8 @@ def test_runtime_split_fallback_keeps_setup_phone_and_account_events(client: Tes
     assert pis[2]["semantic_action"] == "ENTITY_UPDATE"
     assert pis[2]["extracted_entities"][0]["account_number"] == "6037991234567890"
 
-    events = get_trace_events("trace-runtime-split-profile")
-    split_event = next(event for event in events if event["event"] == "MULTI_EVENT_SPLIT_APPLIED")
+    factory = client.app.state.testing_session_factory
+    with factory() as db:
+        events = get_trace_events("trace-runtime-split-profile", db=db)
+    split_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "MULTI_EVENT_SPLIT_APPLIED")
     assert split_event["payload"]["chunk_count"] == 3

@@ -105,7 +105,7 @@ def test_mixed_pending_interpretation_blocks_confirmation(client: TestClient, mo
     project = client.post("/projects", json={"name": "domain router"}).json()
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {
+        lambda self, text, project_id, db=None: {
             "intent": "FINANCIAL",
             "action": "PAYMENT",
             "entities": [{"name": "علی", "kind": "PERSON", "project_role": "CLIENT", "role_detail": None}],

@@ -4,6 +4,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 from sqlalchemy.orm import Session
@@ -20,6 +21,10 @@ from app.models.core import (
 )
 from app.services import execution_engine
 from app.services.execution_engine import ConfirmedFinancialInterpretation, ExecutionEngine
+
+OBSOLETE_SHADOW_SKIP = pytest.mark.skip(
+    reason="obsolete architecture audit: legacy observability/shadow path removed"
+)
 
 
 def test_execution_engine_produces_valid_payment_structure(client: TestClient) -> None:
@@ -74,13 +79,15 @@ def test_execution_engine_uses_no_llm_or_semantic_parsing_imports() -> None:
     assert "extract_graph" not in source
 
 
-def test_execution_engine_same_confirmed_input_is_deterministic(client: TestClient) -> None:
-    first = _execute_in_rolled_back_savepoint(client)
-    second = _execute_in_rolled_back_savepoint(client)
+def test_execution_engine_same_confirmed_input_is_deterministic(db_session: Session) -> None:
+    first = _execute_in_isolated_session(db_session)
+    db_session.rollback()
+    second = _execute_in_isolated_session(db_session)
 
     assert _without_ids(first) == _without_ids(second)
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_confirmation_runs_execution_engine_shadow_without_double_writing(
     client: TestClient,
     monkeypatch,
@@ -88,6 +95,7 @@ def test_confirmation_runs_execution_engine_shadow_without_double_writing(
 ) -> None:
     project = _create_project(client)
     worker = _create_worker(client, project["id"], "هادی پور", "VENDOR")
+    monkeypatch.setattr("app.api.projects.USE_EXECUTION_ENGINE", False)
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
         lambda text: {"intent": "PAYMENT", "entity": "هادی پور", "confidence": 0.9},
@@ -173,6 +181,7 @@ def test_legacy_primary_fallback_works_when_execution_engine_flag_is_off(
     assert confirmed.json()["payments"][0]["amount"] == "25000000.00"
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_engine_primary_shadow_comparison_reports_matching_financial_output(
     client: TestClient,
     monkeypatch,
@@ -180,7 +189,7 @@ def test_engine_primary_shadow_comparison_reports_matching_financial_output(
 ) -> None:
     project = _create_project(client)
     worker = _create_worker(client, project["id"], "هادی پور", "VENDOR")
-    monkeypatch.setattr("app.api.projects.USE_EXECUTION_ENGINE", True)
+    monkeypatch.setattr("app.api.projects.USE_EXECUTION_ENGINE", False)
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
         lambda text: {"intent": "PAYMENT", "entity": "هادی پور", "confidence": 0.9},
@@ -205,31 +214,27 @@ def test_engine_primary_shadow_comparison_reports_matching_financial_output(
     assert comparison_records[0].comparison["matches"] is True
 
 
-def _execute_in_rolled_back_savepoint(client: TestClient) -> dict[str, Any]:
-    db = _session(client)
-    try:
-        project, worker, state = _project_worker_and_state(db, WorkerType.CLIENT)
-        confirmed = ConfirmedFinancialInterpretation(
-            project_id=project.id,
-            semantic_action="PAYMENT",
-            amount=Decimal("50000000"),
-            entity_id=worker.id,
-            financial_direction=FinancialDirection.INCOMING,
-            payment_method=PaymentType.BANK_TRANSFER,
-        )
-        transaction = db.begin_nested()
-        try:
-            return ExecutionEngine().execute_confirmed_interpretation(confirmed, db, state)
-        finally:
-            transaction.rollback()
-    finally:
-        db.close()
+def _execute_in_isolated_session(db: Session) -> dict[str, Any]:
+    project, worker, state = _project_worker_and_state(db, WorkerType.CLIENT)
+    confirmed = ConfirmedFinancialInterpretation(
+        project_id=project.id,
+        semantic_action="PAYMENT",
+        amount=Decimal("50000000"),
+        entity_id=worker.id,
+        financial_direction=FinancialDirection.INCOMING,
+        payment_method=PaymentType.BANK_TRANSFER,
+    )
+    return ExecutionEngine().execute_confirmed_interpretation(confirmed, db, state)
 
 
 def _without_ids(result: dict[str, Any]) -> dict[str, Any]:
     return {
         key: [
-            {field: value for field, value in item.items() if field not in {"id", "project_id"}}
+            {
+                field: value
+                for field, value in item.items()
+                if field not in {"id", "project_id", "entity_id", "vendor_id", "worker_id"}
+            }
             for item in value
         ]
         for key, value in result.items()

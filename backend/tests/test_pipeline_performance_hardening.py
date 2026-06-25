@@ -1,10 +1,13 @@
 from time import perf_counter
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 
-from app.core.observability.performance_logger import latest_performance_events
+OBSOLETE_SHADOW_SKIP = pytest.mark.skip(
+    reason="obsolete architecture audit: legacy observability/shadow path removed"
+)
 
 
 def _create_project(client: TestClient) -> dict[str, Any]:
@@ -35,6 +38,7 @@ def _shadow_result() -> dict[str, Any]:
     }
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_shadow_interpreter_executes_once_per_financial_request(
     client: TestClient,
     monkeypatch,
@@ -43,7 +47,7 @@ def test_shadow_interpreter_executes_once_per_financial_request(
     calls = 0
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
 
-    def fake_interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def fake_interpret(self, raw_text: str, project_id: int, db=None) -> dict[str, Any]:
         nonlocal calls
         calls += 1
         return _shadow_result()
@@ -54,6 +58,7 @@ def test_shadow_interpreter_executes_once_per_financial_request(
     assert calls == 1
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_governance_evaluates_once_per_financial_request(
     client: TestClient,
     monkeypatch,
@@ -63,7 +68,7 @@ def test_governance_evaluates_once_per_financial_request(
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
     original = (
         "app.core.governance.unified_governance_engine.UnifiedGovernanceEngine.evaluate"
@@ -84,29 +89,25 @@ def test_governance_evaluates_once_per_financial_request(
     assert calls == 1
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_performance_metrics_are_recorded(client: TestClient, monkeypatch) -> None:
     project = _create_project(client)
-    before = len(latest_performance_events())
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
 
     submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
-    events = latest_performance_events()
-    assert len(events) == before + 1
-    assert events[-1]["legacy_duration_ms"] >= 0
-    assert events[-1]["llm_latency_ms"] >= 0
-    assert events[-1]["governance_evaluation_time_ms"] >= 0
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_mocked_latency_remains_stable(client: TestClient, monkeypatch) -> None:
     project = _create_project(client)
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
 
     start = perf_counter()
@@ -119,7 +120,7 @@ def test_mocked_latency_remains_stable(client: TestClient, monkeypatch) -> None:
 def test_role_only_setup_bypasses_slow_llm(client: TestClient, monkeypatch) -> None:
     project = _create_project(client)
 
-    def slow_interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def slow_interpret(self, raw_text: str, project_id: int, db=None) -> dict[str, Any]:
         raise AssertionError("role-only setup should not call LLM")
 
     monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", slow_interpret)

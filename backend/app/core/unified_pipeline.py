@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 import re
@@ -13,12 +14,13 @@ from app.core.feature_flags import get_financial_migration_mode
 from app.core.governance.governance_context_builder import GovernanceContextBuilder
 from app.core.governance.unified_governance_engine import UnifiedGovernanceEngine
 from app.core.llm_cache import get_llm_cache, llm_cache_key, set_llm_cache
+from app.core.observability_service import track_event
 from app.core.observability.decision_logger import (
     flush_decision_logs,
     queue_financial_decision,
     queue_shadow_decision,
 )
-from app.core.observability.emitter import emit_event
+
 from app.core.observability.performance_logger import record_pipeline_performance
 from app.core.runtime.request_cache import RequestCache, new_request_cache
 from app.core.trace_context import get_job_id, get_trace_id
@@ -48,12 +50,11 @@ from app.services.semantic_normalizer import CanonicalEventType, SemanticNormali
 logger = logging.getLogger(__name__)
 
 
-def _emit_event(event_name, payload=None, duration_ms=None, dedupe_key=None):
+def _emit_event(db: Session, event_name, payload=None, duration_ms=None):
     try:
         trace_id = get_trace_id()
-        job_id = get_job_id()
-        if trace_id and job_id:
-            emit_event(trace_id, job_id, event_name, payload, duration_ms, dedupe_key)
+        if trace_id:
+            track_event(db=db, trace_id=trace_id, event_name=event_name, payload=payload, duration_ms=duration_ms)
     except Exception:
         pass
 
@@ -80,7 +81,7 @@ def process_input(
         cache.set_timing("llm_v2_duration_ms", 0.0)
         cache.set_timing("legacy_duration_ms", 0.0)
         cache.set_timing("governance_duration_ms", 0.0)
-        _emit_event("PENDING_INTERPRETATION_SAVED", {
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
             "interpretation_count": 1,
             "path": "fast_setup",
         })
@@ -136,7 +137,7 @@ def process_input(
         db.commit()
         for interpretation in interpretations:
             db.refresh(interpretation)
-        _emit_event("PENDING_INTERPRETATION_SAVED", {
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
             "interpretation_count": len(interpretations),
             "path": "llm_v2_primary",
         })
@@ -155,7 +156,7 @@ def process_input(
     _debug_print("llm_v2_fallback", {"reason": "LLM v2 invalid or failed"})
 
     if len(chunks) > 1:
-        _emit_event("MULTI_EVENT_SPLIT_APPLIED", {"chunk_count": len(chunks)})
+        _emit_event(db, "MULTI_EVENT_SPLIT_APPLIED", {"chunk_count": len(chunks)})
         interpretations = _process_split_fallback_chunks(
             db,
             project_id,
@@ -173,7 +174,7 @@ def process_input(
         db.add(profile_update)
         db.commit()
         db.refresh(profile_update)
-        _emit_event("PENDING_INTERPRETATION_SAVED", {
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
             "interpretation_count": 1,
             "path": "profile_update",
         })
@@ -251,7 +252,7 @@ def process_input(
     for interpretation in interpretations:
         db.refresh(interpretation)
 
-    _emit_event("PENDING_INTERPRETATION_SAVED", {
+    _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
         "interpretation_count": len(interpretations),
         "path": "legacy",
     })
@@ -352,7 +353,7 @@ def _process_split_fallback_chunks(
     for interpretation in interpretations:
         db.refresh(interpretation)
 
-    _emit_event("PENDING_INTERPRETATION_SAVED", {
+    _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
         "interpretation_count": len(interpretations),
         "path": "split_fallback",
     })
@@ -1076,7 +1077,12 @@ def _safe_llm_v2_result(
             request_cache.set_llm_result(key, cached_result)
         return cached_result
     try:
-        result = _llm_v2_interpreter().interpret(input_text, project_id, db=db)
+        interpreter = _llm_v2_interpreter()
+        interpret_sig = inspect.signature(interpreter.interpret)
+        if "db" in interpret_sig.parameters:
+            result = interpreter.interpret(input_text, project_id, db=db)
+        else:
+            result = interpreter.interpret(input_text, project_id)
         timings = result.pop("_timings", None) if isinstance(result, dict) else None
         if timings is not None and request_cache is not None:
             for k, v in timings.items():

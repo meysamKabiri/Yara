@@ -90,7 +90,7 @@ def test_llm_v2_is_attempted_before_legacy(client: TestClient, monkeypatch: pyte
 
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: calls.append("llm_v2") or _valid_llm_v2_setup(),
+        lambda self, text, project_id, db=None: calls.append("llm_v2") or _valid_llm_v2_setup(),
     )
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
@@ -109,7 +109,7 @@ def test_legacy_is_not_called_when_llm_v2_returns_valid_output(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_setup(),
+        lambda self, text, project_id, db=None: _valid_llm_v2_setup(),
     )
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
@@ -129,7 +129,7 @@ def test_llm_v2_setup_repairs_skilled_role_from_raw_text(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {
+        lambda self, text, project_id, db=None: {
             **_valid_llm_v2_setup("ریاحی"),
             "entities": [
                 {
@@ -172,7 +172,7 @@ def test_legacy_is_called_when_llm_v2_fails_validation(
     calls: list[str] = []
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {"intent": "SETUP", "entities": []},
+        lambda self, text, project_id, db=None: {"intent": "SETUP", "entities": []},
     )
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
@@ -195,7 +195,7 @@ def test_semantic_rule_engine_not_used_in_primary_llm_v2_success_path(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_setup(),
+        lambda self, text, project_id, db=None: _valid_llm_v2_setup(),
     )
     monkeypatch.setattr(
         "app.services.semantic_normalizer.SemanticRuleEngine.classify",
@@ -215,7 +215,7 @@ def test_paid_purchase_from_llm_v2_does_not_create_payables(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial("PURCHASE_PAID", 5_000_000),
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial("PURCHASE_PAID", 5_000_000),
     )
     monkeypatch.setattr(
         "app.api.projects.extract_graph",
@@ -246,7 +246,7 @@ def test_edited_llm_v2_purchase_to_debt_creates_invoice_not_payment(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PURCHASE_PAID",
             25_000_000,
             payment_method="CASH",
@@ -288,7 +288,7 @@ def test_edited_llm_v2_financial_direction_incoming_is_respected(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PAYMENT_OUT",
             50_000_000,
             direction="OUT",
@@ -331,7 +331,7 @@ def test_edited_llm_v2_payment_method_check_is_respected(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PURCHASE_PAID",
             25_000_000,
             payment_method="CASH",
@@ -367,7 +367,7 @@ def test_edited_llm_v2_debt_to_generic_payment_does_not_use_stale_debt_action(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "DEBT_CREATED",
             25_000_000,
             payment_method=None,
@@ -408,7 +408,7 @@ def test_edited_llm_v2_deferred_payment_preserves_check_direction(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PAYMENT_OUT",
             25_000_000,
             payment_method="BANK_TRANSFER",
@@ -451,7 +451,7 @@ def test_llm_v2_financial_unknown_entity_must_block_confirmation(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {
+        lambda self, text, project_id, db=None: {
             **_valid_llm_v2_financial("PAYMENT_OUT", 5_000_000),
             "entities": [
                 {
@@ -486,7 +486,7 @@ def test_llm_v2_financial_missing_amount_must_block_confirmation(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {
+        lambda self, text, project_id, db=None: {
             **_valid_llm_v2_financial("PAYMENT_OUT", 5_000_000),
             "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
             "missing_fields": ["amount", "direction"],
@@ -520,7 +520,7 @@ def test_llm_v2_financial_missing_direction_must_block_confirmation(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {
+        lambda self, text, project_id, db=None: {
             **_valid_llm_v2_financial("PAYMENT_OUT", 5_000_000),
             "financial": {"amount": 5_000_000, "direction": "NONE", "payment_method": None, "due_date_text": None},
             "missing_fields": ["direction"],
@@ -558,7 +558,7 @@ def test_llm_v2_new_vendor_paid_purchase_auto_creates_vendor_after_confirm(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PURCHASE_PAID",
             5_000_000,
             name="هادیپور",
@@ -600,7 +600,7 @@ def test_llm_v2_new_vendor_unpaid_purchase_auto_creates_payable(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "DEBT_CREATED",
             10_000_000,
             name="هادیپور",
@@ -637,7 +637,7 @@ def test_llm_v2_new_vendor_check_purchase_auto_creates_check_payment_with_due_da
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "CHECK_PAYMENT",
             50_000_000,
             name="هادیپور",
@@ -674,7 +674,7 @@ def test_llm_v2_existing_vendor_reused_for_compact_purchase_name(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PURCHASE_PAID",
             5_000_000,
             name="هادیپور",
@@ -713,7 +713,7 @@ def test_llm_v2_ambiguous_vendor_purchase_requires_selection(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             "PURCHASE_PAID",
             5_000_000,
             name="هادیپور",
@@ -746,7 +746,7 @@ def test_llm_v2_non_vendor_financial_entity_is_not_auto_created(
     direction = "IN" if project_role == "CLIENT" else "OUT"
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: _valid_llm_v2_financial(
+        lambda self, text, project_id, db=None: _valid_llm_v2_financial(
             action,
             5_000_000,
             direction=direction,
@@ -787,7 +787,7 @@ def test_llm_v2_flexible_persian_skilled_setup_creates_pending_only(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: {
+        lambda self, raw_text, project_id, db=None: {
             **_valid_llm_v2_setup(name),
             "entities": [
                 {
@@ -825,7 +825,7 @@ def test_create_new_confirmation_creates_skilled_worker_with_role_detail(
 ) -> None:
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: {
+        lambda self, raw_text, project_id, db=None: {
             **_valid_llm_v2_setup("جعفری"),
             "entities": [
                 {
