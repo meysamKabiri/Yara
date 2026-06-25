@@ -271,6 +271,7 @@ export type NaturalInputInterpretationResult = {
 export type TraceEvent = {
   trace_id: string;
   event: string;
+  event_group?: string;
   payload: Record<string, unknown>;
   start_time: number | null;
   end_time: number | null;
@@ -324,6 +325,63 @@ export type JobEvent = TraceEvent & {
   sequence_number?: number;
   timestamp?: string | number | null;
 };
+
+type RawTraceEvent = Partial<TraceEvent> & {
+  traceId?: string;
+  trace_id?: string;
+  job_id?: string;
+  event?: string;
+  eventName?: string;
+  event_name?: string;
+  eventGroup?: string;
+  event_group?: string;
+  eventIndex?: number;
+  event_index?: number;
+  sequence_number?: number;
+  durationMs?: number | null;
+  duration_ms?: number | null;
+  createdAt?: number;
+  created_at?: number;
+  timestamp?: string | number | null;
+  name?: string;
+  type?: string;
+  data?: Record<string, unknown>;
+};
+
+export function normalizeTraceEvent(raw: unknown, index = 0): JobEvent {
+  const record = raw && typeof raw === "object" ? raw as RawTraceEvent : {};
+  const eventName = record.event ?? record.eventName ?? record.event_name ?? record.name ?? record.type ?? "UNKNOWN_EVENT";
+  const eventGroup = record.event_group ?? record.eventGroup ?? "OTHER";
+  const eventIndex = record.sequence_number ?? record.eventIndex ?? record.event_index ?? index + 1;
+
+  return {
+    trace_id: record.trace_id ?? record.traceId ?? "",
+    event: eventName,
+    event_group: eventGroup,
+    payload: record.payload ?? record.data ?? {},
+    start_time: record.start_time ?? null,
+    end_time: record.end_time ?? null,
+    duration_ms: record.duration_ms ?? record.durationMs ?? null,
+    created_at: record.created_at ?? record.createdAt ?? Date.now() / 1000,
+    job_id: record.job_id,
+    sequence_number: eventIndex,
+    timestamp: record.timestamp ?? null,
+  };
+}
+
+export function normalizeMetricTraceEvent(raw: unknown, index = 0): MetricTraceEvent {
+  const record = raw && typeof raw === "object" ? raw as RawTraceEvent : {};
+
+  return {
+    trace_id: record.trace_id ?? record.traceId ?? "",
+    event_name: record.eventName ?? record.event_name ?? record.event ?? record.name ?? record.type ?? "UNKNOWN_EVENT",
+    event_group: record.eventGroup ?? record.event_group ?? "OTHER",
+    event_index: record.eventIndex ?? record.event_index ?? record.sequence_number ?? index + 1,
+    timestamp: String(record.timestamp ?? record.created_at ?? record.createdAt ?? new Date().toISOString()),
+    duration_ms: record.durationMs ?? record.duration_ms ?? null,
+    payload: record.payload ?? record.data ?? {},
+  };
+}
 
 /* =========================================================
    REQUEST WRAPPER
@@ -476,8 +534,13 @@ export const api = {
 
   getTrace: (traceId: string) => request<TraceDetail>(`/traces/${traceId}`),
 
-  getTraceMetrics: (traceId: string) =>
-    request<TraceMetricsResponse>(`/metrics/trace/${encodeURIComponent(traceId)}`),
+  getTraceMetrics: async (traceId: string) => {
+    const result = await request<TraceMetricsResponse>(`/metrics/trace/${encodeURIComponent(traceId)}`);
+    return {
+      ...result,
+      events: result.events.map((event, index) => normalizeMetricTraceEvent(event, index)),
+    };
+  },
 
   listJobs: () => request<NaturalInputJobRecord[]>("/jobs"),
 
@@ -488,7 +551,8 @@ export const api = {
     const result = await request<JobEvent[] | { events: JobEvent[] }>(
       `/jobs/${encodeURIComponent(jobId)}/events`,
     );
-    return Array.isArray(result) ? result : result.events;
+    const events = Array.isArray(result) ? result : result.events;
+    return events.map((event, index) => normalizeTraceEvent(event, index));
   },
 
   processNaturalInput: (projectId: number, text: string) =>

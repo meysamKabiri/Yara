@@ -18,7 +18,7 @@ function formatTimestamp(ts: string): string {
   return `${time}.${ms}`;
 }
 
-function isFailed(eventGroup: string): boolean {
+function isFailed(eventGroup?: string | null): boolean {
   return eventGroup === "FAILED" || eventGroup === "ERROR";
 }
 
@@ -97,10 +97,13 @@ export function TraceTimeline({ traceId }: { traceId: string | null }) {
             </div>
             <div className="trace-timeline-items">
               {events.map((event) => {
-                const key = `${event.event_index}-${event.event_name}`;
+                const eventName = event.event_name || "UNKNOWN_EVENT";
+                const eventGroup = event.event_group || "OTHER";
+                const eventIndex = event.event_index ?? 0;
+                const key = `${eventIndex}-${eventName}`;
                 const isExpanded = expandedPayloads.has(key);
                 const hasPayload = event.payload && Object.keys(event.payload).length > 0;
-                const failed = isFailed(event.event_group);
+                const failed = isFailed(eventGroup);
                 const slow = isSlow(event.duration_ms);
 
                 return (
@@ -112,7 +115,7 @@ export function TraceTimeline({ traceId }: { traceId: string | null }) {
                     <div className="trace-timeline-item-content">
                       <div className="trace-timeline-item-header">
                         <span className={`trace-timeline-event-dot ${failed ? "failed" : slow ? "slow" : ""}`} />
-                        <span className="trace-timeline-event-name">{event.event_name}</span>
+                        <span className="trace-timeline-event-name">{eventName}</span>
                         <span className="trace-timeline-event-duration">{formatDuration(event.duration_ms)}</span>
                         <span className="trace-timeline-event-timestamp">{formatTimestamp(event.timestamp)}</span>
                       </div>

@@ -11,13 +11,13 @@ function progressFor(events: JobEvent[], state: JobState): number {
 }
 
 function completedMilestones(events: JobEvent[]): number {
-  const names = new Set(events.map((event) => event.event));
+  const names = new Set(events.map((event) => event.event || "UNKNOWN_EVENT"));
   return MILESTONES.filter((name) => names.has(name)).length;
 }
 
 function stepStatus(step: string, events: JobEvent[], state: JobState): "done" | "active" | "pending" | "failed" {
   if (state === "FAILED" && step === MILESTONES[Math.min(completedMilestones(events), MILESTONES.length - 1)]) return "failed";
-  const names = events.map((event) => event.event);
+  const names = events.map((event) => event.event || "UNKNOWN_EVENT");
   if (names.includes(step)) return "done";
   const firstPendingIndex = MILESTONES.findIndex((name) => !names.includes(name));
   return MILESTONES[firstPendingIndex] === step ? "active" : "pending";
@@ -71,7 +71,7 @@ export function JobProgressPanel({
       <div className="job-progress-events">
         {events.slice(-5).map((event) => (
           <EventItem
-            key={`${event.sequence_number}-${event.event}-${event.created_at}`}
+            key={`${event.sequence_number}-${event.event || "UNKNOWN_EVENT"}-${event.created_at}`}
             event={event}
             isSelected={false}
             isLatest={latestEvent === event}

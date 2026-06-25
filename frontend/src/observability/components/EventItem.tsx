@@ -17,7 +17,8 @@ function formatTimestamp(event: JobEvent): string {
   }).format(date);
 }
 
-function eventTone(eventName: string): string {
+function eventTone(eventName?: string | null): string {
+  if (!eventName) return "idle";
   if (eventName.includes("ERROR") || eventName.includes("FAILED")) return "error";
   if (eventName.includes("COMPLETED") || eventName.includes("SUCCESS")) return "success";
   if (eventName.includes("START") || eventName.includes("LLM") || eventName.includes("EXECUTION")) return "processing";
@@ -37,7 +38,8 @@ export function EventItem({
   isReplayActive: boolean;
   onSelect: () => void;
 }) {
-  const tone = eventTone(event.event);
+  const eventName = event.event || "UNKNOWN_EVENT";
+  const tone = eventTone(eventName);
   return (
     <button
       type="button"
@@ -46,7 +48,7 @@ export function EventItem({
     >
       <span className="event-dot" aria-hidden="true" />
       <span className="event-main">
-        <span className="event-name">{event.event}</span>
+        <span className="event-name">{eventName}</span>
         <span className="event-meta">#{event.sequence_number ?? "—"} · {formatTimestamp(event)}</span>
       </span>
       <span className="event-duration">{formatDuration(event.duration_ms)}</span>
