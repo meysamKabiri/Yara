@@ -97,7 +97,7 @@ function firstEntity(interpretation: PendingInterpretation): Record<string, unkn
 
 type UnknownEntityForm = { workerId: string; name: string; type: string; roleDetail: string };
 type EntityOverride = { name: string; type: string; roleDetail?: string | null };
-type ConfirmPayload = { entity_id?: number | null; selected_person_id?: number | null; confirmed?: boolean; create_new?: boolean; name?: string | null; role?: string | null; role_detail?: string | null };
+type ConfirmPayload = { entity_id?: number | null; selected_person_id?: number | null; confirmed?: boolean; create_new?: boolean; name?: string | null; role?: string | null; role_detail?: string | null; amount?: string | null; direction?: FinancialDirection | null; payment_method?: PaymentType | null; description?: string | null; due_date?: string | null; field_updates?: Record<string, unknown> | null };
 
 function textValue(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) return value.trim();
@@ -342,35 +342,34 @@ function App() {
 
   async function confirmFinancialTransaction(
     interpretation: PendingInterpretation,
-    data: { entity_id?: number | null; amount: string; direction: string; payment_method: string; create_new_entity?: boolean; entity_name?: string; project_role?: string },
+    data: { entity_id?: number | null; amount: string; direction: string; payment_method: string; description?: string | null; due_date?: string | null; create_new_entity?: boolean; entity_name?: string; project_role?: string },
   ) {
     if (!activeProjectId) return;
     await runAction("در حال تایید", async () => {
+      const editPayload = {
+        amount: data.amount || null,
+        direction: data.direction ? data.direction as FinancialDirection : null,
+        payment_method: data.payment_method ? data.payment_method as PaymentType : null,
+        description: data.description ?? null,
+        due_date: data.due_date ?? null,
+      };
       if (data.create_new_entity) {
-        await api.updatePendingInterpretation(interpretation.id, {
-          extracted_amount: data.amount || null,
-          financial_direction: data.direction as FinancialDirection,
-          payment_method: data.payment_method as PaymentType,
-        });
         const resolution = await api.confirmPendingInterpretation(interpretation.id, {
           create_new: true,
           name: data.entity_name,
           role: data.project_role,
+          ...editPayload,
         }) as EntityResolutionResult;
         await api.confirmPendingInterpretation(interpretation.id, {
           entity_id: resolution.entity_id,
           confirmed: true,
+          ...editPayload,
         });
       } else {
-        await api.updatePendingInterpretation(interpretation.id, {
-          suggested_entity_id: data.entity_id!,
-          extracted_amount: data.amount || null,
-          financial_direction: data.direction as FinancialDirection,
-          payment_method: data.payment_method as PaymentType,
-        });
         await api.confirmPendingInterpretation(interpretation.id, {
           entity_id: data.entity_id,
           confirmed: true,
+          ...editPayload,
         });
       }
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));

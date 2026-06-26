@@ -236,6 +236,11 @@ export type PendingInterpretationConfirm = {
   role?: string | null;
   role_detail?: string | null;
   field_updates?: Record<string, unknown> | null;
+  amount?: string | null;
+  direction?: FinancialDirection | null;
+  payment_method?: PaymentType | null;
+  description?: string | null;
+  due_date?: string | null;
 };
 
 export type EntityResolutionResult = {

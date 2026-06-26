@@ -1439,6 +1439,7 @@ def _execute_pending_interpretation(
     payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
     _apply_create_new_confirmation_payload(interpretation, payload)
+    _apply_confirmation_edit_payload(interpretation, payload)
     route = _domain_route(interpretation, db=db)
     if route["domain"] == DomainType.SETUP.value and _execution_engine_primary_enabled(
         interpretation
@@ -1457,6 +1458,88 @@ def _execute_pending_interpretation(
     if _execution_engine_primary_enabled(interpretation):
         return _execute_with_execution_engine_primary(db, interpretation, payload)
     return _execute_legacy_interpretation(db, interpretation, payload)
+
+
+def _apply_confirmation_edit_payload(
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> None:
+    if payload.amount is not None:
+        interpretation.extracted_amount = payload.amount
+        _set_structured_financial_value(interpretation, "amount", str(payload.amount))
+    if payload.direction is not None:
+        interpretation.financial_direction = payload.direction
+        _set_structured_financial_value(interpretation, "direction", _structured_direction_value(payload.direction))
+    if payload.payment_method is not None:
+        interpretation.payment_method = payload.payment_method.value
+        _set_structured_financial_value(interpretation, "payment_method", payload.payment_method.value)
+    if payload.description is not None:
+        interpretation.description = payload.description.strip() or None
+    if payload.due_date is not None:
+        interpretation.due_date = payload.due_date.strip() or None
+        _set_structured_financial_value(interpretation, "due_date_text", interpretation.due_date)
+    if isinstance(payload.field_updates, dict) and payload.field_updates:
+        _apply_field_updates_to_pending_entity(interpretation, payload.field_updates)
+
+
+def _set_structured_financial_value(
+    interpretation: PendingInterpretation,
+    key: str,
+    value: Any,
+) -> None:
+    structured = interpretation.structured_interpretation
+    if not isinstance(structured, dict):
+        return
+    financial = structured.get("financial")
+    if not isinstance(financial, dict):
+        financial = {}
+    financial[key] = value
+    structured["financial"] = financial
+    interpretation.structured_interpretation = structured
+
+
+def _structured_direction_value(direction: FinancialDirection) -> str:
+    if direction == FinancialDirection.INCOMING:
+        return "IN"
+    if direction in {
+        FinancialDirection.OUTGOING,
+        FinancialDirection.DEBT,
+        FinancialDirection.DEFERRED,
+    }:
+        return "OUT"
+    return "NONE"
+
+
+def _apply_field_updates_to_pending_entity(
+    interpretation: PendingInterpretation,
+    updates: dict[str, Any],
+) -> None:
+    allowed = {
+        "phone",
+        "account_number",
+        "daily_rate",
+        "notes",
+        "role_detail",
+        "project_role",
+        "type",
+    }
+    clean = {key: value for key, value in updates.items() if key in allowed}
+    if not clean:
+        return
+    entities = list(interpretation.extracted_entities or [{}])
+    entity = dict(entities[0] if entities else {})
+    field_updates = entity.get("field_updates")
+    if not isinstance(field_updates, dict):
+        field_updates = {}
+    field_updates.update(clean)
+    entity.update(clean)
+    if "project_role" in clean:
+        entity["type"] = clean["project_role"]
+    if "type" in clean:
+        entity["project_role"] = clean["type"]
+    entity["field_updates"] = field_updates
+    entities[0] = entity
+    interpretation.extracted_entities = entities
 
 
 def _normalize_confirm_identity_payload(payload: PendingInterpretationConfirm) -> int | None:

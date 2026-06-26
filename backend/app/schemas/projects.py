@@ -358,6 +358,11 @@ class PendingInterpretationConfirm(BaseModel):
     role: str | None = None
     role_detail: str | None = None
     field_updates: dict[str, Any] | None = None
+    amount: Decimal | None = None
+    direction: FinancialDirection | None = None
+    payment_method: PaymentType | None = None
+    description: str | None = None
+    due_date: str | None = None
 
 
 class EntityResolutionResult(BaseModel):

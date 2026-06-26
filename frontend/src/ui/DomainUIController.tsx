@@ -50,7 +50,7 @@ interface DomainUIControllerProps {
   onConfirmSetupEntities: (interpretation: PendingInterpretation, entities: SetupEntity[]) => Promise<void>;
   onConfirmFinancialTransaction: (
     interpretation: PendingInterpretation,
-    data: { entity_id?: number | null; amount: string; direction: string; payment_method: string; create_new_entity?: boolean; entity_name?: string; project_role?: string },
+    data: { entity_id?: number | null; amount: string; direction: string; payment_method: string; description?: string | null; due_date?: string | null; create_new_entity?: boolean; entity_name?: string; project_role?: string },
   ) => Promise<void>;
   onConfirmMixed: (
     interpretation: PendingInterpretation,

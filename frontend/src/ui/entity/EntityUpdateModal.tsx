@@ -408,10 +408,10 @@ export function EntityUpdateModal({
           onClick={handleConfirm}
           disabled={isLoading || !canConfirm}
         >
-          تایید
+          تایید و ثبت
         </button>
         <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          حذف
+          نادیده گرفتن
         </button>
       </div>
     </article>

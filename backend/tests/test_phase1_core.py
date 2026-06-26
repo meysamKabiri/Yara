@@ -1926,6 +1926,99 @@ def test_edit_pending_interpretation_executes_edited_values(
     assert response["payments"][0]["amount"] != "100000000.00"
 
 
+def test_phase2b_pending_financial_does_not_update_totals_until_confirmed(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "علی احمدی", "OTHER")
+
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    assert interpretation["status"] == "PENDING"
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    summary_before = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary_before["total_paid_out"] == "0.00"
+
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+
+    assert response.status_code == 200
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    summary_after = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert payments[0]["amount"] == "5000000.00"
+    assert summary_after["total_paid_out"] == "5000000.00"
+
+
+def test_phase2b_discarded_financial_does_not_update_totals(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "علی احمدی", "OTHER")
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/discard")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "DISCARDED"
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_paid_out"] == "0.00"
+
+
+def test_phase2b_confirm_payload_amount_edit_changes_saved_amount(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "علی احمدی", "OTHER")
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={
+            "entity_id": worker["id"],
+            "confirmed": True,
+            "amount": "7000000",
+            "direction": "OUTGOING",
+            "payment_method": "CASH",
+            "description": "edited amount on confirm",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["payments"][0]["amount"] == "7000000.00"
+    assert body["payments"][0]["amount"] != "5000000.00"
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_paid_out"] == "7000000.00"
+
+
+def test_phase2b_confirm_payload_entity_edit_saves_against_selected_entity(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    ali = create_worker(client, project["id"], "علی احمدی", "OTHER")
+    hadi = create_worker(client, project["id"], "هادی پور", "VENDOR")
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={
+            "entity_id": hadi["id"],
+            "confirmed": True,
+            "amount": "5000000",
+            "direction": "OUTGOING",
+            "payment_method": "CASH",
+        },
+    )
+
+    assert response.status_code == 200
+    payment = response.json()["payments"][0]
+    assert payment["entity_id"] == hadi["id"]
+    assert payment["entity_id"] != ali["id"]
+
+
 def test_multiple_extracted_actions_create_independent_interpretations(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
