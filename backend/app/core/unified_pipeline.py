@@ -501,6 +501,8 @@ def _process_split_fallback_chunks(
     if not interpretations:
         return []
 
+    _resolve_same_input_entities_in_pending_interpretations(interpretations)
+
     cache.set_timing("llm_v2_duration_ms", llm_duration_ms)
     cache.set_timing("legacy_duration_ms", legacy_duration_ms)
     cache.set_timing("governance_duration_ms", 0.0)
@@ -588,6 +590,70 @@ def _llm_v2_event_belongs_to_chunk(interpretation: Any, chunk: str) -> bool:
         return str(quantity) in chunk_normalized
 
     return chunk_amount is None and interpretation_amount is None
+
+
+def _resolve_same_input_entities_in_pending_interpretations(
+    interpretations: list[PendingInterpretation],
+) -> None:
+    token_map: dict[str, list[tuple[str, str]]] = {}
+    for pi in interpretations:
+        entities = _get_pi_entities(pi)
+        if not entities:
+            continue
+        for entity in entities:
+            name = (entity.get("name") or "").strip()
+            if not name:
+                continue
+            tokens = name.split()
+            role = entity.get("project_role") or entity.get("type") or ""
+            is_full = len(tokens) >= 2 or (role not in ("", "OTHER"))
+            if is_full:
+                for token in tokens:
+                    token_map.setdefault(token, [])
+                    entry = (name, role)
+                    if entry not in token_map[token]:
+                        token_map[token].append(entry)
+    unambiguous: dict[str, tuple[str, str]] = {}
+    for token, candidates in token_map.items():
+        if len(candidates) == 1:
+            unambiguous[token] = candidates[0]
+    for pi in interpretations:
+        entities = _get_pi_entities(pi)
+        if not entities:
+            continue
+        si = pi.structured_interpretation
+        si_entities: list[dict] | None = None
+        if isinstance(si, dict):
+            raw = si.get("entities")
+            if isinstance(raw, list):
+                si_entities = raw
+        for i, entity in enumerate(entities):
+            name = (entity.get("name") or "").strip()
+            if not name:
+                continue
+            tokens = name.split()
+            if len(tokens) == 1 and name in unambiguous:
+                full_name, full_role = unambiguous[name]
+                entity["name"] = full_name
+                current_role = entity.get("project_role") or entity.get("type") or ""
+                if current_role in ("", "OTHER"):
+                    entity["project_role"] = full_role
+                    entity["type"] = full_role
+                if si_entities is not None and i < len(si_entities):
+                    si_entity = si_entities[i]
+                    if isinstance(si_entity, dict):
+                        si_entity["name"] = full_name
+                        if si_entity.get("project_role") in ("", "OTHER", None):
+                            si_entity["project_role"] = full_role
+
+
+def _get_pi_entities(pi: PendingInterpretation) -> list[dict] | None:
+    raw = pi.extracted_entities
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return [raw]
+    return None
 
 
 def _retarget_interpretation_to_raw_text(
