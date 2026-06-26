@@ -2,10 +2,10 @@ x-backend-env: &backend-env
   SERVICE_NAME: api
   DATABASE_URL: postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev
   REDIS_URL: redis://redis:6379
-  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
   OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
   OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
-  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-200}
+  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-120}
   OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
   PYTHONUNBUFFERED: "1"
 
@@ -13,10 +13,10 @@ x-worker-env: &worker-env
   SERVICE_NAME: worker
   DATABASE_URL: postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev
   REDIS_URL: redis://redis:6379
-  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
   OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
   OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
-  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-200}
+  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-120}
   OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
   PYTHONUNBUFFERED: "1"
 
@@ -51,6 +51,8 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: yara_ollama
+    profiles:
+      - docker-ollama
     ports:
       - "11434:11434"
     volumes:

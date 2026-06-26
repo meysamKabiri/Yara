@@ -12,17 +12,14 @@ from sqlalchemy.orm import Session
 from app.core.observability_service import track_event, track_timed_event
 from app.core.trace_context import get_trace_id
 from app.services.persian_money_engine import normalize_text, parse_persian_money
-from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
+from app.services.prompts.llm_v2_prompt import build_llm_v2_prompt
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
-OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "200"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "120"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
-
-QWEN_JSON_MODE_PREFIX = """/no_think
-Return only valid JSON. Do not include reasoning, explanations, markdown, or thinking text."""
 
 
 def _emit_event(db: Session | None, event_name, payload=None, duration_ms=None):
@@ -34,6 +31,23 @@ def _emit_event(db: Session | None, event_name, payload=None, duration_ms=None):
             track_event(db=db, trace_id=trace_id, event_name=event_name, payload=payload, duration_ms=duration_ms)
     except Exception:
         pass
+
+
+def _ollama_stats(body: dict[str, Any]) -> dict[str, int | float | None]:
+    stats: dict[str, int | float | None] = {}
+    for key in [
+        "total_duration",
+        "load_duration",
+        "prompt_eval_count",
+        "prompt_eval_duration",
+        "eval_count",
+        "eval_duration",
+    ]:
+        value = body.get(key)
+        stats[key] = value if isinstance(value, int | float) else None
+        if key.endswith("_duration") and isinstance(value, int | float):
+            stats[f"{key}_ms"] = round(value / 1_000_000, 1)
+    return stats
 
 VALID_INTENTS = {"SET_ROLE", "SETUP", "WORK", "FINANCIAL", "NOTE", "DOCUMENT"}
 VALID_ACTIONS = {
@@ -203,18 +217,21 @@ class LLMv2Interpreter:
             return self._fallback(raw_text, "shadow interpreter failed")
 
     def _generate(self, raw_text: str, project_id: int, db: Session | None = None) -> Any:
+        prompt, prompt_domain = build_llm_v2_prompt(raw_text, project_id)
         _emit_event(db, "LLM_REQUEST_STARTED", {
             "model": OLLAMA_MODEL,
             "timeout": OLLAMA_TIMEOUT_SECONDS,
             "num_predict": OLLAMA_NUM_PREDICT,
-            "prompt_length": len(raw_text),
+            "prompt_length": len(prompt),
+            "raw_text_length": len(raw_text),
+            "prompt_domain": prompt_domain,
         })
         ollama_start = perf_counter()
 
         payload = json.dumps(
             {
                 "model": OLLAMA_MODEL,
-                "prompt": f"{QWEN_JSON_MODE_PREFIX}\n\n{LLM_V2_PROMPT}\n\nProject ID: {project_id}\nNote:\n{raw_text}",
+                "prompt": prompt,
                 "stream": False,
                 "format": "json",
                 "think": False,
@@ -250,11 +267,16 @@ class LLMv2Interpreter:
                 time.sleep(delay)
         ollama_ms = (perf_counter() - ollama_start) * 1000
 
+        response_text = str(ollama_body.get("response", ""))
+        thinking_text = str(ollama_body.get("thinking", ""))
+        ollama_stats = _ollama_stats(ollama_body)
         _emit_event(db, "OLLAMA_RESPONSE_RECEIVED", {
             "model": OLLAMA_MODEL,
-            "response_length": len(str(ollama_body.get("response", ""))),
-            "thinking_length": len(str(ollama_body.get("thinking", ""))),
-            "total_duration": ollama_body.get("total_duration"),
+            "prompt_domain": prompt_domain,
+            "prompt_length": len(prompt),
+            "response_length": len(response_text),
+            "thinking_length": len(thinking_text),
+            **ollama_stats,
         }, duration_ms=ollama_ms)
 
         parse_start = perf_counter()
@@ -268,9 +290,14 @@ class LLMv2Interpreter:
         }, duration_ms=parse_ms)
 
         self._last_timings = {
-            "prompt_length": len(raw_text),
+            "prompt_length": len(prompt),
+            "raw_text_length": len(raw_text),
+            "response_length": len(response_text),
+            "thinking_length": len(thinking_text),
+            "prompt_domain": prompt_domain,
             "ollama_http_duration_ms": round(ollama_ms, 1),
             "json_parse_duration_ms": round(parse_ms, 1),
+            **ollama_stats,
         }
         return parsed
 
