@@ -71,6 +71,7 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         if timings.get("llm_v2_duration_ms", 0.0) > 0:
             track_event(db=db, trace_id=trace_id, event_name="LLM_COMPLETED", payload={"project_id": project_id, "interpretation_count": len(interpretations), **timings, "pipeline_duration_ms": round(pipeline_duration_ms, 1)}, duration_ms=pipeline_duration_ms)
         llm_finished = True
+        fast_path_payload = _fast_path_payload(interpretations, timings)
 
         result = {
             "interpretations": [
@@ -90,12 +91,13 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         commit_start = perf_counter()
         db.commit()
         track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.DONE.value}, duration_ms=(perf_counter() - commit_start) * 1000)
-        track_event(db=db, trace_id=trace_id, event_name="JOB_COMPLETED", payload={"project_id": project_id, "status": NaturalInputJobStatus.DONE.value})
+        track_event(db=db, trace_id=trace_id, event_name="JOB_COMPLETED", payload={"project_id": project_id, "status": NaturalInputJobStatus.DONE.value, **fast_path_payload})
         track_event(db=db, trace_id=trace_id, event_name="job.completed", payload={
             "job_id": job_id,
             "project_id": project_id,
             "interpretation_count": len(interpretations),
             "pipeline_duration_ms": round(pipeline_duration_ms, 1),
+            **fast_path_payload,
         })
         return {"job_id": job_id, "status": "DONE", "result": result, "trace_id": job.trace_id}
 
@@ -158,4 +160,33 @@ def _failed_llm_result(request_cache) -> dict | None:
     for result in request_cache.llm_results.values():
         if isinstance(result, dict) and result.get("_llm_v2_failed"):
             return result
+    return None
+
+
+def _fast_path_payload(interpretations: list, timings: dict) -> dict:
+    if not interpretations or timings.get("llm_v2_duration_ms", 0.0) > 0:
+        return {}
+    fast_path_types = {_interpretation_fast_path_type(interpretation) for interpretation in interpretations}
+    fast_path_types.discard(None)
+    if not fast_path_types:
+        return {}
+    if len(fast_path_types) == 1:
+        return {"fast_path_type": next(iter(fast_path_types)), "skipped_llm": True}
+    return {"fast_path_types": sorted(fast_path_types), "skipped_llm": True}
+
+
+def _interpretation_fast_path_type(interpretation) -> str | None:
+    if (
+        interpretation.canonical_event_type == "FINANCIAL_EVENT"
+        and interpretation.semantic_action == "PAYMENT"
+    ):
+        return "FINANCIAL_PAYMENT"
+    entities = interpretation.extracted_entities or []
+    first = entities[0] if entities and isinstance(entities[0], dict) else {}
+    updates = first.get("field_updates") if isinstance(first, dict) else None
+    if isinstance(updates, dict):
+        if updates.get("phone"):
+            return "PHONE_UPDATE"
+        if updates.get("account_number"):
+            return "ACCOUNT_UPDATE"
     return None

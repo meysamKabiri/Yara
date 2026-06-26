@@ -102,6 +102,37 @@ def process_input(
         )
         return [fast_profile_update]
 
+    fast_financial_payment = None if len(chunks) > 1 else _build_financial_payment_fast_path_interpretation(
+        project_id,
+        text,
+        entity_context,
+    )
+    if fast_financial_payment is not None:
+        _emit_fast_path_started(db, fast_financial_payment)
+        db.add(fast_financial_payment)
+        db.commit()
+        db.refresh(fast_financial_payment)
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _emit_fast_path_matched(db, fast_financial_payment)
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "fast_financial_payment",
+            "fast_path_type": _fast_path_type(fast_financial_payment),
+            "skipped_llm": True,
+        })
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_financial_payment]
+
     fast_setup = None if len(chunks) > 1 else _build_role_assignment_interpretation(project_id, text, entity_context)
     if fast_setup is not None:
         db.add(fast_setup)
@@ -319,6 +350,14 @@ def _process_split_fallback_chunks(
             _retarget_interpretation_to_raw_text(profile_update, raw_text, chunk)
             interpretations.append(profile_update)
             _emit_fast_path_matched(db, profile_update)
+            continue
+
+        fast_financial_payment = _build_financial_payment_fast_path_interpretation(project_id, chunk, entity_context)
+        if fast_financial_payment is not None:
+            _emit_fast_path_started(db, fast_financial_payment)
+            _retarget_interpretation_to_raw_text(fast_financial_payment, raw_text, chunk)
+            interpretations.append(fast_financial_payment)
+            _emit_fast_path_matched(db, fast_financial_payment)
             continue
 
         chunk_llm_start = perf_counter()
@@ -937,6 +976,154 @@ def _profile_update_structured_interpretation(
     }
 
 
+_PERSIAN_AMOUNT_MARKER = (
+    r"(?:\d|[۰-۹]|[٠-٩]|یک|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|"
+    r"یازده|دوازده|سیزده|چهارده|پانزده|شانزده|هفده|هجده|نوزده|"
+    r"بیست|سی|چهل|پنجاه|شصت|هفتاد|هشتاد|نود|صد|هزار|میلیون|میلیارد)"
+)
+
+
+def _build_financial_payment_fast_path_interpretation(
+    project_id: int,
+    raw_text: str,
+    entity_context: list[Worker],
+) -> PendingInterpretation | None:
+    normalized = normalize_text(raw_text)
+    amount = parse_persian_money(raw_text)
+    if amount is None:
+        return None
+    if any(separator in normalized for separator in [".", "۔", "؟", "!", "؛"]):
+        return None
+    if any(term in normalized for term in ["پروژه", "حساب پروژه"]):
+        return None
+    if detect_purchase_payment(raw_text) is not None or any(term in normalized for term in ["خرید", "خریدم", "خرید کردم"]):
+        return None
+
+    direction = _financial_payment_fast_path_direction(normalized)
+    if direction is None:
+        return None
+    name = _financial_payment_fast_path_name(normalized, direction)
+    if name is None:
+        return None
+
+    role = _financial_payment_fast_path_role(normalized, direction)
+    payment_method = _financial_payment_fast_path_payment_method(normalized)
+    entity: dict[str, Any] = {
+        "name": name,
+        "kind": "PERSON",
+        "project_role": role,
+        "role_detail": None,
+        "type": role,
+    }
+    resolution = resolve_candidates(name, entity_context)
+    if resolution["candidates"]:
+        entity["requires_confirmation"] = True
+        entity["candidate_matches"] = resolution["candidates"]
+
+    financial_direction = (
+        FinancialDirection.OUTGOING
+        if direction == "OUT"
+        else FinancialDirection.INCOMING
+    )
+    action = "PAYMENT_OUT" if direction == "OUT" else "PAYMENT_IN"
+    structured = {
+        "intent": "FINANCIAL",
+        "action": action,
+        "entities": [
+            {
+                **entity,
+                "phone": None,
+                "account_number": None,
+                "daily_rate": None,
+                "notes": None,
+                "field_updates": None,
+            }
+        ],
+        "financial": {
+            "amount": amount,
+            "direction": direction,
+            "payment_method": payment_method,
+            "due_date_text": None,
+        },
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": None},
+        "confidence": 0.96,
+        "ambiguity": False,
+        "missing_fields": [],
+        "reasoning_summary": "deterministic financial payment fast path",
+    }
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type="FINANCIAL_EVENT",
+        semantic_action="PAYMENT",
+        suggested_entity_id=None,
+        matched_input_text=None,
+        extracted_entities=[entity],
+        extracted_amount=Decimal(str(amount)),
+        extracted_quantity=None,
+        payment_method=payment_method,
+        financial_direction=financial_direction,
+        due_date=None,
+        description=raw_text,
+        confidence=0.96,
+        structured_interpretation=structured,
+        status=PendingInterpretationStatus.PENDING,
+    )
+
+
+def _financial_payment_fast_path_direction(normalized: str) -> str | None:
+    if "به " in normalized and any(
+        phrase in normalized
+        for phrase in [" دادم", " پول دادم", " پرداخت کردم", " پرداختم", " کارت زدم", " واریز کردم"]
+    ):
+        return "OUT"
+    if "از " in normalized and " گرفتم" in normalized:
+        return "IN"
+    if " واریز کرد" in normalized:
+        if not normalized.strip().startswith("به "):
+            return "IN"
+    return None
+
+
+def _financial_payment_fast_path_name(normalized: str, direction: str) -> str | None:
+    if direction == "OUT":
+        match = re.search(rf"(?:^|\s)به\s+(?P<name>.+?)\s+{_PERSIAN_AMOUNT_MARKER}", normalized)
+    elif "از " in normalized and " گرفتم" in normalized:
+        match = re.search(rf"(?:^|\s)از\s+(?P<name>.+?)\s+{_PERSIAN_AMOUNT_MARKER}", normalized)
+    else:
+        match = re.search(rf"^(?P<name>.+?)\s+{_PERSIAN_AMOUNT_MARKER}", normalized)
+    if match is None:
+        return None
+    name = re.sub(r"\s+", " ", match.group("name")).strip(" ،,")
+    if not name or name in {"به", "از"}:
+        return None
+    if any(term in name for term in ["پروژه", "حساب", "کارت"]):
+        return None
+    return name
+
+
+def _financial_payment_fast_path_role(normalized: str, direction: str) -> str:
+    if any(term in normalized for term in ["فروشنده", "vendor"]):
+        return "VENDOR"
+    if any(term in normalized for term in ["کارفرما", "مالک", "client", "owner"]):
+        return "CLIENT"
+    if direction == "IN":
+        return "CLIENT"
+    return "OTHER"
+
+
+def _financial_payment_fast_path_payment_method(normalized: str) -> str | None:
+    bank_signals = ["حساب", "کارت", "واریز", "انتقال", "بانکی"]
+    if any(signal in normalized for signal in bank_signals):
+        return PaymentType.BANK_TRANSFER.value
+    if any(signal in normalized for signal in ["چک", "سفته"]):
+        return PaymentType.CHECK.value
+    if any(signal in normalized for signal in ["نقدی", " پول دادم", " دادم", " گرفتم"]):
+        return PaymentType.CASH.value
+    return None
+
+
 def _emit_fast_path_started(db: Session, interpretation: PendingInterpretation) -> None:
     _emit_event(db, "FAST_PATH_STARTED", {
         "fast_path_type": _fast_path_type(interpretation),
@@ -952,6 +1139,11 @@ def _emit_fast_path_matched(db: Session, interpretation: PendingInterpretation) 
 
 
 def _fast_path_type(interpretation: PendingInterpretation) -> str | None:
+    if (
+        interpretation.canonical_event_type == "FINANCIAL_EVENT"
+        and interpretation.semantic_action == "PAYMENT"
+    ):
+        return "FINANCIAL_PAYMENT"
     entities = interpretation.extracted_entities or []
     first = entities[0] if entities and isinstance(entities[0], dict) else {}
     updates = first.get("field_updates") if isinstance(first, dict) else None

@@ -220,6 +220,121 @@ def test_phone_update_uses_fast_path_without_llm(client: TestClient, monkeypatch
     assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
 
 
+def test_outgoing_payment_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("financial payment fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "به علی احمدی 5 میلیون دادم"},
+        headers={"X-Trace-Id": "trace-fast-payment-out"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    structured = interpretation["structured_interpretation"]
+    assert job["status"] == "DONE"
+    assert len(job["result"]["interpretations"]) == 1
+    assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert interpretation["semantic_action"] == "PAYMENT"
+    assert interpretation["financial_direction"] == "OUTGOING"
+    assert interpretation["extracted_amount"] == "5000000.00"
+    assert interpretation["payment_method"] != "BANK_TRANSFER"
+    assert entity["name"] == "علی احمدی"
+    assert entity["project_role"] == "OTHER"
+    assert structured["action"] == "PAYMENT_OUT"
+    assert structured["entities"][0]["project_role"] == "OTHER"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-payment-out", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    completed_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "JOB_COMPLETED")
+    assert fast_event["payload"]["fast_path_type"] == "FINANCIAL_PAYMENT"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert completed_event["payload"]["fast_path_type"] == "FINANCIAL_PAYMENT"
+    assert completed_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "LLM_REQUEST_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+    assert "LLM_COMPLETED" not in event_names
+
+
+def test_incoming_payment_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("financial payment fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "میثم 300 میلیون واریز کرد"},
+        headers={"X-Trace-Id": "trace-fast-payment-in"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    assert job["status"] == "DONE"
+    assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert interpretation["semantic_action"] == "PAYMENT"
+    assert interpretation["financial_direction"] == "INCOMING"
+    assert interpretation["extracted_amount"] == "300000000.00"
+    assert interpretation["payment_method"] == "BANK_TRANSFER"
+    assert entity["name"] == "میثم"
+    assert entity["project_role"] == "CLIENT"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-payment-in", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    assert fast_event["payload"]["fast_path_type"] == "FINANCIAL_PAYMENT"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+
+
+def test_bank_transfer_wording_uses_bank_transfer_fast_path(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("financial payment fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "به علی احمدی 5 میلیون کارت زدم"},
+        headers={"X-Trace-Id": "trace-fast-payment-card"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    assert job["status"] == "DONE"
+    assert interpretation["financial_direction"] == "OUTGOING"
+    assert interpretation["extracted_amount"] == "5000000.00"
+    assert interpretation["payment_method"] == "BANK_TRANSFER"
+    assert interpretation["extracted_entities"][0]["project_role"] == "OTHER"
+
+
 def test_worker_persists_done_result_and_links_trace_job_id(
     client: TestClient,
     monkeypatch,
