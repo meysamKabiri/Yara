@@ -25,6 +25,7 @@ import { JobDetailPage } from "./observability/pages/JobDetailPage";
 import { JobsPage } from "./observability/pages/JobsPage";
 import { toJobState, useNaturalInputJob } from "./observability/hooks/useNaturalInputJob";
 import { DomainUIController } from "./ui/DomainUIController";
+import { buildConfirmPayload, exactNeedsSelectionEntityId, normalizeNeedsSelection } from "./ui/confirmPayload";
 import { SetupEntity } from "./types/domain";
 
 const exampleInputs = [
@@ -133,6 +134,19 @@ function entityTypeFromRecord(entity: Record<string, unknown>): string {
   if (candidate === "SKILLED" || candidate === "SKILLED_WORKER") return "SKILLED_WORKER";
   if (candidate === "DAILY_WORKER" || candidate === "WORKER") return "DAILY_WORKER";
   return "OTHER";
+}
+
+async function confirmPendingWithSelectionRetry(
+  interpretation: PendingInterpretation,
+  entityId: number | null | undefined,
+) {
+  try {
+    await api.confirmPendingInterpretation(interpretation.id, buildConfirmPayload(entityId ?? null));
+  } catch (err) {
+    const exactCandidateId = exactNeedsSelectionEntityId(normalizeNeedsSelection(err));
+    if (!exactCandidateId) throw err;
+    await api.confirmPendingInterpretation(interpretation.id, buildConfirmPayload(exactCandidateId));
+  }
 }
 
 
@@ -420,10 +434,22 @@ function App() {
 
   async function confirmEntityUpdateAction(
     interpretation: PendingInterpretation,
-    data: { entityId?: number | null; name: string; phone: string | null; accountNumber: string | null; dailyRate: string | null; role: string; roleDetail: string | null; create_new_entity?: boolean; entity_name?: string; project_role?: string; field_updates?: Record<string, unknown> },
+    data: { entityId?: number | null; name: string; phone: string | null; accountNumber: string | null; dailyRate: string | null; role: string; roleDetail: string | null; create_new_entity?: boolean; entity_name?: string; project_role?: string; field_updates?: Record<string, unknown>; _skipApiConfirm?: boolean },
   ) {
     if (!activeProjectId) return;
     await runAction("در حال تایید", async () => {
+      // If the modal already confirmed the interpretation (NEEDS_SELECTION path),
+      // just do cleanup without re-confirming the API
+      if (data._skipApiConfirm) {
+        setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
+        setNaturalInputJobId(null);
+        await loadProjectData(activeProjectId);
+        await loadProjectFinancials(projects);
+        setSuccessMessage("ثبت شد");
+        window.setTimeout(() => setSuccessMessage(null), 2600);
+        return;
+      }
+
       const updates: Record<string, string | null> = {};
       if (data.phone) updates.phone = data.phone;
       if (data.accountNumber) updates.account_number = data.accountNumber;
@@ -448,10 +474,10 @@ function App() {
             },
           ],
         });
-        await api.confirmPendingInterpretation(interpretation.id, {
-          entity_id: data.entityId,
-          confirmed: true,
-        });
+        await confirmPendingWithSelectionRetry(
+          interpretation,
+          data.entityId ?? interpretation.suggested_entity_id ?? null,
+        );
       }
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
       setNaturalInputJobId(null);
