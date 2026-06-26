@@ -71,6 +71,9 @@ type ProjectDetailPageProps = {
   onVoicePlaceholder: () => void;
   onAttachPlaceholder: () => void;
   successMessage: string | null;
+  onConfirmPending: (interpretation: PendingInterpretation) => void;
+  onEditPending: (interpretation: PendingInterpretation) => void;
+  onDiscardPending: (interpretation: PendingInterpretation) => void;
 };
 
 function money(value: string | number | null | undefined): string {
@@ -149,6 +152,36 @@ function InvoiceRow({ invoice, workerMap }: { invoice: Invoice; workerMap: Recor
   );
 }
 
+function pendingTitle(pi: PendingInterpretation): string {
+  if (pi.semantic_action === "SET_ROLE") return "تعریف طرف حساب";
+  if (pi.semantic_action === "ENTITY_UPDATE" || pi.domain_route?.domain === "ENTITY_UPDATE") return "به‌روزرسانی اطلاعات فرد";
+  if (pi.canonical_event_type === "FINANCIAL_EVENT") return "ثبت مالی";
+  if (pi.semantic_action === "NOTE") return "یادداشت";
+  return "مورد در انتظار بررسی";
+}
+
+function pendingEntityName(pi: PendingInterpretation): string | null {
+  const entity = pi.extracted_entities?.[0];
+  return typeof entity?.name === "string" && entity.name.trim() ? entity.name.trim() : null;
+}
+
+function pendingFieldUpdates(pi: PendingInterpretation): string[] {
+  const entity = pi.extracted_entities?.[0] ?? {};
+  const updates = typeof entity.field_updates === "object" && entity.field_updates !== null
+    ? entity.field_updates as Record<string, unknown>
+    : {};
+  const parts: string[] = [];
+  const phone = updates.phone ?? entity.phone;
+  const account = updates.account_number ?? entity.account_number;
+  const dailyRate = updates.daily_rate ?? entity.daily_rate;
+  const notes = updates.notes ?? entity.notes;
+  if (phone) parts.push(`شماره تماس: ${String(phone)}`);
+  if (account) parts.push(`شماره حساب: ${String(account)}`);
+  if (dailyRate) parts.push(`دستمزد روزانه: ${money(String(dailyRate))}`);
+  if (notes) parts.push(`توضیحات: ${String(notes)}`);
+  return parts;
+}
+
 function TabBar({ tabs, activeTab, onTabChange }: { tabs: { key: TabKey; label: string; count?: number }[]; activeTab: TabKey; onTabChange: (key: TabKey) => void }) {
   return (
     <nav className="detail-tabs" role="tablist">
@@ -173,6 +206,7 @@ export function ProjectDetailPage({
   project, summary, workers, pendingInterpretations, workLogs, payments, invoices, history,
   rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
   onVoicePlaceholder, onAttachPlaceholder, successMessage,
+  onConfirmPending, onEditPending, onDiscardPending,
 }: ProjectDetailPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("summary");
 
@@ -406,19 +440,34 @@ export function ProjectDetailPage({
       {activeTab === "pending" && (
         <div className="detail-tab-content">
           {pending.length === 0 ? (
-            <p className="empty-state">موردی در انتظار تایید نیست.</p>
+            <p className="empty-state">بدون مورد در انتظار تایید</p>
           ) : (
             <div className="visibility-pending-list">
               {pending.map((pi) => (
                 <article key={pi.id} className="visibility-pending-card">
                   <div className="vpc-head">
-                    <span className="pending-text">{pi.raw_input_text.length > 80 ? pi.raw_input_text.slice(0, 80) + "..." : pi.raw_input_text}</span>
-                    <mark className="role-pill">{pi.semantic_action === "SET_ROLE" ? "افزودن فرد" : pi.canonical_event_type === "FINANCIAL_EVENT" ? "مالی" : pi.canonical_event_type}</mark>
+                    <strong>{pendingTitle(pi)}</strong>
+                    <mark className="role-pill">در انتظار تایید</mark>
                   </div>
+                  <p className="pending-text">{pi.matched_input_text || pi.description || pi.raw_input_text}</p>
                   <div className="vpc-meta">
-                    <span>{date(pi.created_at)}</span>
+                    {pendingEntityName(pi) && <span>فرد: {pendingEntityName(pi)}</span>}
                     {pi.extracted_amount && <span>مبلغ: {money(pi.extracted_amount)}</span>}
                     {pi.financial_direction && <span>{DIRECTION_LABELS[pi.financial_direction] ?? pi.financial_direction}</span>}
+                    {pi.payment_method && <span>{PAYMENT_TYPE_LABELS[pi.payment_method] ?? pi.payment_method}</span>}
+                    {pendingFieldUpdates(pi).map((part) => <span key={part}>{part}</span>)}
+                    <span>{date(pi.created_at)}</span>
+                  </div>
+                  <div className="modal-actions pending-actions">
+                    <button className="primary-action" type="button" onClick={() => onConfirmPending(pi)} disabled={isLoading}>
+                      تایید
+                    </button>
+                    <button type="button" onClick={() => onEditPending(pi)} disabled={isLoading}>
+                      ویرایش
+                    </button>
+                    <button className="danger-action" type="button" onClick={() => onDiscardPending(pi)} disabled={isLoading}>
+                      نادیده گرفتن
+                    </button>
                   </div>
                 </article>
               ))}

@@ -58,6 +58,7 @@ interface DomainUIControllerProps {
     setupEntities: SetupEntity[],
     financialData: { entity_id: number; amount: string; direction: string; payment_method: string },
   ) => Promise<void>;
+  onClose?: () => void;
   onConfirmEntityUpdate: (
     interpretation: PendingInterpretation,
     data: { entityId?: number | null; name: string; phone: string | null; accountNumber: string | null; dailyRate: string | null; role: string; roleDetail: string | null; create_new_entity?: boolean; entity_name?: string; project_role?: string; field_updates?: Record<string, unknown> },
@@ -423,6 +424,7 @@ export function DomainUIController({
   onConfirmSetupEntities,
   onConfirmFinancialTransaction,
   onConfirmMixed,
+  onClose,
   onConfirmEntityUpdate,
 }: DomainUIControllerProps) {
 
@@ -508,6 +510,11 @@ export function DomainUIController({
               </>
             )}
           </div>
+          {onClose && safeInterpretations.length > 0 && (
+            <button className="secondary-action" type="button" onClick={onClose}>
+              بعدا
+            </button>
+          )}
         </div>
 
         {!isJobDone && isJobActive && (

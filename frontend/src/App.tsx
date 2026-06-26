@@ -25,7 +25,7 @@ import { JobDetailPage } from "./observability/pages/JobDetailPage";
 import { JobsPage } from "./observability/pages/JobsPage";
 import { toJobState, useNaturalInputJob } from "./observability/hooks/useNaturalInputJob";
 import { DomainUIController } from "./ui/DomainUIController";
-import { buildConfirmPayload, exactNeedsSelectionEntityId, normalizeNeedsSelection } from "./ui/confirmPayload";
+import { buildConfirmPayload, exactEntityIdByName, exactNeedsSelectionEntityId, normalizeNeedsSelection } from "./ui/confirmPayload";
 import { SetupEntity } from "./types/domain";
 
 const exampleInputs = [
@@ -175,6 +175,8 @@ function App() {
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [pendingTabEditingId, setPendingTabEditingId] = useState<number | null>(null);
+  const [reviewModalDismissed, setReviewModalDismissed] = useState(true);
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
@@ -317,6 +319,7 @@ function App() {
     await runAction("در حال ارسال ورودی", async () => {
       setSuccessMessage(null);
       setPendingInterpretations([]);
+      setReviewModalDismissed(false);
       const job = await api.processNaturalInput(activeProjectId, submittedText);
       setNaturalInputJobId(job.job_id);
       setNaturalText("");
@@ -380,11 +383,12 @@ function App() {
           ...editPayload,
         });
       } else {
-        await api.confirmPendingInterpretation(interpretation.id, {
-          entity_id: data.entity_id,
+        const confirmPayload: ConfirmPayload = {
           confirmed: true,
           ...editPayload,
-        });
+        };
+        if (typeof data.entity_id === "number") confirmPayload.entity_id = data.entity_id;
+        await api.confirmPendingInterpretation(interpretation.id, confirmPayload);
       }
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
       setNaturalInputJobId(null);
@@ -499,14 +503,15 @@ function App() {
       await api.confirmPendingInterpretation(interpretation.id, { entity_id: selectedId, confirmed: true });
       return;
     }
-    const resolution = await api.confirmPendingInterpretation(interpretation.id, {
+    const resolutionPayload: ConfirmPayload = {
       create_new: payload.create_new,
       name: payload.name,
       role: payload.role,
       role_detail: payload.role_detail,
       selected_person_id: payload.selected_person_id ?? null,
-      entity_id: payload.entity_id ?? null,
-    });
+    };
+    if (payload.entity_id !== undefined) resolutionPayload.entity_id = payload.entity_id;
+    const resolution = await api.confirmPendingInterpretation(interpretation.id, resolutionPayload);
     if (!isEntityResolutionResult(resolution)) return;
     await api.confirmPendingInterpretation(interpretation.id, { entity_id: resolution.entity_id, confirmed: true });
   }
@@ -626,6 +631,50 @@ function App() {
     });
   }
 
+  async function discardPendingFromDetail(interpretation: PendingInterpretation) {
+    if (!window.confirm("این مورد نادیده گرفته شود؟")) return;
+    await discardInterpretation(interpretation);
+    setSuccessMessage("نادیده گرفته شد");
+    window.setTimeout(() => setSuccessMessage(null), 2600);
+  }
+
+  async function confirmPendingFromDetail(interpretation: PendingInterpretation) {
+    const entity = firstEntity(interpretation);
+    const updates = typeof entity.field_updates === "object" && entity.field_updates !== null
+      ? entity.field_updates as Record<string, unknown>
+      : {};
+    const entityName = textValue(entity.name) ?? "نامشخص";
+    const role = entityTypeFromRecord(entity);
+    const exactEntityId = interpretation.suggested_entity_id ?? exactEntityIdByName(entityName, workers);
+
+    if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
+      await confirmInterpretation(interpretation, exactEntityId ? { entity_id: exactEntityId } : {});
+      return;
+    }
+    if (interpretation.semantic_action === "ENTITY_UPDATE" || interpretation.domain_route?.domain === "ENTITY_UPDATE") {
+      await confirmEntityUpdateAction(interpretation, {
+        entityId: exactEntityId,
+        name: entityName,
+        phone: textValue(updates.phone ?? entity.phone),
+        accountNumber: textValue(updates.account_number ?? entity.account_number),
+        dailyRate: textValue(updates.daily_rate ?? entity.daily_rate),
+        role,
+        roleDetail: textValue(updates.role_detail ?? entity.role_detail),
+        field_updates: updates,
+      });
+      return;
+    }
+    if (interpretation.semantic_action === "SET_ROLE") {
+      if (exactEntityId) {
+        await confirmRoleInterpretation(interpretation, { selected_person_id: exactEntityId });
+      } else {
+        await confirmSetupEntities(interpretation, setupEntities(interpretation));
+      }
+      return;
+    }
+    await confirmInterpretation(interpretation, { confirmed: true });
+  }
+
   function renderPage() {
     if (route.name === "project") {
       return (
@@ -648,6 +697,9 @@ function App() {
           onVoicePlaceholder={() => setError("ضبط صدا در مسیر فعلی به صورت جای‌نگهدار فعال است.")}
           onAttachPlaceholder={() => setError("افزودن فایل در مسیر فعلی به صورت جای‌نگهدار فعال است.")}
           successMessage={successMessage}
+          onConfirmPending={confirmPendingFromDetail}
+          onEditPending={(interpretation) => setPendingTabEditingId(interpretation.id)}
+          onDiscardPending={discardPendingFromDetail}
         />
       );
     }
@@ -696,8 +748,11 @@ function App() {
         {renderPage()}
       </section>
 
+      {(pendingTabEditingId || (!reviewModalDismissed && pendingInterpretations.length > 0)) && (
       <DomainUIController
-        interpretations={pendingInterpretations}
+        interpretations={pendingTabEditingId
+          ? pendingInterpretations.filter((interpretation) => interpretation.id === pendingTabEditingId)
+          : pendingInterpretations}
         jobState={naturalInputJobState}
         jobEvents={[]}
         jobConnectionState={naturalInputJobId ? "POLLING" : "IDLE"}
@@ -712,17 +767,43 @@ function App() {
         setSetupEditEntities={setSetupEditEntities}
         setCandidateSelections={setCandidateSelections}
         setUnknownEntityForms={setUnknownEntityForms}
-        onConfirm={confirmInterpretation}
+        onConfirm={async (interpretation, payload) => {
+          await confirmInterpretation(interpretation, payload);
+          setPendingTabEditingId(null);
+        }}
         onConfirmFinancial={confirmFinancialInterpretation}
-        onConfirmRole={confirmRoleInterpretation}
-        onConfirmCandidate={confirmCandidateInterpretation}
-        onDiscard={discardInterpretation}
+        onConfirmRole={async (interpretation, payload, entityOverride) => {
+          await confirmRoleInterpretation(interpretation, payload, entityOverride);
+          setPendingTabEditingId(null);
+        }}
+        onConfirmCandidate={async (interpretation, payload, entityOverride) => {
+          await confirmCandidateInterpretation(interpretation, payload, entityOverride);
+          setPendingTabEditingId(null);
+        }}
+        onDiscard={async (interpretation) => {
+          await discardInterpretation(interpretation);
+          setPendingTabEditingId(null);
+        }}
         onResolveUnknownEntity={resolveUnknownEntity}
-        onConfirmSetupEntities={confirmSetupEntities}
-        onConfirmFinancialTransaction={confirmFinancialTransaction}
-        onConfirmMixed={confirmMixedInterpretation}
-        onConfirmEntityUpdate={confirmEntityUpdateAction}
+        onClose={() => setReviewModalDismissed(true)}
+        onConfirmSetupEntities={async (interpretation, entities) => {
+          await confirmSetupEntities(interpretation, entities);
+          setPendingTabEditingId(null);
+        }}
+        onConfirmFinancialTransaction={async (interpretation, data) => {
+          await confirmFinancialTransaction(interpretation, data);
+          setPendingTabEditingId(null);
+        }}
+        onConfirmMixed={async (interpretation, setup, financial) => {
+          await confirmMixedInterpretation(interpretation, setup, financial);
+          setPendingTabEditingId(null);
+        }}
+        onConfirmEntityUpdate={async (interpretation, data) => {
+          await confirmEntityUpdateAction(interpretation, data);
+          setPendingTabEditingId(null);
+        }}
       />
+      )}
     </main>
   );
 }
