@@ -231,6 +231,92 @@ def test_same_input_ambiguity_blocks_auto_resolution(client: TestClient, monkeyp
     )
 
 
+def test_same_input_confirm_without_entity_id_returns_needs_selection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Confirming a profile update PI without entity_id returns NEEDS_SELECTION
+    when the resolved entity name matches an existing worker."""
+    project = client.post("/projects", json={"name": "needs-selection-test"}).json()
+    project_id = project["id"]
+
+    # Create a worker via SET_ROLE interpretation
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "events": [
+                {
+                    "intent": "SET_ROLE",
+                    "action": "SET_ROLE",
+                    "entities": [{"name": "میثم کبیری", "kind": "PERSON", "project_role": "CLIENT"}],
+                    "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+                    "work": {"quantity": None, "unit": None, "description": None},
+                    "note": {"text": None},
+                    "confidence": 0.95,
+                    "ambiguity": False,
+                    "missing_fields": [],
+                    "reasoning_summary": "میثم کبیری کارفرمای پروژه است",
+                    "matched_text": "میثم کبیری کارفرمای پروژه است",
+                },
+                {
+                    "intent": "SETUP",
+                    "action": "UPDATE_ENTITY",
+                    "entities": [{"name": "میثم", "field_updates": {"phone": "09123456789"}}],
+                    "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+                    "work": {"quantity": None, "unit": None, "description": None},
+                    "note": {"text": None},
+                    "confidence": 0.9,
+                    "ambiguity": False,
+                    "missing_fields": [],
+                    "reasoning_summary": "شماره تماس میثم 09123456789",
+                    "matched_text": "شماره تماس میثم 09123456789",
+                },
+            ],
+        }),
+    )
+
+    pis = natural_input_interpretations(
+        client,
+        project_id,
+        "میثم کبیری کارفرمای پروژه است\nشماره تماس میثم 09123456789",
+    )
+    assert len(pis) == 2
+
+    # Confirm the first (SET_ROLE) — creates میثم کبیری
+    confirm1 = client.post(f"/pending-interpretations/{pis[0]['id']}/confirm", json={
+        "create_new": True,
+        "name": "میثم کبیری",
+        "role": "CLIENT",
+    })
+    assert confirm1.status_code == 200
+
+    workers = client.get(f"/projects/{project_id}/workers").json()
+    assert len(workers) == 1
+    worker_id = workers[0]["id"]
+
+    # Confirm the second (phone update) WITHOUT entity_id → NEEDS_SELECTION
+    confirm2 = client.post(f"/pending-interpretations/{pis[1]['id']}/confirm", json={
+        "confirmed": True,
+        "entity_id": None,
+    })
+    assert confirm2.status_code == 400
+    body = confirm2.json()
+    assert body["detail"]["status"] == "NEEDS_SELECTION"
+    candidates = body["detail"]["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["person_id"] == worker_id
+    assert candidates[0]["name"] == "میثم کبیری"
+
+    # Now confirm with the correct entity_id → should succeed
+    confirm3 = client.post(f"/pending-interpretations/{pis[1]['id']}/confirm", json={
+        "entity_id": worker_id,
+        "confirmed": True,
+    })
+    assert confirm3.status_code == 200
+
+    # Verify the worker now has the phone
+    workers = client.get(f"/projects/{project_id}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["phone"] == "09123456789"
+
+
 def test_same_input_confirmation_creates_single_person(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Confirming all three interpretations creates only one person with all fields."""
     project = client.post("/projects", json={"name": "same-input-confirm"}).json()
@@ -331,3 +417,100 @@ def test_same_input_confirmation_creates_single_person(client: TestClient, monke
     assert workers[0]["account_number"] == "6037991234567890", (
         f"Expected account 6037991234567890, got {workers[0].get('account_number')}"
     )
+
+
+def test_same_input_daily_rate_update_links_to_existing_worker(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Daily-rate profile updates should link to the worker created by the role card."""
+    project = client.post("/projects", json={"name": "same-input-daily-rate"}).json()
+    project_id = project["id"]
+
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "events": [
+                {
+                    "intent": "SET_ROLE",
+                    "action": "SET_ROLE",
+                    "entities": [{"name": "مش رحیم", "kind": "PERSON", "project_role": "DAILY_WORKER"}],
+                    "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+                    "work": {"quantity": None, "unit": None, "description": None},
+                    "note": {"text": None},
+                    "confidence": 0.95,
+                    "ambiguity": False,
+                    "missing_fields": [],
+                    "reasoning_summary": "مش رحیم کارگر پروژه است",
+                    "matched_text": "مش رحیم کارگر پروژه است",
+                },
+                {
+                    "intent": "SETUP",
+                    "action": "UPDATE_ENTITY",
+                    "entities": [
+                        {
+                            "name": "مش رحیم",
+                            "project_role": "DAILY_WORKER",
+                            "field_updates": {"daily_rate": "1200000"},
+                        }
+                    ],
+                    "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+                    "work": {"quantity": None, "unit": None, "description": None},
+                    "note": {"text": None},
+                    "confidence": 0.9,
+                    "ambiguity": False,
+                    "missing_fields": [],
+                    "reasoning_summary": "دستمزد روزانه مش رحیم 1200000 تومان است",
+                    "matched_text": "دستمزد روزانه مش رحیم 1200000 تومان است",
+                },
+            ],
+        }),
+    )
+
+    pis = natural_input_interpretations(
+        client,
+        project_id,
+        "مش رحیم کارگر پروژه است\nدستمزد روزانه مش رحیم 1200000 تومان است",
+    )
+    assert len(pis) >= 2
+
+    role_pi = next(
+        pi for pi in pis
+        if pi["semantic_action"] == "SET_ROLE"
+        and pi["extracted_entities"][0]["name"] == "مش رحیم"
+    )
+    daily_pi = next(
+        pi for pi in pis
+        if pi["extracted_entities"]
+        and pi["extracted_entities"][0].get("field_updates", {}).get("daily_rate") == "1200000"
+    )
+
+    _assert_entity_consistent(role_pi)
+    entities0 = role_pi["extracted_entities"]
+    assert entities0[0]["name"] == "مش رحیم"
+    assert entities0[0]["project_role"] == "DAILY_WORKER"
+
+    _assert_entity_consistent(daily_pi)
+    entities1 = daily_pi["extracted_entities"]
+    assert entities1[0]["name"] == "مش رحیم"
+    assert entities1[0]["project_role"] == "DAILY_WORKER"
+    assert entities1[0]["field_updates"]["daily_rate"] == "1200000"
+
+    confirm1 = client.post(f"/pending-interpretations/{role_pi['id']}/confirm", json={
+        "create_new": True,
+    })
+    assert confirm1.status_code == 200
+
+    workers = client.get(f"/projects/{project_id}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["name"] == "مش رحیم"
+    assert workers[0]["type"] == "DAILY_WORKER"
+
+    confirm2 = client.post(f"/pending-interpretations/{daily_pi['id']}/confirm", json={
+        "entity_id": workers[0]["id"],
+        "confirmed": True,
+    })
+    assert confirm2.status_code == 200
+
+    workers = client.get(f"/projects/{project_id}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["name"] == "مش رحیم"
+    assert workers[0]["type"] == "DAILY_WORKER"
+    assert workers[0]["daily_rate"] == "1200000.00"

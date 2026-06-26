@@ -6,6 +6,7 @@ import { SetupModal } from "./setup/SetupModal";
 import { FinancialModal } from "./financial/FinancialModal";
 import { EntityUpdateModal } from "./entity/EntityUpdateModal";
 import { SplitFlowModal } from "./split/SplitFlowModal";
+import { exactEntityIdByName } from "./confirmPayload";
 
 type UnknownEntityForm = { workerId: string; name: string; type: string; roleDetail: string };
 type EntityOverride = { name: string; type: string; roleDetail?: string | null };
@@ -70,6 +71,14 @@ function firstEntity(interpretation: PendingInterpretation): Record<string, unkn
 function entityName(interpretation: PendingInterpretation): string {
   const entity = firstEntity(interpretation);
   return typeof entity.name === "string" && entity.name.trim() ? entity.name.trim() : "نامشخص";
+}
+
+function exactWorkerIdForProfile(interpretation: PendingInterpretation, workers: Worker[]): number | null {
+  const suggestedId = interpretation.suggested_entity_id;
+  if (suggestedId) return suggestedId;
+  const name = entityName(interpretation);
+  if (!name || isUnknownEntity(interpretation)) return null;
+  return exactEntityIdByName(name, workers);
 }
 
 function isUnknownEntity(interpretation: PendingInterpretation): boolean {
@@ -458,7 +467,7 @@ export function DomainUIController({
         ? entity.field_updates as Record<string, unknown>
         : {};
       onConfirmEntityUpdate(interpretation, {
-        entityId: interpretation.suggested_entity_id,
+        entityId: exactWorkerIdForProfile(interpretation, safeWorkers),
         name: entityName(interpretation),
         phone: textValue(updates.phone ?? entity.phone),
         accountNumber: textValue(updates.account_number ?? entity.account_number),
