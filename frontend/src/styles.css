@@ -2189,3 +2189,342 @@ mark {
     width: 100%;
   }
 }
+
+/* =========================================================
+   VISIBILITY SECTIONS (Phase 2D)
+   ========================================================= */
+
+.visibility-section {
+  border: 1px solid #e4ebe7;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 6px 20px rgb(31 48 38 / 0.03);
+  overflow: hidden;
+}
+
+.visibility-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  min-height: 0;
+  color: #16212b;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.visibility-section-header:hover {
+  background: #f8fbf9;
+}
+
+.visibility-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.visibility-section-title > svg {
+  color: #47655a;
+  flex: 0 0 auto;
+}
+
+.count-badge {
+  background: #eef5f1;
+  border-radius: 999px;
+  color: #2d6342;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.15rem 0.55rem;
+  border: 0;
+}
+
+.visibility-section-body {
+  border-top: 1px solid #eef3f0;
+  padding: 0.85rem 1rem;
+}
+
+.visibility-people-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.visibility-role-group {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.role-group-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.85rem;
+  color: #3a525e;
+}
+
+.role-group-title mark {
+  background: #eef5f1;
+  border-radius: 999px;
+  color: #2d6342;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.05rem 0.45rem;
+  border: 0;
+}
+
+.visibility-people-list {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.visibility-person-card {
+  border: 1px solid #e8efeb;
+  border-radius: 14px;
+  background: #fbfdfc;
+  padding: 0.7rem 0.85rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.vpc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.vpc-head strong {
+  font-size: 0.93rem;
+}
+
+.role-pill {
+  background: #edf3f0;
+  border-radius: 999px;
+  color: #3a5a4e;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.5rem;
+  border: 0;
+  white-space: nowrap;
+}
+
+.vpc-detail {
+  font-size: 0.8rem;
+  color: #4f6970;
+}
+
+.vpc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.7rem;
+  font-size: 0.77rem;
+  color: #65727d;
+}
+
+.vpc-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.visibility-trx-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.visibility-trx-row {
+  border: 1px solid #e8efeb;
+  border-radius: 12px;
+  padding: 0.6rem 0.85rem;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.trx-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.trx-person {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.trx-amount {
+  font-weight: 800;
+  font-size: 0.95rem;
+  color: #1b3122;
+}
+
+.trx-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.7rem;
+  font-size: 0.75rem;
+  color: #65727d;
+}
+
+.trx-incoming {
+  border-inline-start: 3px solid #2f8f5b;
+}
+
+.trx-outgoing {
+  border-inline-start: 3px solid #c74343;
+}
+
+.trx-deferred {
+  border-inline-start: 3px solid #d7a528;
+}
+
+.trx-payable {
+  border-inline-start: 3px solid #d7a528;
+}
+
+.status-badge {
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.05rem 0.5rem;
+}
+
+.status-open {
+  background: #fff8e8;
+  color: #815d12;
+}
+
+.status-partial {
+  background: #eef5ff;
+  color: #2d5d99;
+}
+
+.status-paid {
+  background: #edf8f1;
+  color: #24643e;
+}
+
+.visibility-notes-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.visibility-note-card {
+  border: 1px solid #e8efeb;
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  display: grid;
+  gap: 0.3rem;
+  background: #fafcfb;
+}
+
+.visibility-note-date {
+  font-size: 0.72rem;
+  color: #788a88;
+}
+
+.visibility-note-card p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #1b2a2e;
+}
+
+.visibility-pending-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.visibility-pending-card {
+  border: 1px solid #f0e3c8;
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  display: grid;
+  gap: 0.3rem;
+  background: #fffcf5;
+}
+
+.visibility-pending-card .vpc-head {
+  flex-wrap: wrap;
+}
+
+.pending-text {
+  font-size: 0.88rem;
+  color: #2d3d46;
+  line-height: 1.5;
+}
+
+.visibility-vendor-debts {
+  border-top: 1px solid #eef3f0;
+  padding-top: 0.75rem;
+}
+
+/* ── Tab Navigation for Project Detail ── */
+
+.detail-tabs {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  background: #f2f7f4;
+  border-radius: 16px;
+  padding: 0.35rem;
+}
+
+.detail-tabs button {
+  flex: 1 0 auto;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #3f5b53;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.detail-tabs button:hover {
+  background: #eaf1ed;
+}
+
+.detail-tabs button.tab-active {
+  background: #ffffff;
+  color: #1b362b;
+  box-shadow: 0 2px 8px rgb(31 48 38 / 0.08);
+}
+
+.detail-tabs button .count-badge {
+  font-size: 0.65rem;
+  padding: 0.05rem 0.4rem;
+}
+
+.detail-tab-content {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 640px) {
+  .detail-tabs {
+    gap: 0.2rem;
+    padding: 0.25rem;
+  }
+  .detail-tabs button {
+    font-size: 0.75rem;
+    padding: 0.4rem 0.5rem;
+  }
+}

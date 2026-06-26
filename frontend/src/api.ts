@@ -42,12 +42,42 @@ export type Project = {
   updated_at: string;
 };
 
+export type VendorDebt = {
+  vendor_id: number;
+  vendor_name: string;
+  invoice_total: string;
+  paid_total: string;
+  debt: string;
+};
+
+export type WorkerPayable = {
+  worker_id: number;
+  worker_name: string;
+  debt: string;
+};
+
+export type ProjectSummary = {
+  total_received: string;
+  total_paid_out: string;
+  open_payables: string;
+  deferred_amount: string;
+  check_amount: string;
+  project_balance: string;
+  available_balance: string;
+  total_work_amount: string;
+  total_invoice_amount: string;
+  client_receivable: string;
+  vendor_debts: VendorDebt[];
+  worker_payables: WorkerPayable[];
+};
+
 export type ProjectDetail = Project & {
   totals: {
     money_in: string;
     money_out: string;
     net: string;
   };
+  summary: ProjectSummary | null;
 };
 
 export type RawEntry = {
@@ -166,6 +196,8 @@ export type OperatingSummary = {
   project_balance: string;
   client_receivable: string;
   available_balance: string;
+  deferred_amount: string;
+  check_amount: string;
   vendor_debts: Array<{
     vendor_id: number;
     vendor_name: string;

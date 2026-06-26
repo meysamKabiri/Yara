@@ -65,6 +65,25 @@ class ProjectDetail(ProjectRead):
     totals: ProjectTotals
 
 
+class ProjectSummary(BaseModel):
+    total_received: Decimal
+    total_paid_out: Decimal
+    open_payables: Decimal
+    deferred_amount: Decimal
+    check_amount: Decimal
+    project_balance: Decimal
+    available_balance: Decimal
+    total_work_amount: Decimal
+    total_invoice_amount: Decimal
+    client_receivable: Decimal
+    vendor_debts: list[dict[str, str | int | Decimal]]
+    worker_payables: list[dict[str, str | int | Decimal]]
+
+
+class ProjectDetailWithSummary(ProjectDetail):
+    summary: ProjectSummary | None = None
+
+
 class RawEntryCreate(BaseModel):
     text: str
 

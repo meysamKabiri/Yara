@@ -61,7 +61,9 @@ from app.schemas.projects import (
     PendingInterpretationUpdate,
     ProjectCreate,
     ProjectDetail,
+    ProjectDetailWithSummary,
     ProjectRead,
+    ProjectSummary,
     ProjectTotals,
     RawEntryCreate,
     RawEntryRead,
@@ -197,8 +199,35 @@ def _project_totals(db: DbSession, project_id: int) -> ProjectTotals:
             money_in += event.amount
         elif event.type in {ExtractedEventType.MONEY_OUT, ExtractedEventType.PURCHASE}:
             money_out += event.amount
+    payments = db.scalars(
+        select(Payment).where(Payment.project_id == project_id)
+    ).all()
+    for payment in payments:
+        if payment.direction == FinancialDirection.INCOMING:
+            money_in += payment.amount
+        elif payment.direction in (FinancialDirection.OUTGOING, FinancialDirection.DEFERRED):
+            money_out += payment.amount
     return ProjectTotals(
         money_in=money_in, money_out=money_out, net=money_in - money_out
+    )
+
+
+def _project_summary(db: DbSession, project_id: int) -> ProjectSummary:
+    from app.services.financial_summary import project_operating_summary
+    raw = project_operating_summary(db, project_id)
+    return ProjectSummary(
+        total_received=Decimal(str(raw["total_received"])),
+        total_paid_out=Decimal(str(raw["total_paid_out"])),
+        open_payables=Decimal(str(raw["open_payables"])),
+        deferred_amount=Decimal(str(raw.get("deferred_amount", "0"))),
+        check_amount=Decimal(str(raw.get("check_amount", "0"))),
+        project_balance=Decimal(str(raw["project_balance"])),
+        available_balance=Decimal(str(raw["available_balance"])),
+        total_work_amount=Decimal(str(raw["total_work_amount"])),
+        total_invoice_amount=Decimal(str(raw["total_invoice_amount"])),
+        client_receivable=Decimal(str(raw["client_receivable"])),
+        vendor_debts=raw.get("vendor_debts", []),
+        worker_payables=raw.get("worker_payables", []),
     )
 
 
@@ -1039,12 +1068,13 @@ def list_projects(db: DbSession) -> list[Project]:
     )
 
 
-@router.get("/projects/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: int, db: DbSession) -> ProjectDetail:
+@router.get("/projects/{project_id}", response_model=ProjectDetailWithSummary)
+def get_project(project_id: int, db: DbSession) -> ProjectDetailWithSummary:
     project = _get_project(db, project_id)
-    return ProjectDetail(
+    return ProjectDetailWithSummary(
         **ProjectRead.model_validate(project).model_dump(),
         totals=_project_totals(db, project_id),
+        summary=_project_summary(db, project_id),
     )
 
 

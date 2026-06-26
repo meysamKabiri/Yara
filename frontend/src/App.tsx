@@ -606,6 +606,8 @@ function App() {
         <ProjectDetailPage
           project={projectDetail}
           summary={operatingSummary}
+          workers={workers}
+          pendingInterpretations={pendingInterpretations}
           workLogs={workLogs}
           payments={payments}
           invoices={invoices}
