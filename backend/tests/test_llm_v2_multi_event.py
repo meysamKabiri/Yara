@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 import pytest
 from app.core.event_tracker import get_trace_events
+from app.core.financial_role_repair import normalize_outgoing_payment_role
 from tests.natural_input_helpers import natural_input_interpretations, natural_input_result, natural_input_interpretation
 
 
@@ -349,6 +350,8 @@ def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient)
     assert pis[1]["extracted_entities"][0]["name"] == "علی احمدی"
     assert pis[0]["extracted_entities"][0]["project_role"] == "CLIENT"
     assert pis[1]["extracted_entities"][0]["project_role"] == "OTHER"
+    if pis[1]["structured_interpretation"] is not None:
+        assert pis[1]["structured_interpretation"]["entities"][0]["project_role"] == "OTHER"
     assert pis[2]["semantic_action"] == "PURCHASE_PAID"
     assert pis[2]["extracted_entities"][0]["project_role"] == "VENDOR"
 
@@ -357,6 +360,36 @@ def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient)
         events = get_trace_events("trace-runtime-split-financial", db=db)
     split_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "MULTI_EVENT_SPLIT_APPLIED")
     assert split_event["payload"]["chunk_count"] == 3
+
+
+def test_final_response_role_repair_updates_structured_and_extracted_entities() -> None:
+    payload = {
+        "canonical_event_type": "FINANCIAL_EVENT",
+        "semantic_action": "PAYMENT",
+        "financial_direction": "OUTGOING",
+        "matched_input_text": "به علی احمدی 5 میلیون دادم",
+        "extracted_entities": [
+            {"name": "علی احمدی", "project_role": "CLIENT", "type": "CLIENT"},
+        ],
+        "structured_interpretation": {
+            "entities": [
+                {"name": "علی احمدی", "project_role": "CLIENT"},
+            ],
+            "entity": {
+                "name": "علی احمدی",
+                "project_role": "CLIENT",
+                "profile": {"project_role": "CLIENT"},
+            },
+        },
+    }
+
+    normalized = normalize_outgoing_payment_role(payload)
+
+    assert normalized["extracted_entities"][0]["project_role"] == "OTHER"
+    assert normalized["extracted_entities"][0]["type"] == "OTHER"
+    assert normalized["structured_interpretation"]["entities"][0]["project_role"] == "OTHER"
+    assert normalized["structured_interpretation"]["entity"]["project_role"] == "OTHER"
+    assert normalized["structured_interpretation"]["entity"]["profile"]["project_role"] == "OTHER"
 
 
 def test_runtime_split_fallback_keeps_setup_phone_and_account_events(client: TestClient) -> None:

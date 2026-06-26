@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
 from app.core.observability_service import track_event, track_timed_event
 from app.core.queue import get_queue
 from app.core.trace_context import get_trace_id
@@ -1122,7 +1123,7 @@ def get_natural_input_job(job_id: str, db: DbSession) -> dict[str, Any]:
     response: dict[str, Any] = {
         "job_id": job.job_id,
         "status": job.status.value if hasattr(job.status, "value") else job.status,
-        "result": job.result,
+        "result": normalize_outgoing_payment_roles_in_result(job.result),
         "trace_id": job.trace_id,
         "events_summary": _job_events_summary(job),
     }

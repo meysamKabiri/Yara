@@ -107,6 +107,44 @@ def test_account_number_update_job_result_is_entity_update(client: TestClient, m
     assert structured_entity["field_updates"]["account_number"] == "6037991234567890"
 
 
+def test_account_number_update_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("profile update fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "شماره حساب میثم 6037991234567890"},
+        headers={"X-Trace-Id": "trace-fast-account"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    structured_entity = interpretation["structured_interpretation"]["entities"][0]
+    assert interpretation["semantic_action"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["domain"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["ui_mode"] == "EntityUpdateModal"
+    assert entity["field_updates"]["account_number"] == "6037991234567890"
+    assert structured_entity["field_updates"]["account_number"] == "6037991234567890"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-account", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    assert fast_event["payload"]["fast_path_type"] == "ACCOUNT_UPDATE"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+
+
 def test_phone_update_job_result_is_entity_update_when_llm_returns_note(client: TestClient, monkeypatch) -> None:
     project = _project(client)
     monkeypatch.setattr(LLMv2Interpreter, "interpret", ORIGINAL_LLM_V2_INTERPRET)
@@ -142,6 +180,44 @@ def test_phone_update_job_result_is_entity_update_when_llm_returns_note(client: 
     assert interpretation["domain_route"]["ui_mode"] == "EntityUpdateModal"
     assert entity["phone"] == "09123456789"
     assert interpretation["structured_interpretation"]["entities"][0]["phone"] == "09123456789"
+
+
+def test_phone_update_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("profile update fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "شماره تماس میثم 09123456789"},
+        headers={"X-Trace-Id": "trace-fast-phone"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    structured_entity = interpretation["structured_interpretation"]["entities"][0]
+    assert interpretation["semantic_action"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["domain"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["ui_mode"] == "EntityUpdateModal"
+    assert entity["field_updates"]["phone"] == "09123456789"
+    assert structured_entity["field_updates"]["phone"] == "09123456789"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-phone", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    assert fast_event["payload"]["fast_path_type"] == "PHONE_UPDATE"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
 
 
 def test_worker_persists_done_result_and_links_trace_job_id(

@@ -23,7 +23,6 @@ import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { JobDetailPage } from "./observability/pages/JobDetailPage";
 import { JobsPage } from "./observability/pages/JobsPage";
-import { useJobEventStream } from "./observability/hooks/useJobEventStream";
 import { toJobState, useNaturalInputJob } from "./observability/hooks/useNaturalInputJob";
 import { DomainUIController } from "./ui/DomainUIController";
 import { SetupEntity } from "./types/domain";
@@ -168,19 +167,9 @@ function App() {
   const activeProjectId = routeProjectId ?? selectedProjectId ?? null;
   const openDebtCount = Object.values(projectFinancials).filter((item) => item.debt > 0).length;
   const naturalInputJob = useNaturalInputJob(naturalInputJobId);
-  const refreshNaturalInputJob = useCallback(() => {
-    void naturalInputJob.refresh();
-  }, [naturalInputJob.refresh]);
-  const naturalInputStream = useJobEventStream(
-    naturalInputJobId,
-    refreshNaturalInputJob,
-    naturalInputJob.status,
-  );
   const naturalInputJobState = useMemo(() => {
-    const baseState = naturalInputJob.job ? toJobState(naturalInputJob.job.status, Boolean(naturalInputJobId)) : toJobState(null, Boolean(naturalInputJobId));
-    if ((baseState === "SUBMITTED" || baseState === "IDLE") && naturalInputStream.events.length) return "PROCESSING";
-    return baseState;
-  }, [naturalInputJob.job, naturalInputJobId, naturalInputStream.events.length]);
+    return naturalInputJob.job ? toJobState(naturalInputJob.job.status, Boolean(naturalInputJobId)) : toJobState(null, Boolean(naturalInputJobId));
+  }, [naturalInputJob.job, naturalInputJobId]);
 
   const navItems = useMemo(
     () => [
@@ -683,9 +672,9 @@ function App() {
       <DomainUIController
         interpretations={pendingInterpretations}
         jobState={naturalInputJobState}
-        jobEvents={naturalInputStream.events}
-        jobConnectionState={naturalInputStream.connectionState}
-        jobError={naturalInputJob.error ?? naturalInputStream.error}
+        jobEvents={[]}
+        jobConnectionState={naturalInputJobId ? "POLLING" : "IDLE"}
+        jobError={naturalInputJob.error}
         workers={workers}
         activeProjectId={activeProjectId}
         projectName={projectDetail?.name ?? null}

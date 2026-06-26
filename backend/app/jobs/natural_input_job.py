@@ -1,6 +1,7 @@
 from inspect import signature
 from time import perf_counter
 
+from app.core.financial_role_repair import normalize_outgoing_payment_role
 from app.core import unified_pipeline
 from app.core.observability_service import track_event
 from app.core.runtime.request_cache import new_request_cache
@@ -52,8 +53,6 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.RUNNING.value}, duration_ms=(perf_counter() - commit_start) * 1000)
 
         track_event(db=db, trace_id=trace_id, event_name="DOMAIN_ROUTER_START", payload={"project_id": project_id})
-        track_event(db=db, trace_id=trace_id, event_name="LLM_STARTED", payload={"project_id": project_id})
-        llm_started = True
         pipeline_start = perf_counter()
         request_cache = new_request_cache()
         interpretations = _process_input_once(db, project_id, text, request_cache)
@@ -69,12 +68,15 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
 
         timings = dict(request_cache.timings_ms)
 
-        track_event(db=db, trace_id=trace_id, event_name="LLM_COMPLETED", payload={"project_id": project_id, "interpretation_count": len(interpretations), **timings, "pipeline_duration_ms": round(pipeline_duration_ms, 1)}, duration_ms=pipeline_duration_ms)
+        if timings.get("llm_v2_duration_ms", 0.0) > 0:
+            track_event(db=db, trace_id=trace_id, event_name="LLM_COMPLETED", payload={"project_id": project_id, "interpretation_count": len(interpretations), **timings, "pipeline_duration_ms": round(pipeline_duration_ms, 1)}, duration_ms=pipeline_duration_ms)
         llm_finished = True
 
         result = {
             "interpretations": [
-                PendingInterpretationRead.model_validate(interpretation).model_dump(mode="json")
+                normalize_outgoing_payment_role(
+                    PendingInterpretationRead.model_validate(interpretation).model_dump(mode="json")
+                )
                 for interpretation in interpretations
             ]
         }

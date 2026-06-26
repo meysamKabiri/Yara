@@ -73,6 +73,35 @@ def process_input(
 
     entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
     chunks = _split_multi_event_text(text)
+    fast_profile_update = None if len(chunks) > 1 else _build_profile_update_interpretation(project_id, text, entity_context)
+    if fast_profile_update is not None and not _is_phone_or_account_update(fast_profile_update):
+        fast_profile_update = None
+    if fast_profile_update is not None:
+        _emit_fast_path_started(db, fast_profile_update)
+        db.add(fast_profile_update)
+        db.commit()
+        db.refresh(fast_profile_update)
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _emit_fast_path_matched(db, fast_profile_update)
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "fast_profile_update",
+            "fast_path_type": _fast_path_type(fast_profile_update),
+            "skipped_llm": True,
+        })
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_profile_update]
+
     fast_setup = None if len(chunks) > 1 else _build_role_assignment_interpretation(project_id, text, entity_context)
     if fast_setup is not None:
         db.add(fast_setup)
@@ -284,6 +313,14 @@ def _process_split_fallback_chunks(
     llm_duration_ms = cache.timings_ms.get("llm_v2_duration_ms", 0.0)
 
     for chunk in chunks:
+        profile_update = _build_profile_update_interpretation(project_id, chunk, entity_context)
+        if profile_update is not None and _is_phone_or_account_update(profile_update):
+            _emit_fast_path_started(db, profile_update)
+            _retarget_interpretation_to_raw_text(profile_update, raw_text, chunk)
+            interpretations.append(profile_update)
+            _emit_fast_path_matched(db, profile_update)
+            continue
+
         chunk_llm_start = perf_counter()
         chunk_llm_result = _safe_llm_v2_result(chunk, project_id, cache, db=db)
         llm_duration_ms += _elapsed_ms(chunk_llm_start)
@@ -829,25 +866,26 @@ def _build_profile_update_interpretation(
     role = "DAILY_WORKER" if "daily_rate" in updates else "OTHER"
     extracted_entity = {
         "name": name,
+        "kind": "PERSON",
         "type": role,
         "project_role": role,
+        "role_detail": None,
+        "phone": updates.get("phone"),
+        "account_number": updates.get("account_number"),
+        "daily_rate": updates.get("daily_rate"),
+        "notes": None,
         "field_updates": updates,
-        **updates,
     }
-    suggested_id = None
     if resolution["candidates"]:
         extracted_entity["requires_confirmation"] = True
         extracted_entity["candidate_matches"] = resolution["candidates"]
-        if len(resolution["candidates"]) == 1:
-            only = resolution["candidates"][0]
-            if only.get("match_type") == "exact" and isinstance(only.get("person_id"), int):
-                suggested_id = only["person_id"]
+    structured = _profile_update_structured_interpretation(name, role, updates)
     return PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="SETUP_EVENT",
         semantic_action="ENTITY_UPDATE",
-        suggested_entity_id=suggested_id,
+        suggested_entity_id=None,
         matched_input_text=None,
         extracted_entities=[extracted_entity],
         extracted_amount=None,
@@ -856,10 +894,77 @@ def _build_profile_update_interpretation(
         financial_direction=None,
         due_date=None,
         description=raw_text,
-        confidence=0.9,
-        structured_interpretation=None,
+        confidence=0.95,
+        structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
     )
+
+
+def _profile_update_structured_interpretation(
+    name: str,
+    role: str,
+    updates: dict[str, str | int],
+) -> dict[str, Any] | None:
+    if "phone" not in updates and "account_number" not in updates:
+        return None
+    structured_entity = {
+        "name": name,
+        "kind": "PERSON",
+        "project_role": role,
+        "role_detail": None,
+        "phone": updates.get("phone"),
+        "account_number": updates.get("account_number"),
+        "daily_rate": None,
+        "notes": None,
+        "field_updates": updates,
+    }
+    return {
+        "intent": "SETUP",
+        "action": "UPDATE_ENTITY",
+        "entities": [structured_entity],
+        "financial": {
+            "amount": None,
+            "direction": "NONE",
+            "payment_method": None,
+            "due_date_text": None,
+        },
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": None},
+        "confidence": 0.95,
+        "ambiguity": False,
+        "missing_fields": [],
+        "reasoning_summary": "deterministic profile update fast path",
+    }
+
+
+def _emit_fast_path_started(db: Session, interpretation: PendingInterpretation) -> None:
+    _emit_event(db, "FAST_PATH_STARTED", {
+        "fast_path_type": _fast_path_type(interpretation),
+        "skipped_llm": True,
+    })
+
+
+def _emit_fast_path_matched(db: Session, interpretation: PendingInterpretation) -> None:
+    _emit_event(db, "FAST_PATH_MATCHED", {
+        "fast_path_type": _fast_path_type(interpretation),
+        "skipped_llm": True,
+    })
+
+
+def _fast_path_type(interpretation: PendingInterpretation) -> str | None:
+    entities = interpretation.extracted_entities or []
+    first = entities[0] if entities and isinstance(entities[0], dict) else {}
+    updates = first.get("field_updates") if isinstance(first, dict) else None
+    if isinstance(updates, dict):
+        if updates.get("phone"):
+            return "PHONE_UPDATE"
+        if updates.get("account_number"):
+            return "ACCOUNT_UPDATE"
+    return None
+
+
+def _is_phone_or_account_update(interpretation: PendingInterpretation) -> bool:
+    return _fast_path_type(interpretation) in {"PHONE_UPDATE", "ACCOUNT_UPDATE"}
 
 
 def _build_role_assignment_interpretation(
@@ -1124,6 +1229,8 @@ def _safe_llm_v2_result(
     try:
         interpreter = _llm_v2_interpreter()
         interpret_sig = inspect.signature(interpreter.interpret)
+        if db is not None:
+            _emit_event(db, "LLM_STARTED", {"project_id": project_id})
         if "db" in interpret_sig.parameters:
             result = interpreter.interpret(input_text, project_id, db=db)
         else:
