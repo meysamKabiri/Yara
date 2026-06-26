@@ -2145,7 +2145,7 @@ def test_firewall_reclassifies_illegal_note_financial_input() -> None:
     assert decision.event.type == CanonicalEventType.FINANCIAL
 
 
-def test_firewall_blocks_known_entity_note_without_action() -> None:
+def test_firewall_allows_known_entity_note_without_side_effect_action() -> None:
     worker = Worker(id=1, project_id=1, name="مش رحیم", type=WorkerType.DAILY_WORKER)
     event = CanonicalEvent(
         type=CanonicalEventType.NOTE,
@@ -2155,8 +2155,10 @@ def test_firewall_blocks_known_entity_note_without_action() -> None:
         metadata={"confidence": 0.3, "source_text": "رحیم"},
     )
 
-    with pytest.raises(SemanticFirewallError):
-        SemanticFirewallService().validate(event, "رحیم", [worker], {})
+    decision = SemanticFirewallService().validate(event, "رحیم", [worker], {})
+
+    assert decision.status == "FIXED"
+    assert decision.event.type == CanonicalEventType.NOTE
 
 
 def test_semantic_rule_engine_defines_all_canonical_events() -> None:

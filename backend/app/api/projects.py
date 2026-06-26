@@ -699,7 +699,17 @@ def _purchase_has_debt_or_check_terms(raw_text: str) -> bool:
     normalized = normalize_text(raw_text)
     return any(
         phrase in normalized
-        for phrase in ["نسیه", "ندادم", "هنوز ندادم", "چک", "فاکتور", "بدهی"]
+        for phrase in [
+            "نسیه",
+            "ندادم",
+            "هنوز ندادم",
+            "پرداخت نشده",
+            "هنوز پرداخت نشده",
+            "تسویه نشده",
+            "چک",
+            "فاکتور",
+            "بدهی",
+        ]
     )
 
 
@@ -2114,7 +2124,7 @@ def _require_explicit_entity_selection(
 ) -> None:
     import logging as _logging
     _log = _logging.getLogger(__name__)
-    _log.error("DEBUG _require_explicit_entity_selection: canonical_event_type=%s semantic_action=%s create_new=%s entity_id=%s selected_person_id=%s _requires_ui=%s _is_update=%s",
+    _log.debug("confirm entity selection check: canonical_event_type=%s semantic_action=%s create_new=%s entity_id=%s selected_person_id=%s requires_ui=%s is_update=%s",
                interpretation.canonical_event_type, interpretation.semantic_action,
                payload.create_new, payload.entity_id, payload.selected_person_id,
                _requires_ui_identity_decision(interpretation),
@@ -2283,10 +2293,17 @@ def _validate_llm_v2_confirmation_safety(
         db, interpretation
     )
     expected_role = si.entities[0].project_role if si.entities else None
+    confirmed_action = _confirmed_llm_v2_action(interpretation, si.action)
+    requires_vendor_payee = confirmed_action in {
+        LLMv2Action.PURCHASE_PAID,
+        LLMv2Action.DEBT_CREATED,
+        LLMv2Action.CHECK_PAYMENT,
+    }
     if (
         worker is not None
         and expected_role == LLMv2ProjectRole.VENDOR
         and worker.type != WorkerType.VENDOR
+        and requires_vendor_payee
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -2417,11 +2434,17 @@ def _execute_llm_v2_interpretation(
         registry = EntityRegistryService(db, interpretation.project_id)
         entities = interpretation.extracted_entities or []
         selected = _get_selected_worker(db, interpretation, payload)
-        updated = (
-            registry.update_entity_by_id(selected.id, entities[0])
-            if selected is not None and entities and _has_entity_field_updates(entities)
-            else []
-        )
+        if selected is not None and entities and _has_entity_field_updates(entities):
+            updated = registry.update_entity_by_id(selected.id, entities[0])
+        elif payload.create_new and entities and _has_entity_field_updates(entities):
+            created = registry.apply_setup(entities)
+            updated = (
+                registry.update_entity_by_id(created[0].id, entities[0])
+                if created
+                else []
+            )
+        else:
+            updated = []
         workers.extend(updated)
         history = HistoryEntry(
             project_id=interpretation.project_id,

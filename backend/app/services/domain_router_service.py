@@ -101,9 +101,15 @@ class DomainRouterService:
         has_profile_update = self._has_profile_update_fields(interpretation)
         setup_score = self._setup_score(text, interpretation)
         financial_score = self._financial_score(text, interpretation)
+        financial_intent = self._has_financial_intent(interpretation)
 
         if has_profile_update and financial_score == 0:
             result = self._result(DomainType.ENTITY_UPDATE, min(0.95, 0.75 + setup_score * 0.05))
+            if db is not None:
+                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            return result
+        if financial_intent and financial_score > 0 and not self._has_explicit_setup_declaration(text):
+            result = self._result(DomainType.FINANCIAL, min(0.95, 0.75 + financial_score * 0.05))
             if db is not None:
                 track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
             return result
@@ -178,6 +184,28 @@ class DomainRouterService:
             ):
                 return True
         return False
+
+    def _has_financial_intent(self, interpretation: dict[str, Any]) -> bool:
+        action = str(interpretation.get("action") or interpretation.get("semantic_action") or "").upper()
+        intent = str(interpretation.get("intent") or "").upper()
+        if action in self._FINANCIAL_ACTIONS or intent in {"FINANCIAL", "PAYMENT", "PURCHASE"}:
+            return True
+        financial = interpretation.get("financial")
+        return isinstance(financial, dict) and financial.get("amount") is not None
+
+    def _has_explicit_setup_declaration(self, text: str) -> bool:
+        declaration_terms = (
+            "کارفرمای پروژه است",
+            "کارفرما است",
+            "کارگر پروژه است",
+            "به پروژه اضافه",
+            "اضافه شد",
+            "شماره تماس",
+            "شماره موبایل",
+            "شماره حساب",
+            "دستمزد روزانه",
+        )
+        return any(term in text for term in declaration_terms)
 
     def _result(self, domain: DomainType, confidence: float) -> dict[str, Any]:
         if domain == DomainType.ENTITY_UPDATE:

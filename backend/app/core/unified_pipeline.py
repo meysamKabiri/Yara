@@ -113,6 +113,37 @@ def process_input(
         if interpretations:
             return interpretations
 
+    fast_setup = None if len(chunks) > 1 else _build_role_assignment_interpretation(project_id, text, entity_context)
+    if (
+        fast_setup is not None
+        and not _role_assignment_has_profile_fields(fast_setup)
+        and not _is_name_before_role_statement(text)
+    ):
+        fast_setup = None
+    if fast_setup is not None:
+        _emit_fast_path_started(db, fast_setup)
+        db.add(fast_setup)
+        db.commit()
+        db.refresh(fast_setup)
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _emit_fast_path_matched(db, fast_setup)
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "fast_setup",
+        })
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_setup]
+
     fast_profile_update = None if len(chunks) > 1 else _build_profile_update_interpretation(project_id, text, entity_context)
     if fast_profile_update is not None and not _is_phone_or_account_update(fast_profile_update):
         fast_profile_update = None
@@ -172,29 +203,6 @@ def process_input(
             fallback_required=False,
         )
         return [fast_financial_payment]
-
-    fast_setup = None if len(chunks) > 1 else _build_role_assignment_interpretation(project_id, text, entity_context)
-    if fast_setup is not None:
-        db.add(fast_setup)
-        db.commit()
-        db.refresh(fast_setup)
-        cache.set_timing("llm_v2_duration_ms", 0.0)
-        cache.set_timing("legacy_duration_ms", 0.0)
-        cache.set_timing("governance_duration_ms", 0.0)
-        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
-            "interpretation_count": 1,
-            "path": "fast_setup",
-        })
-        record_pipeline_performance(
-            project_id=project_id,
-            input_text=text,
-            total_duration_ms=_elapsed_ms(total_start),
-            legacy_duration_ms=0.0,
-            shadow_duration_ms=0.0,
-            governance_duration_ms=0.0,
-            fallback_required=False,
-        )
-        return [fast_setup]
 
     llm_v2_start = perf_counter()
     llm_v2_result = _safe_llm_v2_result(text, project_id, cache, db=db)
@@ -280,6 +288,19 @@ def process_input(
             "path": "profile_update",
         })
         return [profile_update]
+
+    safe_note = _build_safe_note_interpretation(project_id, text)
+    if safe_note is not None:
+        db.add(safe_note)
+        db.commit()
+        db.refresh(safe_note)
+        cache.set_legacy_result(_shadow_legacy_payload([safe_note]))
+        cache.set_timing("legacy_duration_ms", 0.0)
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "safe_note_fallback",
+        })
+        return [safe_note]
 
     legacy_start = perf_counter()
     graph = _extract_graph(text)
@@ -385,6 +406,15 @@ def _process_split_fallback_chunks(
     llm_duration_ms = cache.timings_ms.get("llm_v2_duration_ms", 0.0)
 
     for chunk_index, chunk in enumerate(chunks):
+        fast_setup = _build_role_assignment_interpretation(project_id, chunk, entity_context)
+        if fast_setup is not None:
+            _emit_fast_path_started(db, fast_setup)
+            _retarget_interpretation_to_raw_text(fast_setup, raw_text, chunk)
+            interpretations.append(fast_setup)
+            _emit_fast_path_matched(db, fast_setup)
+            _emit_chunk_processed(db, chunk_index, chunk, "FAST_PATH")
+            continue
+
         profile_update = _build_profile_update_interpretation(project_id, chunk, entity_context)
         if profile_update is not None and _is_phone_or_account_update(profile_update):
             _emit_fast_path_started(db, profile_update)
@@ -703,6 +733,7 @@ def _build_one_llm_v2_interpretation(
     )
 
     _repair_llm_v2_setup_role_from_text(interpretation, raw_text)
+    _repair_llm_v2_safe_note_from_text(interpretation, event_text)
     incoming_project_payment = detect_incoming_project_payment(event_text)
     purchase_payment = detect_purchase_payment(event_text)
 
@@ -762,6 +793,8 @@ def _build_one_llm_v2_interpretation(
         canonical_type = "FINANCIAL_EVENT"
         semantic_action = "PAYMENT"
         financial_direction = FinancialDirection.INCOMING
+        interpretation.intent = LLMv2Intent.FINANCIAL
+        interpretation.action = LLMv2Action.PAYMENT_IN
         interpretation.financial.direction = LLMv2FinancialDirection.IN
         if not entities_json:
             entities_json = [
@@ -786,9 +819,19 @@ def _build_one_llm_v2_interpretation(
             entities_json[0]["candidate_matches"] = resolution["candidates"]
     elif purchase_payment is not None:
         canonical_type = "FINANCIAL_EVENT"
-        if action_str not in {"DEBT_CREATED", "CHECK_PAYMENT"} and "نسیه" not in normalize_text(event_text) and "چک" not in normalize_text(event_text):
+        if "چک" in normalize_text(event_text):
+            semantic_action = "CHECK_PAYMENT"
+            financial_direction = FinancialDirection.DEFERRED
+            interpretation.action = LLMv2Action.CHECK_PAYMENT
+        elif _has_unpaid_purchase_terms(event_text):
+            semantic_action = "DEBT_CREATED"
+            financial_direction = FinancialDirection.DEBT
+            interpretation.action = LLMv2Action.DEBT_CREATED
+        elif action_str not in {"DEBT_CREATED", "CHECK_PAYMENT"}:
             semantic_action = "PURCHASE_PAID"
             financial_direction = FinancialDirection.OUTGOING
+            interpretation.action = LLMv2Action.PURCHASE_PAID
+        interpretation.intent = LLMv2Intent.FINANCIAL
         if purchase_payment.vendor_name is not None:
             if not entities_json:
                 entities_json = [
@@ -833,7 +876,12 @@ def _build_one_llm_v2_interpretation(
     if incoming_project_payment is not None:
         payment_method = PaymentType.BANK_TRANSFER.value
     elif purchase_payment is not None:
-        payment_method = payment_method or PaymentType.CASH.value
+        if semantic_action == "CHECK_PAYMENT":
+            payment_method = PaymentType.CHECK.value
+        elif semantic_action == "DEBT_CREATED":
+            payment_method = None
+        else:
+            payment_method = payment_method or PaymentType.CASH.value
 
     amount = interpretation.financial.amount
     parsed_text_amount = parse_persian_money(event_text) if intent_str == "FINANCIAL" else None
@@ -971,6 +1019,8 @@ def _build_profile_update_interpretation(
     entity_context: list[Worker],
 ) -> PendingInterpretation | None:
     normalized = normalize_text(raw_text)
+    if "اضافه" in normalized and PersianRoleExtractor().extract(raw_text) is not None:
+        return None
     updates: dict[str, str | int] = {}
     phone_match = re.search(r"09\d{9,12}", normalized.replace(" ", ""))
     if phone_match and any(term in normalized for term in ["شماره تماس", "شماره موبایل", "موبایل", "تلفن"]):
@@ -1065,6 +1115,54 @@ def _profile_update_structured_interpretation(
         "missing_fields": [],
         "reasoning_summary": "deterministic profile update fast path",
     }
+
+
+def _build_safe_note_interpretation(
+    project_id: int,
+    raw_text: str,
+) -> PendingInterpretation | None:
+    normalized = normalize_text(raw_text)
+    if _text_has_financial_signal(raw_text):
+        return None
+    if _has_explicit_setup_or_profile_text(normalized):
+        return None
+    if not _has_plain_note_text(normalized):
+        return None
+    structured = {
+        "intent": "NOTE",
+        "action": "NOTE",
+        "entities": [],
+        "financial": {
+            "amount": None,
+            "direction": "NONE",
+            "payment_method": None,
+            "due_date_text": None,
+        },
+        "work": {"quantity": None, "unit": None, "description": None},
+        "note": {"text": raw_text},
+        "confidence": 0.85,
+        "ambiguity": False,
+        "missing_fields": [],
+        "reasoning_summary": "deterministic safe note",
+    }
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type="NOTE_EVENT",
+        semantic_action="NOTE",
+        suggested_entity_id=None,
+        matched_input_text=None,
+        extracted_entities=None,
+        extracted_amount=None,
+        extracted_quantity=None,
+        payment_method=None,
+        financial_direction=None,
+        due_date=None,
+        description=raw_text,
+        confidence=0.85,
+        structured_interpretation=structured,
+        status=PendingInterpretationStatus.PENDING,
+    )
 
 
 _PERSIAN_AMOUNT_MARKER = (
@@ -1255,20 +1353,35 @@ def _build_role_assignment_interpretation(
     raw_text: str,
     entity_context: list[Worker],
 ) -> PendingInterpretation | None:
-    if _text_has_financial_signal(raw_text) or not _is_role_only_assignment_text(raw_text):
+    if _text_has_financial_signal(raw_text) or not _is_role_assignment_text(raw_text):
+        return None
+    normalized = normalize_text(raw_text)
+    if any(term in normalized for term in ["کارگرها", "کارگرهای پروژه"]):
         return None
     extracted = PersianRoleExtractor().extract(raw_text)
-    if extracted is None or extracted.confidence < 0.75:
+    if extracted is None or extracted.confidence < 0.6:
         return None
     role = extracted.worker_type.value
-    resolution = resolve_candidates(extracted.name, entity_context)
+    extracted_name = _dedupe_repeated_name(extracted.name)
+    resolution = resolve_candidates(extracted_name, entity_context)
     entity: dict[str, Any] = {
-        "name": extracted.name,
+        "name": extracted_name,
         "kind": "PERSON",
         "project_role": role,
         "role_detail": extracted.role_phrase if role == "SKILLED_WORKER" else None,
         "type": role,
     }
+    field_updates: dict[str, str] = {}
+    phone_match = re.search(r"09\d{9,12}", normalize_text(raw_text).replace(" ", ""))
+    if phone_match:
+        field_updates["phone"] = phone_match.group()
+        entity["phone"] = phone_match.group()
+    account_match = re.search(r"\d{12,26}", normalize_text(raw_text).replace(" ", ""))
+    if account_match and any(term in normalize_text(raw_text) for term in ["شماره حساب", "شماره کارت", "حساب", "کارت", "شبا"]):
+        field_updates["account_number"] = account_match.group()
+        entity["account_number"] = account_match.group()
+    if field_updates:
+        entity["field_updates"] = field_updates
     if resolution["candidates"]:
         entity["requires_confirmation"] = True
         entity["candidate_matches"] = resolution["candidates"]
@@ -1287,7 +1400,7 @@ def _build_role_assignment_interpretation(
         "confidence": extracted.confidence,
         "ambiguity": False,
         "missing_fields": [],
-        "reasoning_summary": f"{extracted.name} نقش {extracted.role_phrase} دارد",
+        "reasoning_summary": f"{extracted_name} نقش {extracted.role_phrase} دارد",
     }
     return PendingInterpretation(
         project_id=project_id,
@@ -1330,11 +1443,44 @@ def _text_has_financial_signal(raw_text: str) -> bool:
     )
 
 
-def _is_role_only_assignment_text(raw_text: str) -> bool:
-    normalized = normalize_text(raw_text)
-    if any(term in normalized for term in ["اضافه", "امروز", "کار کرد", "کارکرد", "اومد", "آمد", "زد"]):
+def _role_assignment_has_profile_fields(interpretation: PendingInterpretation) -> bool:
+    entities = interpretation.extracted_entities or []
+    if not entities:
         return False
-    return any(term in normalized for term in [" است", " هست", "می باشد", "میباشد"])
+    first = entities[0]
+    if not isinstance(first, dict):
+        return False
+    updates = first.get("field_updates")
+    return isinstance(updates, dict) and bool(updates)
+
+
+def _is_name_before_role_statement(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    if "اضافه" in normalized:
+        return False
+    extracted = PersianRoleExtractor().extract(raw_text)
+    if extracted is None:
+        return False
+    role_index = normalized.find(extracted.role_phrase)
+    name_index = normalized.find(extracted.name)
+    return name_index >= 0 and role_index >= 0 and name_index < role_index
+
+
+def _dedupe_repeated_name(name: str) -> str:
+    parts = name.split()
+    if len(parts) % 2 != 0:
+        return name
+    midpoint = len(parts) // 2
+    if parts[:midpoint] == parts[midpoint:]:
+        return " ".join(parts[:midpoint])
+    return name
+
+
+def _is_role_assignment_text(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    if any(term in normalized for term in ["امروز", "کار کرد", "کارکرد", "اومد", "آمد", "زد"]):
+        return False
+    return any(term in normalized for term in [" است", " هست", "می باشد", "میباشد", "اضافه شد", "به پروژه اضافه"])
 
 
 def _coerce_llm_v2_profile_update_action(interpretation: Any) -> None:
@@ -1389,6 +1535,91 @@ def _repair_llm_v2_setup_role_from_text(interpretation: Any, raw_text: str) -> N
     if extracted.worker_type.value in LLMv2ProjectRole.__members__:
         entity.project_role = LLMv2ProjectRole(extracted.worker_type.value)
         entity.role_detail = extracted.role_phrase
+
+
+def _repair_llm_v2_safe_note_from_text(interpretation: Any, raw_text: str) -> None:
+    from app.schemas.llm_v2 import LLMv2Action, LLMv2Intent
+
+    if interpretation.intent not in {LLMv2Intent.SETUP, LLMv2Intent.SET_ROLE}:
+        return
+    normalized = normalize_text(raw_text)
+    if _has_explicit_setup_or_profile_text(normalized):
+        return
+    if not _has_note_or_unsupported_work_text(normalized):
+        return
+    interpretation.intent = LLMv2Intent.NOTE
+    interpretation.action = LLMv2Action.NOTE
+    interpretation.entities = []
+    interpretation.note.text = raw_text
+    interpretation.financial.amount = None
+    interpretation.financial.direction = LLMv2FinancialDirection.NONE
+    interpretation.financial.payment_method = None
+    interpretation.work.quantity = None
+    interpretation.work.unit = None
+    interpretation.work.description = None
+
+
+def _has_explicit_setup_or_profile_text(normalized_text: str) -> bool:
+    return any(
+        term in normalized_text
+        for term in (
+            "کارفرمای پروژه است",
+            "کارگر پروژه است",
+            "به پروژه اضافه",
+            "اضافه شد",
+            "شماره تماس",
+            "شماره موبایل",
+            "شماره حساب",
+            "دستمزد روزانه",
+        )
+    )
+
+
+def _has_note_or_unsupported_work_text(normalized_text: str) -> bool:
+    return any(
+        term in normalized_text
+        for term in (
+            "درخواست",
+            "تایید",
+            "تأیید",
+            "به پایان رسید",
+            "شروع شد",
+            "کار کرد",
+            "روز کار کرد",
+            "هفته قبل",
+            "هفته گذشته",
+            "ماه اردیبهشت",
+        )
+    )
+
+
+def _has_plain_note_text(normalized_text: str) -> bool:
+    return any(
+        term in normalized_text
+        for term in (
+            "درخواست",
+            "تایید",
+            "تأیید",
+            "به پایان رسید",
+            "شروع شد",
+        )
+    )
+
+
+def _has_unpaid_purchase_terms(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text)
+    return any(
+        term in normalized
+        for term in (
+            "نسیه",
+            "ندادم",
+            "هنوز ندادم",
+            "پرداخت نشده",
+            "هنوز پرداخت نشده",
+            "تسویه نشده",
+            "بدهی",
+        )
+    )
 
 
 def _llm_v2_intent_to_canonical(intent: str) -> str:
@@ -1618,6 +1849,14 @@ def _split_multi_event_text(text: str) -> list[str]:
     or profile-update signal.  This avoids over-splitting names or descriptions.
     Returns [text] when no viable split is found.
     """
+    normalized_text = normalize_text(text)
+    if (
+        "اضافه شد" in normalized_text
+        and normalized_text.count("اضافه شد") == 1
+        and any(term in normalized_text for term in ["شماره تماس", "شماره موبایل"])
+        and PersianRoleExtractor().extract(text) is not None
+    ):
+        return [text]
     separators = re.compile(r"[.\n;؛]")
     candidate_chunks = [c.strip() for c in separators.split(text) if c.strip()]
     if len(candidate_chunks) < 2:
@@ -1628,7 +1867,25 @@ def _split_multi_event_text(text: str) -> list[str]:
         money_terms = {"تومان", "تومن", "میلیون", "میلیارد", "ریال"}
         financial_verbs = {"دادم", "داد", "گرفتم", "گرفت", "پرداخت", "پرداختم", "خریدم", "خرید", "واریز", "پول داد"}
         profile_terms = {"شماره تماس", "شماره موبایل", "شماره حساب", "شماره کارت", "دستمزد روزانه", "حساب"}
-        setup_terms = {" است", " هست", "می باشد", "میباشد", "کارگر", "کارفرما", "سرامیک کار", "فروشنده"}
+        setup_terms = {
+            " است",
+            " هست",
+            "می باشد",
+            "میباشد",
+            "اضافه شد",
+            "به پروژه اضافه",
+            "کارگر",
+            "کارفرما",
+            "سرامیک کار",
+            "برق کار",
+            "لوله کش",
+            "نقاش",
+            "کابینت کار",
+            "گچ کار",
+            "کناف کار",
+            "نما کار",
+            "فروشنده",
+        }
         has_money = any(t in chunk for t in money_terms)
         has_financial_verb = any(v in chunk for v in financial_verbs)
         has_profile = any(p in chunk for p in profile_terms)

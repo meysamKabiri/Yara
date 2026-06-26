@@ -35,6 +35,20 @@ def test_payment_routes_to_financial_schema() -> None:
     assert route["ui_mode"] == "FinancialModal"
 
 
+def test_project_account_deposit_with_client_word_routes_to_financial_schema() -> None:
+    route = DomainRouterService().route(
+        "خانم احمدی 80 میلیون تومان به حساب پروژه واریز کرد.",
+        {
+            "intent": "FINANCIAL",
+            "action": "PAYMENT_IN",
+            "financial": {"amount": 80_000_000, "direction": "IN"},
+        },
+    )
+
+    assert route["domain"] == DomainType.FINANCIAL.value
+    assert route["ui_mode"] == "FinancialModal"
+
+
 def test_profile_update_fields_route_to_entity_update_schema_even_if_action_is_set_role() -> None:
     route = DomainRouterService().route(
         "شماره تماس میثم 09123456789",

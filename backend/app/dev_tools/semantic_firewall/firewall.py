@@ -52,12 +52,6 @@ class SemanticFirewallService:
             entity_context,
             llm_output or {},
         )
-        if fixed.type == CanonicalEventType.NOTE and not self.rule_engine.note_allowed(
-            raw_text,
-            entity_context,
-        ):
-            raise SemanticFirewallError("NOTE_EVENT blocked by semantic rule engine")
-
         return FirewallDecision(
             event=fixed,
             status="FIXED",

@@ -83,6 +83,8 @@ def _has_purchase_meaning(normalized: str) -> bool:
     phrases = [
         "خریدم",
         "خرید کردم",
+        "خریداری شد",
+        "خریداری",
         "فاکتور گرفتم",
         "خرید نسیه",
         "فاکتور",
@@ -93,6 +95,8 @@ def _has_purchase_meaning(normalized: str) -> bool:
         return True
     return (
         "پرداخت کردم" in normalized and "خرید" in normalized
+    ) or (
+        "پرداخت شد" in normalized and "خرید" in normalized
     ) or (
         "pardakht kardam" in normalized and "kharid" in normalized
     )
