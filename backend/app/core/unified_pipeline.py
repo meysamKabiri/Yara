@@ -59,6 +59,29 @@ def _emit_event(db: Session, event_name, payload=None, duration_ms=None):
         pass
 
 
+def _emit_multi_event_split_applied(db: Session, chunks: list[str]) -> None:
+    _emit_event(db, "MULTI_EVENT_SPLIT_APPLIED", {
+        "chunk_count": len(chunks),
+        "chunks": [
+            {"chunk_index": index, "chunk_text": chunk}
+            for index, chunk in enumerate(chunks)
+        ],
+    })
+
+
+def _emit_chunk_processed(
+    db: Session,
+    chunk_index: int,
+    chunk_text: str,
+    processing_path: str,
+) -> None:
+    _emit_event(db, "MULTI_EVENT_CHUNK_PROCESSED", {
+        "chunk_index": chunk_index,
+        "chunk_text": chunk_text,
+        "processing_path": processing_path,
+    })
+
+
 def process_input(
     db: Session,
     project_id: int,
@@ -73,6 +96,23 @@ def process_input(
 
     entity_context = list(db.scalars(select(Worker).where(Worker.project_id == project_id)))
     chunks = _split_multi_event_text(text)
+    split_attempted = False
+
+    if len(chunks) > 1:
+        split_attempted = True
+        _emit_multi_event_split_applied(db, chunks)
+        interpretations = _process_split_fallback_chunks(
+            db,
+            project_id,
+            text,
+            chunks,
+            entity_context,
+            cache,
+            total_start,
+        )
+        if interpretations:
+            return interpretations
+
     fast_profile_update = None if len(chunks) > 1 else _build_profile_update_interpretation(project_id, text, entity_context)
     if fast_profile_update is not None and not _is_phone_or_account_update(fast_profile_update):
         fast_profile_update = None
@@ -216,7 +256,8 @@ def process_input(
     _debug_print("llm_v2_fallback", {"reason": "LLM v2 invalid or failed"})
 
     if len(chunks) > 1:
-        _emit_event(db, "MULTI_EVENT_SPLIT_APPLIED", {"chunk_count": len(chunks)})
+        if not split_attempted:
+            _emit_multi_event_split_applied(db, chunks)
         interpretations = _process_split_fallback_chunks(
             db,
             project_id,
@@ -343,13 +384,14 @@ def _process_split_fallback_chunks(
     legacy_duration_ms = 0.0
     llm_duration_ms = cache.timings_ms.get("llm_v2_duration_ms", 0.0)
 
-    for chunk in chunks:
+    for chunk_index, chunk in enumerate(chunks):
         profile_update = _build_profile_update_interpretation(project_id, chunk, entity_context)
         if profile_update is not None and _is_phone_or_account_update(profile_update):
             _emit_fast_path_started(db, profile_update)
             _retarget_interpretation_to_raw_text(profile_update, raw_text, chunk)
             interpretations.append(profile_update)
             _emit_fast_path_matched(db, profile_update)
+            _emit_chunk_processed(db, chunk_index, chunk, "FAST_PATH")
             continue
 
         fast_financial_payment = _build_financial_payment_fast_path_interpretation(project_id, chunk, entity_context)
@@ -358,10 +400,17 @@ def _process_split_fallback_chunks(
             _retarget_interpretation_to_raw_text(fast_financial_payment, raw_text, chunk)
             interpretations.append(fast_financial_payment)
             _emit_fast_path_matched(db, fast_financial_payment)
+            _emit_chunk_processed(db, chunk_index, chunk, "FAST_PATH")
             continue
 
         chunk_llm_start = perf_counter()
-        chunk_llm_result = _safe_llm_v2_result(chunk, project_id, cache, db=db)
+        chunk_llm_result = _safe_llm_v2_result(
+            chunk,
+            project_id,
+            cache,
+            db=db,
+            event_payload={"chunk_index": chunk_index, "chunk_text": chunk},
+        )
         llm_duration_ms += _elapsed_ms(chunk_llm_start)
         chunk_interpretations = _validated_llm_v2_chunk_interpretations(
             project_id,
@@ -372,18 +421,21 @@ def _process_split_fallback_chunks(
         )
         if chunk_interpretations:
             interpretations.extend(chunk_interpretations)
+            _emit_chunk_processed(db, chunk_index, chunk, "LLM")
             continue
 
         profile_update = _build_profile_update_interpretation(project_id, chunk, entity_context)
         if profile_update is not None:
             _retarget_interpretation_to_raw_text(profile_update, raw_text, chunk)
             interpretations.append(profile_update)
+            _emit_chunk_processed(db, chunk_index, chunk, "FALLBACK")
             continue
 
         fast_setup = _build_role_assignment_interpretation(project_id, chunk, entity_context)
         if fast_setup is not None:
             _retarget_interpretation_to_raw_text(fast_setup, raw_text, chunk)
             interpretations.append(fast_setup)
+            _emit_chunk_processed(db, chunk_index, chunk, "FALLBACK")
             continue
 
         legacy_start = perf_counter()
@@ -414,6 +466,7 @@ def _process_split_fallback_chunks(
             _retarget_interpretation_to_raw_text(interpretation, raw_text, chunk)
         interpretations.extend(chunk_legacy)
         legacy_duration_ms += _elapsed_ms(legacy_start)
+        _emit_chunk_processed(db, chunk_index, chunk, "FALLBACK")
 
     if not interpretations:
         return []
@@ -458,15 +511,53 @@ def _validated_llm_v2_chunk_interpretations(
         validator = LLMv2Validator()
         if "events" in llm_v2_result:
             validated = validator.validate_multi(llm_v2_result, entity_context)
+            validated = [
+                interpretation
+                for interpretation in validated
+                if _llm_v2_event_belongs_to_chunk(interpretation, chunk)
+            ]
         else:
             validated = [validator.validate(llm_v2_result, entity_context)]
+            if not _llm_v2_event_belongs_to_chunk(validated[0], chunk):
+                return []
     except LLMv2ValidationError:
         return []
-    interpretations = _build_llm_v2_interpretations(project_id, raw_text, validated, entity_context)
+    interpretations = _build_llm_v2_interpretations(project_id, chunk, validated, entity_context)
     for interpretation in interpretations:
+        _retarget_interpretation_to_raw_text(interpretation, raw_text, chunk)
         if interpretation.matched_input_text is None:
             interpretation.matched_input_text = chunk
     return interpretations
+
+
+def _llm_v2_event_belongs_to_chunk(interpretation: Any, chunk: str) -> bool:
+    chunk_normalized = normalize_text(chunk).replace("\u200c", " ")
+    matched_text = getattr(interpretation, "matched_text", None)
+    if isinstance(matched_text, str) and matched_text.strip():
+        matched_normalized = normalize_text(matched_text).replace("\u200c", " ")
+        if matched_normalized in chunk_normalized or chunk_normalized in matched_normalized:
+            return True
+
+    entities = getattr(interpretation, "entities", []) or []
+    entity_names = [
+        normalize_text(entity.name).replace("\u200c", " ")
+        for entity in entities
+        if getattr(entity, "name", None)
+    ]
+    has_entity_match = any(name and name in chunk_normalized for name in entity_names)
+    if not has_entity_match:
+        return False
+
+    chunk_amount = parse_persian_money(chunk)
+    interpretation_amount = getattr(getattr(interpretation, "financial", None), "amount", None)
+    if chunk_amount is not None and interpretation_amount is not None:
+        return Decimal(str(chunk_amount)) == Decimal(str(interpretation_amount))
+
+    quantity = getattr(getattr(interpretation, "work", None), "quantity", None)
+    if quantity is not None:
+        return str(quantity) in chunk_normalized
+
+    return chunk_amount is None and interpretation_amount is None
 
 
 def _retarget_interpretation_to_raw_text(
@@ -1406,6 +1497,7 @@ def _safe_llm_v2_result(
     project_id: int,
     request_cache: RequestCache | None = None,
     db: Session | None = None,
+    event_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cache_context = {"interpreter": "llm_v2"}
     key = llm_cache_key(input_text, project_id, cache_context)
@@ -1422,7 +1514,11 @@ def _safe_llm_v2_result(
         interpreter = _llm_v2_interpreter()
         interpret_sig = inspect.signature(interpreter.interpret)
         if db is not None:
-            _emit_event(db, "LLM_STARTED", {"project_id": project_id})
+            _emit_event(db, "LLM_STARTED", {
+                "project_id": project_id,
+                "input_text_length": len(input_text),
+                **(event_payload or {}),
+            })
         if "db" in interpret_sig.parameters:
             result = interpreter.interpret(input_text, project_id, db=db)
         else:

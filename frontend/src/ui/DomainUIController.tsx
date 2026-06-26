@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import type { JobEvent, JobState, PendingInterpretation, Worker } from "../api";
-import { JobProgressPanel } from "../observability/components/JobProgressPanel";
 import { ROLE_OPTIONS } from "../constants";
 import type { SetupEntity } from "../types/domain";
 import { SetupModal } from "./setup/SetupModal";
@@ -503,10 +502,11 @@ export function DomainUIController({
         </div>
 
         {!isJobDone && isJobActive && (
-          <>
-            <JobProgressPanel state={jobState} events={jobEvents ?? []} connectionState={jobConnectionState} />
+          <section className="job-loading-panel" aria-live="polite">
+            <h3>در حال بررسی اطلاعات...</h3>
+            <p>لطفاً چند لحظه صبر کنید. نتیجه برای تایید نمایش داده می‌شود.</p>
             {jobError && <div className="observability-error">{jobError}</div>}
-          </>
+          </section>
         )}
 
         {!isJobDone && isJobActive ? null : shouldShowMultiReview ? (

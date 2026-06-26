@@ -320,12 +320,13 @@ def test_multi_event_single_legacy_compat(client: TestClient, monkeypatch: pytes
 
 
 def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient) -> None:
+    manual_input = "میثم 300 میلیون به حساب پروژه واریز کرد. به علی احمدی 5 میلیون دادم. از هادی پور 25 میلیون سیم خریدم"
     project = client.post("/projects", json={"name": "runtime-split-financial"}).json()
 
     result = natural_input_result(
         client,
         project["id"],
-        "میثم 300 میلیون به حساب پروژه واریز کرد. به علی احمدی 5 میلیون دادم. از هادی پور 25 میلیون سیم خریدم و پرداخت کردم.",
+        manual_input,
         headers={"X-Trace-Id": "trace-runtime-split-financial"},
     )
 
@@ -349,17 +350,131 @@ def test_runtime_split_fallback_keeps_three_financial_events(client: TestClient)
     ]
     assert pis[1]["extracted_entities"][0]["name"] == "علی احمدی"
     assert pis[0]["extracted_entities"][0]["project_role"] == "CLIENT"
+    assert pis[0]["matched_input_text"] == "میثم 300 میلیون به حساب پروژه واریز کرد"
     assert pis[1]["extracted_entities"][0]["project_role"] == "OTHER"
+    assert pis[1]["matched_input_text"] == "به علی احمدی 5 میلیون دادم"
     if pis[1]["structured_interpretation"] is not None:
         assert pis[1]["structured_interpretation"]["entities"][0]["project_role"] == "OTHER"
     assert pis[2]["semantic_action"] == "PURCHASE_PAID"
+    assert "هادی پور" in pis[2]["matched_input_text"]
+    assert pis[2]["matched_input_text"] == "از هادی پور 25 میلیون سیم خریدم"
+    assert pis[2]["description"] == "از هادی پور 25 میلیون سیم خریدم"
+    assert pis[2]["description"] != "میثم 300 میلیون به حساب پروژه واریز کرد. به علی احمدی 5 میلیون دادم. از هادی پور 25 میلیون سیم خریدم"
+    assert pis[2]["extracted_entities"][0]["name"] == "هادی پور"
+    assert pis[2]["extracted_entities"][0]["name"] != "میثم"
     assert pis[2]["extracted_entities"][0]["project_role"] == "VENDOR"
+    assert pis[2]["extracted_amount"] != "300000000.00"
+
+    for pi in pis:
+        structured_entities = (pi.get("structured_interpretation") or {}).get("entities") or []
+        structured_financial = (pi.get("structured_interpretation") or {}).get("financial") or {}
+        if not structured_entities:
+            continue
+        extracted = pi["extracted_entities"][0]
+        structured = structured_entities[0]
+        assert structured["name"] == extracted["name"]
+        assert structured["project_role"] == extracted["project_role"]
+        assert str(structured_financial.get("amount")) in {pi["extracted_amount"], pi["extracted_amount"].removesuffix(".00")}
+        assert pi["description"] == pi["matched_input_text"]
+        assert pi["description"] != manual_input
 
     factory = client.app.state.testing_session_factory
     with factory() as db:
         events = get_trace_events("trace-runtime-split-financial", db=db)
     split_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "MULTI_EVENT_SPLIT_APPLIED")
     assert split_event["payload"]["chunk_count"] == 3
+    assert [chunk["chunk_text"] for chunk in split_event["payload"]["chunks"]] == [
+        "میثم 300 میلیون به حساب پروژه واریز کرد",
+        "به علی احمدی 5 میلیون دادم",
+        "از هادی پور 25 میلیون سیم خریدم",
+    ]
+    event_names = [event.get("event_name") or event.get("event") for event in events]
+    split_index = event_names.index("MULTI_EVENT_SPLIT_APPLIED")
+    llm_started = [
+        (index, event)
+        for index, event in enumerate(events)
+        if (event.get("event_name") or event.get("event")) == "LLM_STARTED"
+    ]
+    assert all(index > split_index for index, _ in llm_started)
+    assert all(event["payload"].get("chunk_text") != manual_input for _, event in llm_started)
+    assert all(event["payload"].get("input_text_length") != len(manual_input) for _, event in llm_started)
+
+
+def test_multi_event_mixed_fast_path_and_chunk_llm(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = client.post("/projects", json={"name": "multi-mixed-fast-llm"}).json()
+    input_text = "به علی احمدی 5 میلیون دادم. از هادی پور 25 میلیون سیم خریدم"
+    llm_calls: list[str] = []
+
+    def fake_interpret(self, raw_text: str, project_id: int, db=None) -> dict:
+        llm_calls.append(raw_text)
+        if raw_text == "از هادی پور 25 میلیون سیم خریدم":
+            return {
+                "intent": "FINANCIAL",
+                "action": "PURCHASE_PAID",
+                "entities": [{"name": "هادی پور", "kind": "PERSON", "project_role": "VENDOR", "role_detail": None}],
+                "financial": {"amount": 25000000, "direction": "OUT", "payment_method": "CASH", "due_date_text": None},
+                "work": {"quantity": None, "unit": None, "description": None},
+                "note": {"text": None},
+                "confidence": 0.92,
+                "ambiguity": False,
+                "missing_fields": [],
+                "reasoning_summary": "خرید سیم از هادی پور",
+                "matched_text": raw_text,
+            }
+        return {
+            "intent": "NOTE",
+            "action": "NOTE",
+            "entities": [],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": raw_text},
+            "confidence": 0.0,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "unexpected test call",
+            "_llm_v2_failed": True,
+        }
+
+    monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", fake_interpret)
+
+    result = natural_input_result(
+        client,
+        project["id"],
+        input_text,
+        headers={"X-Trace-Id": "trace-mixed-fast-llm"},
+    )
+
+    pis = result["interpretations"]
+    assert len(pis) == 2
+    assert llm_calls == ["از هادی پور 25 میلیون سیم خریدم"]
+    assert pis[0]["matched_input_text"] == "به علی احمدی 5 میلیون دادم"
+    assert pis[0]["extracted_amount"] == "5000000.00"
+    assert pis[0]["financial_direction"] == "OUTGOING"
+    assert pis[0]["extracted_entities"][0]["project_role"] == "OTHER"
+    assert pis[1]["matched_input_text"] == "از هادی پور 25 میلیون سیم خریدم"
+    assert pis[1]["extracted_amount"] == "25000000.00"
+    assert pis[1]["financial_direction"] == "OUTGOING"
+    assert pis[1]["extracted_entities"][0]["project_role"] == "VENDOR"
+
+    factory = client.app.state.testing_session_factory
+    with factory() as db:
+        events = get_trace_events("trace-mixed-fast-llm", db=db)
+    event_names = [event.get("event_name") or event.get("event") for event in events]
+    assert "MULTI_EVENT_SPLIT_APPLIED" in event_names
+    split_index = event_names.index("MULTI_EVENT_SPLIT_APPLIED")
+    llm_events = [
+        event
+        for event in events
+        if (event.get("event_name") or event.get("event")) == "LLM_STARTED"
+    ]
+    assert [event["payload"].get("chunk_text") for event in llm_events] == ["از هادی پور 25 میلیون سیم خریدم"]
+    assert all(event_names.index("LLM_STARTED") > split_index for event in llm_events)
+    chunk_paths = [
+        event["payload"]["processing_path"]
+        for event in events
+        if (event.get("event_name") or event.get("event")) == "MULTI_EVENT_CHUNK_PROCESSED"
+    ]
+    assert chunk_paths == ["FAST_PATH", "LLM"]
 
 
 def test_final_response_role_repair_updates_structured_and_extracted_entities() -> None:

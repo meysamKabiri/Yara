@@ -1877,6 +1877,25 @@ mark {
   padding: 1rem;
 }
 
+.job-loading-panel {
+  background: #ffffff;
+  border: 1px solid #e4ebe7;
+  border-radius: 8px;
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem;
+}
+
+.job-loading-panel h3 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.job-loading-panel p {
+  color: #64748b;
+  margin: 0;
+}
+
 .job-progress-header {
   align-items: center;
   display: flex;
