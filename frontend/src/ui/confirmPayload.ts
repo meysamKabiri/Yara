@@ -22,13 +22,17 @@ export function buildConfirmPayload(entityId?: number | null): PendingInterpreta
 }
 
 export function normalizeEntityName(value: string): string {
-  return value
+  let normalized = value
     .replace(/[\u064B-\u065F\u0670]/g, "")
     .replace(/\u200c/g, " ")
     .replace(/[يى]/g, "ی")
     .replace(/ك/g, "ک")
     .replace(/\s+/g, " ")
     .trim();
+  while (/^(آقای|اقای|خانم|مهندس|استاد|حاج|مش|جناب|به|از)\s+/.test(normalized)) {
+    normalized = normalized.replace(/^(آقای|اقای|خانم|مهندس|استاد|حاج|مش|جناب|به|از)\s+/, "").trim();
+  }
+  return normalized;
 }
 
 export function exactEntityIdByName<T extends { id: number; name: string }>(
@@ -37,7 +41,13 @@ export function exactEntityIdByName<T extends { id: number; name: string }>(
 ): number | null {
   const normalizedName = normalizeEntityName(name);
   if (!normalizedName) return null;
-  const matches = entities.filter((entity) => normalizeEntityName(entity.name) === normalizedName);
+  const nameTokens = normalizedName.split(" ").filter(Boolean);
+  const matches = entities.filter((entity) => {
+    const entityName = normalizeEntityName(entity.name);
+    if (entityName === normalizedName) return true;
+    if (nameTokens.length === 1) return entityName.split(" ").includes(normalizedName);
+    return false;
+  });
   return matches.length === 1 ? matches[0].id : null;
 }
 

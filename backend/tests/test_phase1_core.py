@@ -440,9 +440,12 @@ def test_generate_identity_key_normalizes_name_and_optional_phone() -> None:
 
 def test_entity_normalizer_name_compaction_and_scoring() -> None:
     assert normalize_name("  آقای  میثم\u200c کبیری  ") == "میثم کبیری"
+    assert normalize_name("به ریاحی") == "ریاحی"
+    assert normalize_name("از هادی پور") == "هادی پور"
     assert compact_name("هادی پور سیم") == "هادیپورسیم"
     assert match_score("میثم کبیری", "میثم کبیری") == 1.0
     assert match_score("هادیپور سیم", "هادی پور سیم") == 0.95
+    assert match_score("به ریاحی", "ریاحی") == 1.0
     assert match_score("میثم", "میثم کبیری") == 0.7
     assert match_score("میثم", "رحیم") == 0.0
 

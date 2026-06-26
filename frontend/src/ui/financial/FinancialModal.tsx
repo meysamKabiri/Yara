@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS, ROLE_OPTIONS, SEMANTIC_ACTION_OPTIONS } from "../../constants";
+import { exactEntityIdByName } from "../confirmPayload";
 
 const CREATE_NEW_SENTINEL = -1;
 
@@ -118,7 +119,11 @@ export function FinancialModal({
     const expRole = expectedRole(extractedCounterparty, semAction, direction);
     const clients = workers.filter((w) => w.type === "CLIENT");
 
-    // 1. exact match + role compatible
+    // 1. unique normalized project-person match, even if extraction guessed a generic vendor role
+    const normalizedNameMatch = entityName ? exactEntityIdByName(entityName, workers) : null;
+    if (normalizedNameMatch) return normalizedNameMatch;
+
+    // 2. exact match + role compatible
     for (const c of candidateList) {
       const rec = c as Record<string, unknown>;
       if (rec.match_type === "exact" && typeof rec.person_id === "number") {
@@ -127,7 +132,7 @@ export function FinancialModal({
       }
     }
 
-    // 2. single role-compatible partial >= 0.75
+    // 3. single role-compatible partial >= 0.75
     const viable: { worker: Worker; score: number }[] = [];
     for (const c of candidateList) {
       const rec = c as Record<string, unknown>;
@@ -139,14 +144,14 @@ export function FinancialModal({
     }
     if (viable.length === 1 && viable[0].score >= 0.75) return viable[0].worker.id;
 
-    // 3. CLIENT rule: partial >= 0.60 when exactly one project client
+    // 4. CLIENT rule: partial >= 0.60 when exactly one project client
     if (expRole === "CLIENT" && clients.length === 1) {
       const client = clients[0];
       const inCandidates = candidateList.some((c) => (c as Record<string, unknown>).person_id === client.id);
       if (inCandidates) return client.id;
     }
 
-    // 4. exact name match (role-compatible)
+    // 5. exact name match (role-compatible)
     if (entityName) {
       const match = workers.find((w) => w.name === entityName && isRoleCompatible(w.type, expRole));
       if (match) return match.id;
