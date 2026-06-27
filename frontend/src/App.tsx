@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, BarChart3, Bell, Home, Users } from "lucide-react";
+import { Activity, ArrowUpCircle, BarChart3, Bell, CheckCircle2, Clock, Home, ReceiptText, Users } from "lucide-react";
 import {
   api,
   FinancialDirection,
@@ -38,7 +38,7 @@ const exampleInputs = [
 
 type Route =
   | { name: "dashboard" }
-  | { name: "project"; projectId: number | null }
+  | { name: "project"; projectId: number | null; tab?: string | null }
   | { name: "people" }
   | { name: "person"; personId: number }
   | { name: "reports" }
@@ -49,7 +49,7 @@ function parseRoute(pathname: string): Route {
   const projectMatch = pathname.match(/^\/projects\/(\d+)/);
   const personMatch = pathname.match(/^\/people\/(\d+)/);
   const jobMatch = pathname.match(/^\/jobs\/([^/]+)/);
-  if (projectMatch) return { name: "project", projectId: Number(projectMatch[1]) };
+  if (projectMatch) return { name: "project", projectId: Number(projectMatch[1]), tab: new URLSearchParams(window.location.search).get("tab") };
   if (personMatch) return { name: "person", personId: Number(personMatch[1]) };
   if (jobMatch) return { name: "job", jobId: decodeURIComponent(jobMatch[1]) };
   if (pathname === "/people") return { name: "people" };
@@ -70,6 +70,20 @@ type ProjectCardFinancials = {
   paid: number;
   net: number;
   debt: number;
+  labor: number;
+  pending: number;
+  deferred: number;
+  clientName: string | null;
+  lastActivity: string | null;
+};
+
+type NotificationItem = {
+  id: string;
+  projectId: number;
+  tab: string;
+  title: string;
+  detail: string;
+  amount?: number;
 };
 
 function friendlyError(err: unknown): string {
@@ -177,11 +191,49 @@ function App() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [pendingTabEditingId, setPendingTabEditingId] = useState<number | null>(null);
   const [reviewModalDismissed, setReviewModalDismissed] = useState(true);
+  const [isNotificationOpen, setIsNotificationOpen] = useState(false);
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
   const activeProjectId = routeProjectId ?? selectedProjectId ?? null;
-  const openDebtCount = Object.values(projectFinancials).filter((item) => item.debt > 0).length;
+  const notificationItems = useMemo<NotificationItem[]>(() => {
+    const items: NotificationItem[] = [];
+    for (const project of projects) {
+      const financials = projectFinancials[project.id];
+      if (!financials) continue;
+      if (financials.pending > 0) {
+        items.push({
+          id: `pending-${project.id}`,
+          projectId: project.id,
+          tab: "pending",
+          title: `${financials.pending.toLocaleString("fa-IR")} مورد در انتظار تایید`,
+          detail: project.name,
+        });
+      }
+      if (financials.debt > 0) {
+        items.push({
+          id: `debt-${project.id}`,
+          projectId: project.id,
+          tab: "payables",
+          title: "بدهی باز",
+          detail: project.name,
+          amount: financials.debt,
+        });
+      }
+      if (financials.deferred > 0) {
+        items.push({
+          id: `deferred-${project.id}`,
+          projectId: project.id,
+          tab: "payables",
+          title: "چک / پرداخت مدت‌دار",
+          detail: project.name,
+          amount: financials.deferred,
+        });
+      }
+    }
+    return items;
+  }, [projectFinancials, projects]);
+  const openDebtCount = notificationItems.length;
   const naturalInputJob = useNaturalInputJob(naturalInputJobId);
   const naturalInputJobState = useMemo(() => {
     return naturalInputJob.job ? toJobState(naturalInputJob.job.status, Boolean(naturalInputJobId)) : toJobState(null, Boolean(naturalInputJobId));
@@ -192,7 +244,6 @@ function App() {
       { label: "خانه", path: "/dashboard", active: route.name === "dashboard" || route.name === "project", icon: "home" },
       { label: "افراد", path: "/people", active: route.name === "people" || route.name === "person", icon: "users" },
       { label: "گزارش‌ها", path: "/reports", active: route.name === "reports", icon: "reports" },
-      { label: "Jobs", path: "/jobs", active: route.name === "jobs" || route.name === "job", icon: "activity" },
     ],
     [route.name],
   );
@@ -217,6 +268,12 @@ function App() {
   useEffect(() => {
     if (routeProjectId && routeProjectId !== selectedProjectId) setSelectedProjectId(routeProjectId);
   }, [routeProjectId, selectedProjectId]);
+
+  useEffect(() => {
+    if ((route.name === "people" || route.name === "reports") && !selectedProjectId && projects.length > 0) {
+      setSelectedProjectId(projects[0].id);
+    }
+  }, [projects, route.name, selectedProjectId]);
 
   useEffect(() => {
     if (activeProjectId) loadProjectData(activeProjectId);
@@ -255,14 +312,36 @@ function App() {
     try {
       const entries = await Promise.all(
         projectList.map(async (project) => {
-          const [projectPayments, summary] = await Promise.all([
+          const [projectPayments, summary, workerList, workLogList, pendingList] = await Promise.all([
             api.listPayments(project.id),
             api.getOperatingSummary(project.id),
+            api.listWorkers(project.id),
+            api.listWorkLogs(project.id),
+            api.listPendingInterpretations(project.id),
           ]);
           const received = Number(summary.total_received_from_client ?? summary.total_received ?? 0);
           const paid = Number(summary.total_paid_out ?? 0);
           const debt = Number(summary.open_payables ?? 0);
-          return [project.id, { received, paid, debt, net: Number(summary.project_balance ?? received - paid - debt) }] as const;
+          const deferred = Number(summary.deferred_amount || summary.check_amount || 0);
+          const clientName = workerList.find((worker) => worker.type === "CLIENT")?.name ?? null;
+          const latestActivity = [
+            project.updated_at,
+            ...projectPayments.map((payment) => payment.updated_at),
+            ...workLogList.map((log) => log.updated_at),
+            ...pendingList.map((pending) => pending.updated_at),
+          ].sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? project.updated_at;
+          const pending = pendingList.filter((item) => item.status === "PENDING" || item.status === "EDITED").length;
+          return [project.id, {
+            received,
+            paid,
+            debt,
+            net: Number(summary.project_balance ?? received - paid - debt),
+            labor: Number(summary.total_work_amount ?? 0),
+            pending,
+            deferred,
+            clientName,
+            lastActivity: latestActivity,
+          }] as const;
         }),
       );
       setProjectFinancials(Object.fromEntries(entries));
@@ -499,6 +578,12 @@ function App() {
     navigate(`/projects/${projectId}`);
   }
 
+  function openProjectTab(projectId: number, tab: string) {
+    setSelectedProjectId(projectId);
+    setIsNotificationOpen(false);
+    navigate(`/projects/${projectId}?tab=${encodeURIComponent(tab)}`);
+  }
+
   async function confirmFinancialInterpretation(interpretation: PendingInterpretation, payload: ConfirmPayload = {}) {
     const selectedId = payload.entity_id ?? payload.selected_person_id ?? interpretation.suggested_entity_id ?? null;
     if (selectedId && !payload.create_new) {
@@ -699,6 +784,7 @@ function App() {
           onVoicePlaceholder={() => setError("ضبط صدا در مسیر فعلی به صورت جای‌نگهدار فعال است.")}
           onAttachPlaceholder={() => setError("افزودن فایل در مسیر فعلی به صورت جای‌نگهدار فعال است.")}
           successMessage={successMessage}
+          requestedTab={route.tab ?? null}
           onConfirmPending={confirmPendingFromDetail}
           onEditPending={(interpretation) => setPendingTabEditingId(interpretation.id)}
           onDiscardPending={discardPendingFromDetail}
@@ -706,9 +792,9 @@ function App() {
       );
     }
     if (route.name === "people" || route.name === "person") {
-      return <PeoplePage workers={workers} workerStates={workerStates} payments={payments} workLogs={workLogs} invoices={invoices} summary={operatingSummary} selectedPersonId={route.name === "person" ? route.personId : null} onOpenPerson={(personId) => navigate(`/people/${personId}`)} onBackToPeople={() => navigate("/people")} onUpdateWorker={updateWorkerProfile} />;
+      return <PeoplePage projects={projects} selectedProjectId={activeProjectId} onProjectChange={(projectId) => { setSelectedProjectId(projectId); navigate("/people"); }} workers={workers} workerStates={workerStates} payments={payments} workLogs={workLogs} invoices={invoices} summary={operatingSummary} selectedPersonId={route.name === "person" ? route.personId : null} onOpenPerson={(personId) => navigate(`/people/${personId}`)} onBackToPeople={() => navigate("/people")} onUpdateWorker={updateWorkerProfile} />;
     }
-    if (route.name === "reports") return <ReportsPage projects={projects} project={projectDetail} summary={operatingSummary} workers={workers} workerStates={workerStates} payments={payments} invoices={invoices} />;
+    if (route.name === "reports") return <ReportsPage projects={projects} selectedProjectId={activeProjectId} onProjectChange={setSelectedProjectId} />;
     if (route.name === "jobs") return <JobsPage onOpenJob={(jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)} />;
     if (route.name === "job") return <JobDetailPage jobId={route.jobId} onBack={() => navigate("/jobs")} />;
     return (
@@ -738,10 +824,35 @@ function App() {
             </button>
           ))}
         </nav>
-        <button className={openDebtCount > 0 ? "header-bell has-alerts" : "header-bell"} type="button" aria-label="هشدارها">
-          <Bell aria-hidden="true" size={17} />
-          <span>{openDebtCount.toLocaleString("fa-IR")}</span>
-        </button>
+        <div className="notification-shell">
+          <button className={openDebtCount > 0 ? "header-bell has-alerts" : "header-bell"} type="button" aria-label="هشدارها" onClick={() => setIsNotificationOpen((value) => !value)}>
+            <Bell aria-hidden="true" size={17} />
+            <span>{openDebtCount.toLocaleString("fa-IR")}</span>
+          </button>
+          {isNotificationOpen && (
+            <div className="notification-dropdown">
+              <div className="notification-dropdown-head">
+                <strong>اعلان‌ها</strong>
+                <span>{notificationItems.length.toLocaleString("fa-IR")} مورد</span>
+              </div>
+              {notificationItems.length === 0 ? (
+                <p className="notification-empty"><CheckCircle2 size={16} />اعلان جدیدی وجود ندارد</p>
+              ) : (
+                <div className="notification-list">
+                  {notificationItems.map((item) => (
+                    <button key={item.id} type="button" onClick={() => openProjectTab(item.projectId, item.tab)}>
+                      {item.tab === "pending" ? <Clock aria-hidden="true" size={16} /> : item.tab === "payables" ? <ReceiptText aria-hidden="true" size={16} /> : <ArrowUpCircle aria-hidden="true" size={16} />}
+                      <span>
+                        <strong>{item.title}</strong>
+                        <small>{item.detail}{item.amount !== undefined ? ` — ${Number(item.amount).toLocaleString("fa-IR")} تومان` : ""}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </aside>
 
       <section className="workspace">

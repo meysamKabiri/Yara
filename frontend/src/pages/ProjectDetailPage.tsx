@@ -84,6 +84,7 @@ type ProjectDetailPageProps = {
   onConfirmPending: (interpretation: PendingInterpretation) => void;
   onEditPending: (interpretation: PendingInterpretation) => void;
   onDiscardPending: (interpretation: PendingInterpretation) => void;
+  requestedTab?: string | null;
 };
 
 function money(value: string | number | null | undefined): string {
@@ -99,7 +100,9 @@ function date(value: string): string {
 }
 
 function shortDate(value: string): string {
-  return new Date(value).toLocaleDateString("fa-IR");
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("fa-IR");
 }
 
 function isoDate(value: Date): string {
@@ -138,11 +141,11 @@ type LaborStats = {
   balance: number;
 };
 
-function PersonCard({ worker, laborStats }: { worker: Worker; laborStats?: LaborStats }) {
+function PersonCard({ worker, laborStats, onOpen }: { worker: Worker; laborStats?: LaborStats; onOpen: (workerId: number) => void }) {
   const roleLabel = ROLE_LABELS[personKind(worker)] ?? ROLE_LABELS.OTHER;
   const showLabor = worker.type === "DAILY_WORKER" && laborStats && (laborStats.totalDays > 0 || laborStats.totalCost > 0 || laborStats.paidOut > 0);
   return (
-    <article className="visibility-person-card">
+    <button className="visibility-person-card clickable-card" type="button" onClick={() => onOpen(worker.id)}>
       <div className="vpc-head">
         <strong>{worker.name}</strong>
         <mark className="role-pill">{roleLabel}</mark>
@@ -160,7 +163,7 @@ function PersonCard({ worker, laborStats }: { worker: Worker; laborStats?: Labor
         {showLabor && <span>پرداخت‌شده: {money(laborStats.paidOut)}</span>}
         {showLabor && <span>مانده تقریبی: {money(laborStats.balance)}</span>}
       </div>
-    </article>
+    </button>
   );
 }
 
@@ -220,6 +223,103 @@ function WorkLogRow({ workLog, workerMap }: { workLog: WorkLog; workerMap: Recor
         <span>{shortDate(workLog.created_at)}</span>
         {workLog.description && <span>{workLog.description}</span>}
       </div>
+    </div>
+  );
+}
+
+function WorkLogGroupCard({ worker, logs, laborStats }: { worker: Worker; logs: WorkLog[]; laborStats?: LaborStats }) {
+  const totalDays = laborStats?.totalDays ?? logs.reduce((total, log) => total + Number(log.unit === "day" ? log.quantity || 0 : 0), 0);
+  const totalCost = laborStats?.totalCost ?? logs.reduce((total, log) => total + Number(log.total_amount || 0), 0);
+  const paidOut = laborStats?.paidOut ?? 0;
+  const balance = laborStats?.balance ?? totalCost - paidOut;
+  return (
+    <article className="worker-labor-card">
+      <div className="worker-labor-head">
+        <div>
+          <strong>{worker.name}</strong>
+          <span>{ROLE_LABELS[personKind(worker)] ?? "کارگر"}</span>
+        </div>
+        <mark className="role-pill">{worker.daily_rate ? `دستمزد: ${money(worker.daily_rate)}` : "دستمزد ثبت نشده"}</mark>
+      </div>
+      <section className="worker-labor-metrics">
+        <div><span>روز کارکرد</span><strong>{days(totalDays)}</strong></div>
+        <div><span>مبلغ کارکرد</span><strong>{money(totalCost)}</strong></div>
+        <div><span>پرداخت‌شده</span><strong>{money(paidOut)}</strong></div>
+        <div><span>مانده</span><strong>{money(balance)}</strong></div>
+      </section>
+      <div className="worker-labor-logs">
+        {logs.map((log) => (
+          <div className="worker-labor-log" key={log.id}>
+            <div>
+              <strong>{log.period_label || "بازه ثبت نشده"}</strong>
+              <span>{log.description || log.task_name}</span>
+            </div>
+            <div>
+              <span>{days(log.quantity)}</span>
+              <span>{log.rate_per_unit ? money(log.rate_per_unit) : "نرخ ثبت نشده"}</span>
+              <strong>{log.total_amount ? money(log.total_amount) : "بدون مبلغ"}</strong>
+              <small>{shortDate(log.created_at)}</small>
+            </div>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function PersonDetailDrawer({
+  worker,
+  laborStats,
+  payments,
+  workLogs,
+  invoices,
+  vendorDebt,
+  onClose,
+}: {
+  worker: Worker;
+  laborStats?: LaborStats;
+  payments: Payment[];
+  workLogs: WorkLog[];
+  invoices: Invoice[];
+  vendorDebt: number;
+  onClose: () => void;
+}) {
+  const kind = personKind(worker);
+  const incoming = payments.filter((payment) => payment.direction === "INCOMING");
+  const outgoing = payments.filter((payment) => payment.direction === "OUTGOING");
+  const deferred = payments.filter((payment) => payment.direction === "DEFERRED" || payment.type === "CHECK");
+  const paid = outgoing.reduce((total, payment) => total + Number(payment.amount || 0), 0);
+  const received = incoming.reduce((total, payment) => total + Number(payment.amount || 0), 0);
+  const invoiceTotal = invoices.reduce((total, invoice) => total + Number(invoice.total_amount || 0), 0);
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <aside className="person-drawer" onClick={(event) => event.stopPropagation()}>
+        <header className="drawer-header">
+          <div>
+            <span className="eyebrow">{ROLE_LABELS[kind] ?? "فرد"}</span>
+            <h2>{worker.name}</h2>
+            <p>{worker.role_detail || ROLE_LABELS[kind] || "نقش ثبت نشده"}</p>
+          </div>
+          <button type="button" onClick={onClose}>بستن</button>
+        </header>
+        <section className="drawer-metrics">
+          {kind === "CLIENT" && <><article><span>دریافتی</span><strong>{money(received)}</strong></article><article><span>تعداد پرداخت</span><strong>{incoming.length.toLocaleString("fa-IR")}</strong></article></>}
+          {kind === "DAILY_WORKER" && <><article><span>روز کارکرد</span><strong>{days(laborStats?.totalDays ?? 0)}</strong></article><article><span>مبلغ کارکرد</span><strong>{money(laborStats?.totalCost ?? 0)}</strong></article><article><span>پرداخت‌شده</span><strong>{money(laborStats?.paidOut ?? 0)}</strong></article><article><span>مانده</span><strong>{money(laborStats?.balance ?? 0)}</strong></article></>}
+          {kind === "SKILLED_WORKER" && <><article><span>پرداخت‌شده</span><strong>{money(paid)}</strong></article><article><span>تعداد پرداخت</span><strong>{outgoing.length.toLocaleString("fa-IR")}</strong></article></>}
+          {kind === "VENDOR" && <><article><span>خرید / فاکتور</span><strong>{money(invoiceTotal)}</strong></article><article><span>پرداخت‌شده</span><strong>{money(paid)}</strong></article><article><span>بدهی باز</span><strong>{money(vendorDebt)}</strong></article><article><span>چک / مدت‌دار</span><strong>{money(deferred.reduce((total, payment) => total + Number(payment.amount || 0), 0))}</strong></article></>}
+        </section>
+        <section className="drawer-section">
+          <h3>اطلاعات تماس</h3>
+          <dl className="detail-list">
+            <div><dt>تلفن</dt><dd>{worker.phone || "ثبت نشده"}</dd></div>
+            <div><dt>شماره حساب</dt><dd>{worker.account_number || "ثبت نشده"}</dd></div>
+            {worker.daily_rate && <div><dt>دستمزد روزانه</dt><dd>{money(worker.daily_rate)}</dd></div>}
+          </dl>
+        </section>
+        {workLogs.length > 0 && <section className="drawer-section"><h3>سوابق کارکرد</h3><div className="mini-list">{workLogs.map((log) => <div className="mini-row" key={log.id}><strong>{log.total_amount ? money(log.total_amount) : days(log.quantity)}</strong><span>{log.period_label || shortDate(log.created_at)}</span></div>)}</div></section>}
+        <section className="drawer-section"><h3>سوابق پرداخت</h3><div className="mini-list">{payments.map((payment) => <div className="mini-row" key={payment.id}><strong>{money(payment.amount)}</strong><span>{DIRECTION_LABELS[payment.direction] ?? "پرداخت"}</span></div>)}{payments.length === 0 && <p className="empty-state">پرداختی ثبت نشده است</p>}</div></section>
+        {invoices.length > 0 && <section className="drawer-section"><h3>فاکتورها</h3><div className="mini-list">{invoices.map((invoice) => <div className="mini-row" key={invoice.id}><strong>{money(invoice.total_amount)}</strong><span>{invoice.description || "فاکتور"}</span></div>)}</div></section>}
+      </aside>
     </div>
   );
 }
@@ -440,9 +540,17 @@ export function ProjectDetailPage({
   project, summary, workers, pendingInterpretations, workLogs, payments, invoices, history,
   rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
   onVoicePlaceholder, onAttachPlaceholder, successMessage,
-  onConfirmPending, onEditPending, onDiscardPending,
+  onConfirmPending, onEditPending, onDiscardPending, requestedTab,
 }: ProjectDetailPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("summary");
+  const [selectedPersonId, setSelectedPersonId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!requestedTab) return;
+    if (["summary", "people", "labor", "financial", "payables", "notes", "reports", "pending"].includes(requestedTab)) {
+      setActiveTab(requestedTab as TabKey);
+    }
+  }, [requestedTab]);
 
   const paidOut = summary ? Number(summary.total_paid_out) : payments.filter((p) => p.direction === "OUTGOING").reduce((t, p) => t + Number(p.amount || 0), 0);
   const received = summary ? Number(summary.total_received_from_client ?? summary.total_received) : payments.filter((p) => p.direction === "INCOMING").reduce((t, p) => t + Number(p.amount || 0), 0);
@@ -504,6 +612,18 @@ export function ProjectDetailPage({
     return Object.values(laborStatsByWorker).reduce((total, stats) => total + stats.paidOut, 0);
   }, [laborStatsByWorker]);
 
+  const workLogsByWorker = useMemo(() => {
+    const grouped: Record<number, WorkLog[]> = {};
+    for (const log of workLogs) {
+      grouped[log.worker_id] = grouped[log.worker_id] ?? [];
+      grouped[log.worker_id].push(log);
+    }
+    for (const logs of Object.values(grouped)) {
+      logs.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+    }
+    return grouped;
+  }, [workLogs]);
+
   const openInvoices = useMemo(() => {
     return invoices.filter((inv) => inv.status === "OPEN" || inv.status === "PARTIAL");
   }, [invoices]);
@@ -553,9 +673,6 @@ export function ProjectDetailPage({
             <button className="primary-action send-button" type="submit" disabled={isLoading || !text.trim()} aria-label="ارسال"><Send aria-hidden="true" size={20} /></button>
           </div>
         </form>
-        <div className="example-chip-list">
-          {examples.slice(0, 4).map((example) => <button key={example} type="button" onClick={() => onTextChange(example)}>{example}</button>)}
-        </div>
       </section>
 
       {successMessage && <div className="success-feedback"><CheckCircle2 aria-hidden="true" size={18} />{successMessage}</div>}
@@ -629,7 +746,7 @@ export function ProjectDetailPage({
                       <mark>{roleWorkers.length.toLocaleString("fa-IR")}</mark>
                     </h4>
                     <div className="visibility-people-list">
-                      {roleWorkers.map((worker) => <PersonCard key={worker.id} worker={worker} laborStats={laborStatsByWorker[worker.id]} />)}
+                      {roleWorkers.map((worker) => <PersonCard key={worker.id} worker={worker} laborStats={laborStatsByWorker[worker.id]} onOpen={setSelectedPersonId} />)}
                     </div>
                   </div>
                 );
@@ -670,8 +787,12 @@ export function ProjectDetailPage({
           {workLogs.length === 0 ? (
             <EmptyState>کارکردی ثبت نشده است</EmptyState>
           ) : (
-            <div className="visibility-trx-list labor-log-list">
-              {workLogs.map((workLog) => <WorkLogRow key={workLog.id} workLog={workLog} workerMap={workerMap} />)}
+            <div className="worker-labor-grid">
+              {Object.entries(workLogsByWorker).map(([workerId, logs]) => {
+                const worker = workerMap[Number(workerId)];
+                if (!worker) return null;
+                return <WorkLogGroupCard key={workerId} worker={worker} logs={logs} laborStats={laborStatsByWorker[Number(workerId)]} />;
+              })}
             </div>
           )}
         </div>
@@ -793,6 +914,17 @@ export function ProjectDetailPage({
             </div>
           )}
         </div>
+      )}
+      {selectedPersonId && workerMap[selectedPersonId] && (
+        <PersonDetailDrawer
+          worker={workerMap[selectedPersonId]}
+          laborStats={laborStatsByWorker[selectedPersonId]}
+          payments={payments.filter((payment) => payment.entity_id === selectedPersonId)}
+          workLogs={workLogs.filter((log) => log.worker_id === selectedPersonId)}
+          invoices={invoices.filter((invoice) => invoice.vendor_id === selectedPersonId)}
+          vendorDebt={Number(summary?.vendor_debts.find((debt) => debt.vendor_id === selectedPersonId)?.debt ?? 0)}
+          onClose={() => setSelectedPersonId(null)}
+        />
       )}
     </div>
   );

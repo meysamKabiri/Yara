@@ -346,6 +346,28 @@ textarea {
   margin-top: 0.25rem;
 }
 
+.project-list-title {
+  align-items: center;
+}
+
+.project-search {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dce7e1;
+  border-radius: 14px;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  max-width: 520px;
+  padding: 0.55rem 0.75rem;
+}
+
+.project-search input {
+  border: 0;
+  font: inherit;
+  outline: 0;
+}
+
 .overview-cards {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -384,6 +406,12 @@ textarea {
   min-width: 0;
 }
 
+.project-card-head span {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
 .project-card-head mark {
   flex: 0 0 auto;
   font-size: 0.76rem;
@@ -394,6 +422,24 @@ textarea {
   gap: 0.55rem 0.75rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
+}
+
+.project-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.create-project-modal {
+  max-width: 520px;
+}
+
+.create-project-modal label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.create-project-modal label span {
+  font-weight: 700;
 }
 
 .project-overview-card dl div {
@@ -474,7 +520,15 @@ textarea {
   border-color: #dbe8e1;
   box-shadow: 0 16px 48px rgb(47 143 91 / 0.09);
   max-width: 100%;
-  padding: 1.25rem;
+  padding: 0.85rem;
+}
+
+.project-workspace .ai-work-card .section-title h2 {
+  font-size: 1rem;
+}
+
+.project-workspace .chat-composer textarea {
+  min-height: 64px;
 }
 
 .project-workspace .chat-composer {
@@ -2303,6 +2357,21 @@ mark {
   gap: 0.3rem;
 }
 
+.visibility-person-card.clickable-card,
+.person-card.clickable-card {
+  color: inherit;
+  cursor: pointer;
+  text-align: right;
+  transition: border-color 0.15s, transform 0.15s, background 0.15s;
+}
+
+.visibility-person-card.clickable-card:hover,
+.person-card.clickable-card:hover {
+  background: #ffffff;
+  border-color: #cbdcd3;
+  transform: translateY(-1px);
+}
+
 .vpc-head {
   display: flex;
   align-items: center;
@@ -2357,6 +2426,89 @@ mark {
   gap: 0.4rem;
 }
 
+.worker-labor-grid {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.worker-labor-card {
+  background: #ffffff;
+  border: 1px solid #e4ebe7;
+  border-radius: 16px;
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+}
+
+.worker-labor-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.worker-labor-head > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.worker-labor-head strong {
+  font-size: 1rem;
+}
+
+.worker-labor-head span {
+  color: #65727d;
+  font-size: 0.8rem;
+}
+
+.worker-labor-metrics {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.worker-labor-metrics div {
+  background: #f8fbf9;
+  border: 1px solid #eef3f0;
+  border-radius: 12px;
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem;
+}
+
+.worker-labor-metrics span,
+.worker-labor-log span,
+.worker-labor-log small {
+  color: #65727d;
+  font-size: 0.76rem;
+}
+
+.worker-labor-metrics strong {
+  font-size: 0.88rem;
+}
+
+.worker-labor-logs {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.worker-labor-log {
+  border-top: 1px solid #eef3f0;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 0.55rem;
+}
+
+.worker-labor-log > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.worker-labor-log > div:last-child {
+  justify-items: end;
+}
+
 .visibility-trx-row {
   border: 1px solid #e8efeb;
   border-radius: 12px;
@@ -2382,6 +2534,161 @@ mark {
   font-weight: 800;
   font-size: 0.95rem;
   color: #1b3122;
+}
+
+.drawer-backdrop {
+  background: rgb(31 48 38 / 0.32);
+  inset: 0;
+  position: fixed;
+  z-index: 30;
+}
+
+.person-drawer {
+  background: #ffffff;
+  box-shadow: -18px 0 45px rgb(31 48 38 / 0.16);
+  display: grid;
+  gap: 0.9rem;
+  height: 100%;
+  max-width: 460px;
+  overflow-y: auto;
+  padding: 1rem;
+  position: fixed;
+  right: 0;
+  top: 0;
+  width: min(460px, 92vw);
+}
+
+.drawer-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.drawer-header h2 {
+  margin: 0.1rem 0;
+}
+
+.drawer-header p {
+  color: #65727d;
+  margin: 0;
+}
+
+.drawer-metrics {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.drawer-metrics article {
+  background: #f8fbf9;
+  border: 1px solid #e4ebe7;
+  border-radius: 12px;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.65rem;
+}
+
+.drawer-metrics span {
+  color: #65727d;
+  font-size: 0.76rem;
+}
+
+.drawer-section {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.drawer-section h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.notification-shell {
+  position: relative;
+}
+
+.notification-dropdown {
+  background: #ffffff;
+  border: 1px solid #dce7e1;
+  border-radius: 16px;
+  box-shadow: 0 18px 45px rgb(31 48 38 / 0.14);
+  display: grid;
+  gap: 0.5rem;
+  inset-inline-start: 0;
+  min-width: 300px;
+  padding: 0.75rem;
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  z-index: 20;
+}
+
+.notification-dropdown-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.notification-dropdown-head span,
+.notification-empty {
+  color: #65727d;
+  font-size: 0.8rem;
+}
+
+.notification-empty {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.notification-list {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.notification-list button {
+  align-items: flex-start;
+  background: #f8fbf9;
+  border: 1px solid #eef3f0;
+  border-radius: 12px;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0.55rem;
+  text-align: right;
+}
+
+.notification-list button span {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.notification-list small {
+  color: #65727d;
+}
+
+.project-selector {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 240px;
+}
+
+.project-selector span {
+  color: #507266;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.project-selector select {
+  border: 1px solid #dce7e1;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #1f3026;
+  font: inherit;
+  padding: 0.6rem 0.7rem;
 }
 
 .trx-meta {

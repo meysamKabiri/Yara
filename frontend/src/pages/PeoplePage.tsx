@@ -12,9 +12,12 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Invoice, OperatingSummary, Payment, Worker, WorkerState, WorkLog, WorkerType } from "../api";
+import { Invoice, OperatingSummary, Payment, Project, Worker, WorkerState, WorkLog, WorkerType } from "../api";
 
 type PeoplePageProps = {
+  projects: Project[];
+  selectedProjectId: number | null;
+  onProjectChange: (projectId: number) => void;
   workers: Worker[];
   workerStates: WorkerState[];
   payments: Payment[];
@@ -71,6 +74,19 @@ function paymentTotal(payments: Payment[], directions: Payment["direction"][]): 
     .reduce((total, payment) => total + Number(payment.amount || 0), 0);
 }
 
+const PAYMENT_DIRECTION_LABELS: Record<Payment["direction"], string> = {
+  INCOMING: "دریافتی",
+  OUTGOING: "پرداخت واقعی",
+  DEBT: "بدهی",
+  DEFERRED: "پرداخت مدت‌دار",
+};
+
+const INVOICE_STATUS_LABELS: Record<Invoice["status"], string> = {
+  OPEN: "پرداخت‌نشده",
+  PARTIAL: "بخشی پرداخت شده",
+  PAID: "پرداخت شده",
+};
+
 function clientStatus(summary: OperatingSummary | null) {
   const clientReceivable = Number(summary?.client_receivable ?? 0);
   const availableBalance = Number(summary?.available_balance ?? 0);
@@ -109,7 +125,7 @@ function PaymentList({ payments }: { payments: Payment[] }) {
       {payments.map((payment) => (
         <div className="mini-row" key={payment.id}>
           <strong>{money(payment.amount)}</strong>
-          <span>{payment.direction}</span>
+          <span>{PAYMENT_DIRECTION_LABELS[payment.direction] ?? "پرداخت"}</span>
         </div>
       ))}
       {payments.length === 0 && <p className="empty-state">پرداختی ثبت نشده است.</p>}
@@ -123,7 +139,7 @@ function InvoiceList({ invoices }: { invoices: Invoice[] }) {
       {invoices.map((invoice) => (
         <div className="mini-row" key={invoice.id}>
           <strong>{money(invoice.total_amount)}</strong>
-          <span>{invoice.status}</span>
+          <span>{INVOICE_STATUS_LABELS[invoice.status] ?? "فاکتور"}</span>
         </div>
       ))}
       {invoices.length === 0 && <p className="empty-state">فاکتوری ثبت نشده است.</p>}
@@ -132,6 +148,9 @@ function InvoiceList({ invoices }: { invoices: Invoice[] }) {
 }
 
 export function PeoplePage({
+  projects,
+  selectedProjectId,
+  onProjectChange,
   workers,
   workerStates,
   payments,
@@ -195,7 +214,9 @@ export function PeoplePage({
     const personInvoices = invoices.filter((invoice) => invoice.vendor_id === selected.id);
     const personWorkLogs = workLogs.filter((workLog) => workLog.worker_id === selected.id);
     const paidOut = paymentTotal(personPayments, ["OUTGOING"]);
-    const balance = Number(state?.financial_balance ?? 0);
+    const workLogDays = personWorkLogs.reduce((total, workLog) => total + Number(workLog.unit === "day" ? workLog.quantity || 0 : 0), 0);
+    const workLogLaborCost = personWorkLogs.reduce((total, workLog) => total + Number(workLog.total_amount || 0), 0);
+    const balance = kind === "DAILY_WORKER" ? workLogLaborCost - paidOut : Number(state?.financial_balance ?? 0);
     const invoiceTotal = personInvoices.reduce(
       (total, invoice) => total + Number(invoice.total_amount || 0),
       0,
@@ -210,8 +231,7 @@ export function PeoplePage({
     const receivedFromClient = paymentTotal(incomingPayments, ["INCOMING"]);
     const receivable = Number(summary?.client_receivable ?? 0);
     const available = Number(summary?.available_balance ?? 0);
-    const dailyRate = Number(selected.daily_rate ?? 0);
-    const accruedWage = kind === "DAILY_WORKER" ? Number(state?.total_days_worked ?? 0) * dailyRate : 0;
+    const accruedWage = kind === "DAILY_WORKER" ? workLogLaborCost : 0;
     const status = kind === "CLIENT"
       ? clientStatus(summary)
       : kind === "VENDOR"
@@ -269,7 +289,7 @@ export function PeoplePage({
         {kind === "DAILY_WORKER" && (
           <>
             <section className="summary-grid">
-              <article className="metric-card pending"><Clock aria-hidden="true" /><span>تعداد روز کارکرد</span><strong>{state?.total_days_worked ?? "۰"}</strong><small>حضور روزمزد</small></article>
+              <article className="metric-card pending"><Clock aria-hidden="true" /><span>تعداد روز کارکرد</span><strong>{workLogDays.toLocaleString("fa-IR")}</strong><small>حضور روزمزد</small></article>
               <article className="metric-card"><Wallet aria-hidden="true" /><span>دستمزد روزانه</span><strong>{selected.daily_rate ? money(selected.daily_rate) : "دستمزد روزانه ثبت نشده"}</strong><small>{selected.daily_rate ? "مبنای محاسبه" : "دستمزد روزانه ثبت نشده"}</small></article>
               <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>دستمزد محاسبه‌شده</span><strong>{money(accruedWage)}</strong><small>روز × دستمزد</small></article>
               <article className="metric-card negative"><Wallet aria-hidden="true" /><span>مجموع پرداختی</span><strong>{money(paidOut)}</strong><small>{outgoingPayments.length} پرداخت</small></article>
@@ -277,7 +297,7 @@ export function PeoplePage({
             </section>
             <section className="content-grid two-column">
               <article className="panel-card"><div className="section-title"><div><span className="eyebrow">پروفایل</span><h2>اطلاعات کارگر</h2></div></div><DetailList><DetailItem label="نام" value={selected.name} /><DetailItem label="نقش" value="کارگر ساده / روزمزد" /><DetailItem label="تلفن" value={selected.phone || "ثبت نشده"} /><DetailItem label="شماره حساب" value={selected.account_number || "ثبت نشده"} /><DetailItem label="یادداشت" value={selected.notes || "ثبت نشده"} /></DetailList></article>
-              <article className="panel-card"><div className="section-title"><div><span className="eyebrow">کار</span><h2>کارکرد</h2></div></div><DetailList><DetailItem label="تعداد روز کارکرد" value={state?.total_days_worked ?? "۰"} /><DetailItem label="دستمزد روزانه" value={selected.daily_rate ? money(selected.daily_rate) : "دستمزد روزانه ثبت نشده"} /><DetailItem label="دستمزد محاسبه‌شده" value={money(accruedWage)} /><DetailItem label="مانده طلب کارگر" value={money(balance)} /></DetailList></article>
+              <article className="panel-card"><div className="section-title"><div><span className="eyebrow">کار</span><h2>کارکرد</h2></div></div><DetailList><DetailItem label="تعداد روز کارکرد" value={workLogDays.toLocaleString("fa-IR")} /><DetailItem label="دستمزد روزانه" value={selected.daily_rate ? money(selected.daily_rate) : "دستمزد روزانه ثبت نشده"} /><DetailItem label="دستمزد محاسبه‌شده" value={money(accruedWage)} /><DetailItem label="مانده طلب کارگر" value={money(balance)} /></DetailList></article>
               <article className="panel-card"><div className="section-title"><div><span className="eyebrow">پرداخت</span><h2>پرداخت‌ها</h2></div></div><PaymentList payments={outgoingPayments} /></article>
               <article className="panel-card"><div className="section-title"><div><span className="eyebrow">ارتباط</span><h2>پروژه‌های مرتبط</h2></div></div><DetailList><DetailItem label="پروژه" value="پروژه فعال فعلی" /></DetailList></article>
             </section>
@@ -343,9 +363,17 @@ export function PeoplePage({
       <section className="page-heading">
         <div>
           <span className="eyebrow">افراد</span>
-          <h1>افراد پروژه‌ها</h1>
+          <h1>افراد پروژه</h1>
           <p>نمایش نقش‌محور کارفرماها، کارگرها، استادکارها و فروشنده‌ها.</p>
         </div>
+        <label className="project-selector">
+          <span>پروژه</span>
+          <select value={selectedProjectId ?? ""} onChange={(event) => onProjectChange(Number(event.target.value))} disabled={projects.length === 0}>
+            {projects.length === 0 && <option value="">پروژه‌ای وجود ندارد</option>}
+            {projects.length > 0 && !selectedProjectId && <option value="">انتخاب پروژه</option>}
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </label>
       </section>
 
       {groups.map((group) => {
@@ -360,7 +388,10 @@ export function PeoplePage({
                 const personPayments = payments.filter((payment) => payment.entity_id === worker.id);
                 const paidOut = paymentTotal(personPayments, ["OUTGOING"]);
                 const clientPaid = paymentTotal(personPayments, ["INCOMING"]);
-                const balance = Number(state?.financial_balance ?? 0);
+                const workerWorkLogs = workLogs.filter((workLog) => workLog.worker_id === worker.id);
+                const workLogDays = workerWorkLogs.reduce((total, workLog) => total + Number(workLog.unit === "day" ? workLog.quantity || 0 : 0), 0);
+                const workLogLaborCost = workerWorkLogs.reduce((total, workLog) => total + Number(workLog.total_amount || 0), 0);
+                const balance = kind === "DAILY_WORKER" ? workLogLaborCost - paidOut : Number(state?.financial_balance ?? 0);
                 const personInvoices = invoices.filter((invoice) => invoice.vendor_id === worker.id);
                 const invoiceTotal = personInvoices.reduce((total, invoice) => total + Number(invoice.total_amount || 0), 0);
                 const directPurchaseTotal = personPayments
@@ -386,7 +417,7 @@ export function PeoplePage({
                       <DetailItem label="تلفن" value={worker.phone || "ثبت نشده"} />
                       <DetailItem label="شماره حساب" value={worker.account_number || "ثبت نشده"} />
                       {kind === "CLIENT" && <><DetailItem label="پرداخت‌شده توسط کارفرما" value={money(clientPaid)} /><DetailItem label="هزینه / نیاز مالی پروژه" value={money(fundingNeed)} /><DetailItem label="طلب پروژه از کارفرما" value={money(receivable)} /><DetailItem label="موجودی قابل خرج پروژه" value={money(available)} /></>}
-                      {kind === "DAILY_WORKER" && <><DetailItem label="تعداد روز کارکرد" value={state?.total_days_worked ?? "۰"} /><DetailItem label="دستمزد روزانه" value={worker.daily_rate ? money(worker.daily_rate) : "دستمزد روزانه ثبت نشده"} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
+                      {kind === "DAILY_WORKER" && <><DetailItem label="تعداد روز کارکرد" value={workLogDays.toLocaleString("fa-IR")} /><DetailItem label="مبلغ کارکرد" value={money(workLogLaborCost)} /><DetailItem label="دستمزد روزانه" value={worker.daily_rate ? money(worker.daily_rate) : "دستمزد روزانه ثبت نشده"} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
                       {kind === "SKILLED_WORKER" && <><DetailItem label="تخصص" value={specialty(worker)} /><DetailItem label="میزان کارکرد" value={state?.total_quantity ?? "۰"} /><DetailItem label="واحد کارکرد" value={state?.unit ?? "ثبت نشده"} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
                       {kind === "VENDOR" && <><DetailItem label="مجموع خرید / فاکتورها" value={money(invoiceTotal + directPurchaseTotal)} /><DetailItem label="مجموع پرداختی" value={money(paidOut)} /><DetailItem label="بدهی باز" value={money(vendorDebt)} /><DetailItem label="مانده حساب" value={money(balance)} /></>}
                     </DetailList>

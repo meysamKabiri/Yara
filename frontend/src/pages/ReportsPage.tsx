@@ -1,108 +1,155 @@
-import { ArrowDownCircle, ArrowUpCircle, BarChart3, ReceiptText, TrendingUp } from "lucide-react";
-import { Invoice, OperatingSummary, Payment, Project, ProjectDetail, Worker, WorkerState } from "../api";
+import { useEffect, useState } from "react";
+import { ArrowDownCircle, ArrowUpCircle, Banknote, Hammer, ReceiptText, Scale } from "lucide-react";
+import { api, Project, ProjectReportResponse } from "../api";
 
 type ReportsPageProps = {
   projects: Project[];
-  project: ProjectDetail | null;
-  summary: OperatingSummary | null;
-  workers: Worker[];
-  workerStates: WorkerState[];
-  payments: Payment[];
-  invoices: Invoice[];
+  selectedProjectId: number | null;
+  onProjectChange: (projectId: number) => void;
 };
+
+type ReportFilterKey = "week" | "month" | "year" | "all";
 
 function money(value: string | number | null | undefined): string {
   return `${Number(value ?? 0).toLocaleString("fa-IR")} تومان`;
 }
 
-function barWidth(value: number, max: number): string {
-  if (max <= 0) return "0%";
-  return `${Math.max(4, Math.min(100, (value / max) * 100))}%`;
+function days(value: string | number | null | undefined): string {
+  return `${Number(value ?? 0).toLocaleString("fa-IR")} روز`;
 }
 
-export function ReportsPage({ projects, project, summary, workers, workerStates, payments, invoices }: ReportsPageProps) {
-  const incoming = payments.filter((payment) => payment.direction === "INCOMING").reduce((total, payment) => total + Number(payment.amount || 0), 0);
-  const outgoing = payments.filter((payment) => payment.direction === "OUTGOING").reduce((total, payment) => total + Number(payment.amount || 0), 0);
-  const profitability = incoming - outgoing - Number(summary?.total_invoice_amount ?? 0);
-  const dailyWorkerCosts = workerStates.filter((state) => state.role === "DAILY");
-  const skilledWorkerCosts = workerStates.filter((state) => state.role === "SKILLED");
-  const vendorCosts = summary?.vendor_debts ?? [];
-  const maxDailyWorkerBalance = Math.max(...dailyWorkerCosts.map((state) => Math.abs(Number(state.financial_balance || 0))), 1);
-  const maxSkilledWorkerBalance = Math.max(...skilledWorkerCosts.map((state) => Math.abs(Number(state.financial_balance || 0))), 1);
-  const maxVendorDebt = Math.max(...vendorCosts.map((debt) => Number(debt.debt || 0)), 1);
+function shortDate(value: string): string {
+  return new Date(value).toLocaleDateString("fa-IR");
+}
+
+function isoDate(value: Date): string {
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${value.getFullYear()}-${month}-${day}`;
+}
+
+function quickReportRange(key: ReportFilterKey): { from_date: string; to_date: string } | { from_date: ""; to_date: "" } {
+  if (key === "all") return { from_date: "", to_date: "" };
+  const now = new Date();
+  const start = new Date(now);
+  if (key === "week") {
+    const day = start.getDay();
+    const daysFromSaturday = (day + 1) % 7;
+    start.setDate(start.getDate() - daysFromSaturday);
+  } else if (key === "month") {
+    start.setDate(1);
+  } else {
+    start.setMonth(0, 1);
+  }
+  return { from_date: isoDate(start), to_date: isoDate(now) };
+}
+
+export function ReportsPage({ projects, selectedProjectId, onProjectChange }: ReportsPageProps) {
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [report, setReport] = useState<ProjectReportResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    let cancelled = false;
+    setError(null);
+    api.getProjectReportSummary(selectedProjectId, { from_date: fromDate || undefined, to_date: toDate || undefined })
+      .then((nextReport) => {
+        if (!cancelled) setReport(nextReport);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message || "خطا در دریافت گزارش");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fromDate, selectedProjectId, toDate]);
+
+  const applyQuickFilter = (key: ReportFilterKey) => {
+    const range = quickReportRange(key);
+    setFromDate(range.from_date);
+    setToDate(range.to_date);
+  };
+
+  if (projects.length === 0) {
+    return <div className="page-stack"><p className="empty-state">برای گزارش، ابتدا یک پروژه ایجاد کنید.</p></div>;
+  }
+
+  const summary = report?.summary;
 
   return (
     <div className="page-stack">
       <section className="page-heading">
         <div>
           <span className="eyebrow">گزارش‌ها</span>
-          <h1>گزارش مالی</h1>
-          <p>جریان پول، سود و هزینه‌های مهم پروژه‌ها.</p>
+          <h1>گزارش پروژه</h1>
+          <p>گزارش خواندنی از رکوردهای تاییدشده پروژه.</p>
+        </div>
+        <label className="project-selector">
+          <span>پروژه</span>
+          <select value={selectedProjectId ?? ""} onChange={(event) => onProjectChange(Number(event.target.value))}>
+            {!selectedProjectId && <option value="">انتخاب پروژه</option>}
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </label>
+      </section>
+
+      <section className="report-controls" aria-label="بازه گزارش">
+        <div className="date-field">
+          <label htmlFor="global-report-from">از تاریخ</label>
+          <input id="global-report-from" type="date" value={fromDate} onInput={(event) => setFromDate(event.currentTarget.value)} onChange={(event) => setFromDate(event.target.value)} />
+        </div>
+        <div className="date-field">
+          <label htmlFor="global-report-to">تا تاریخ</label>
+          <input id="global-report-to" type="date" value={toDate} onInput={(event) => setToDate(event.currentTarget.value)} onChange={(event) => setToDate(event.target.value)} />
+        </div>
+        <div className="quick-filter-group" aria-label="فیلتر سریع">
+          <button type="button" onClick={() => applyQuickFilter("week")}>این هفته</button>
+          <button type="button" onClick={() => applyQuickFilter("month")}>این ماه</button>
+          <button type="button" onClick={() => applyQuickFilter("year")}>امسال</button>
+          <button type="button" onClick={() => applyQuickFilter("all")}>همه</button>
         </div>
       </section>
 
-      <section className="summary-grid">
-        <article className={profitability >= 0 ? "metric-card positive" : "metric-card negative"}>
-          <TrendingUp aria-hidden="true" />
-          <span>سود/زیان پروژه</span>
-          <strong>{money(profitability)}</strong>
-          <small>{project?.name ?? "پروژه‌ای انتخاب نشده"}</small>
-        </article>
-        <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>ورود پول</span><strong>{money(incoming)}</strong><small>{payments.filter((payment) => payment.direction === "INCOMING").length} پرداخت ورودی</small></article>
-        <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>خروج پول</span><strong>{money(outgoing)}</strong><small>{payments.filter((payment) => payment.direction === "OUTGOING").length} پرداخت خروجی</small></article>
-        <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>فاکتورها</span><strong>{money(summary?.total_invoice_amount)}</strong><small>{invoices.length} فاکتور</small></article>
-      </section>
-
-      <section className="content-grid two-column">
-        <article className="panel-card">
-          <div className="section-title"><div><span className="eyebrow inline-icon"><BarChart3 aria-hidden="true" size={18} />ورود و خروج پول</span><h2>جریان نقدی</h2></div></div>
-          <div className="bar-list">
-            <div className="bar-row"><span>ورودی</span><div><i className="bar positive" style={{ width: barWidth(incoming, Math.max(incoming, outgoing, 1)) }} /></div><strong>{money(incoming)}</strong></div>
-            <div className="bar-row"><span>خروجی</span><div><i className="bar negative" style={{ width: barWidth(outgoing, Math.max(incoming, outgoing, 1)) }} /></div><strong>{money(outgoing)}</strong></div>
-          </div>
-        </article>
-
-        <article className="panel-card">
-          <div className="section-title"><div><span className="eyebrow">پروژه‌ها</span><h2>{projects.length} پروژه</h2></div></div>
-          <div className="mini-list">
-            {projects.map((item) => <button className={item.id === project?.id ? "mini-row active" : "mini-row"} key={item.id} type="button">{item.name}<span>{new Date(item.updated_at).toLocaleDateString("fa-IR")}</span></button>)}
-          </div>
-        </article>
-      </section>
-
-      <section className="content-grid two-column">
-        <article className="panel-card">
-          <div className="section-title"><div><span className="eyebrow">هزینه کارگرها</span><h2>جزئیات</h2></div></div>
-          <div className="bar-list">
-            {dailyWorkerCosts.map((state) => {
-              const amount = Math.abs(Number(state.financial_balance || 0));
-              return <div className="bar-row" key={state.id}><span>{state.name}</span><div><i className="bar pending" style={{ width: barWidth(amount, maxDailyWorkerBalance) }} /></div><strong>{money(amount)}</strong></div>;
-            })}
-            {dailyWorkerCosts.length === 0 && <p className="empty-state">هنوز هزینه کارگری ثبت نشده است.</p>}
-          </div>
-        </article>
-
-        <article className="panel-card">
-          <div className="section-title"><div><span className="eyebrow">هزینه استادکارها</span><h2>جزئیات</h2></div></div>
-          <div className="bar-list">
-            {skilledWorkerCosts.map((state) => {
-              const amount = Math.abs(Number(state.financial_balance || 0));
-              return <div className="bar-row" key={state.id}><span>{state.name}</span><div><i className="bar pending" style={{ width: barWidth(amount, maxSkilledWorkerBalance) }} /></div><strong>{money(amount)}</strong></div>;
-            })}
-            {skilledWorkerCosts.length === 0 && <p className="empty-state">هنوز هزینه استادکاری ثبت نشده است.</p>}
-          </div>
-        </article>
-      </section>
-
-      <section className="content-grid two-column">
-        <article className="panel-card">
-          <div className="section-title"><div><span className="eyebrow">هزینه فروشنده‌ها</span><h2>جزئیات</h2></div></div>
-          <div className="bar-list">
-            {vendorCosts.map((debt) => <div className="bar-row" key={debt.vendor_id}><span>{debt.vendor_name}</span><div><i className="bar negative" style={{ width: barWidth(Number(debt.debt || 0), maxVendorDebt) }} /></div><strong>{money(debt.debt)}</strong></div>)}
-            {vendorCosts.length === 0 && <p className="empty-state">هنوز هزینه فروشنده ثبت نشده است.</p>}
-          </div>
-        </article>
-      </section>
+      {error && <p className="empty-state">{error}</p>}
+      {summary && (
+        <>
+          <section className="summary-grid six-up project-summary-grid">
+            <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>دریافتی</span><strong>{money(summary.money_in)}</strong><small>{selectedProject?.name}</small></article>
+            <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده واقعی</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
+            <article className="metric-card pending"><Hammer aria-hidden="true" /><span>کارکرد ثبت‌شده</span><strong>{money(summary.labor_cost)}</strong><small>هزینه کارکرد تاییدشده</small></article>
+            <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی باز</span><strong>{money(summary.open_payables)}</strong><small>فروشنده + کارکرد پرداخت‌نشده</small></article>
+            <article className="metric-card pending"><Banknote aria-hidden="true" /><span>چک / مدت‌دار</span><strong>{money(summary.deferred_checks)}</strong><small>جدا از پرداخت‌شده واقعی</small></article>
+            <article className={Number(summary.approximate_balance) >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>مانده تقریبی</span><strong>{money(summary.approximate_balance)}</strong><small>دریافتی - پرداختی - بدهی باز</small></article>
+          </section>
+          <p className="summary-helper">موارد در انتظار تایید فقط جداگانه شمرده می‌شوند: {summary.pending_count.toLocaleString("fa-IR")}</p>
+          <section className="content-grid two-column">
+            <article className="panel-card">
+              <div className="section-title"><div><span className="eyebrow">کارفرما</span><h2>پرداخت‌های کارفرما</h2></div></div>
+              <div className="mini-list">
+                {report.client_payments.map((row) => <div className="mini-row" key={row.entity_id}><strong>{row.name}</strong><span>{money(row.total_paid)} / {row.payment_count.toLocaleString("fa-IR")} پرداخت / {row.last_payment_at ? shortDate(row.last_payment_at) : "-"}</span></div>)}
+                {report.client_payments.length === 0 && <p className="empty-state">پرداختی از کارفرما ثبت نشده است</p>}
+              </div>
+            </article>
+            <article className="panel-card">
+              <div className="section-title"><div><span className="eyebrow">کارگران</span><h2>گزارش کارگران</h2></div></div>
+              <div className="mini-list">
+                {report.workers.map((row) => <div className="mini-row" key={row.worker_id}><strong>{row.name}</strong><span>{days(row.total_days)} / کارکرد {money(row.total_labor_cost)} / مانده {money(row.remaining_balance)}</span></div>)}
+                {report.workers.length === 0 && <p className="empty-state">کارکردی برای کارگران ثبت نشده است</p>}
+              </div>
+            </article>
+            <article className="panel-card">
+              <div className="section-title"><div><span className="eyebrow">بدهی</span><h2>بدهی‌ها و چک‌ها</h2></div></div>
+              <div className="mini-list">
+                {report.payables.map((row) => <div className="mini-row" key={row.id}><strong>{row.name}</strong><span>{money(row.amount)} / {row.due_date || row.description || "بدون توضیح"}</span></div>)}
+                {report.payables.length === 0 && <p className="empty-state">بدهی یا چکی ثبت نشده است</p>}
+              </div>
+            </article>
+          </section>
+        </>
+      )}
     </div>
   );
 }
