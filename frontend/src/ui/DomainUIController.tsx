@@ -170,9 +170,9 @@ function hasActualFinancialData(interpretation: PendingInterpretation): boolean 
 }
 
 function getModalKind(interpretation: PendingInterpretation): ModalKind {
-  if (interpretation.domain_route?.domain === "MIXED") return "MIXED";
   if (interpretation.semantic_action === "WORK_LOG" || interpretation.canonical_event_type === "WORK_EVENT") return "WORK";
   if (interpretation.semantic_action === "NOTE") return "NOTE";
+  if (interpretation.domain_route?.domain === "MIXED") return "MIXED";
   if (hasActualFinancialData(interpretation)) return "FINANCIAL";
   if (hasProfileUpdateFields(interpretation)) return "PROFILE";
   if (
@@ -608,14 +608,18 @@ export function DomainUIController({
       const updates = typeof entity.field_updates === "object" && entity.field_updates !== null
         ? entity.field_updates as Record<string, unknown>
         : {};
+      const exactEntityId = exactWorkerIdForProfile(interpretation, safeWorkers);
       onConfirmEntityUpdate(interpretation, {
-        entityId: exactWorkerIdForProfile(interpretation, safeWorkers),
+        entityId: exactEntityId,
         name: entityName(interpretation),
         phone: textValue(updates.phone ?? entity.phone),
         accountNumber: textValue(updates.account_number ?? entity.account_number),
         dailyRate: textValue(updates.daily_rate ?? entity.daily_rate),
         role: preferredEntityType(interpretation),
         roleDetail: textValue(updates.role_detail ?? entity.role_detail),
+        create_new_entity: !exactEntityId && !isUnknownEntity(interpretation),
+        entity_name: entityName(interpretation),
+        project_role: preferredEntityType(interpretation),
         field_updates: updates,
       });
       return;

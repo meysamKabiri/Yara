@@ -138,6 +138,25 @@ function setupEntities(interpretation: PendingInterpretation): SetupEntity[] {
     .filter((entity) => entity.name.trim());
 }
 
+function workInfo(interpretation: PendingInterpretation): { quantity: string; periodLabel: string | null; description: string | null } {
+  const structured = interpretation.structured_interpretation as Record<string, unknown> | null;
+  const work = typeof structured?.work === "object" && structured.work !== null
+    ? structured.work as Record<string, unknown>
+    : {};
+  return {
+    quantity: textValue(interpretation.extracted_quantity ?? work.quantity) ?? "1",
+    periodLabel: textValue(work.period_label),
+    description: textValue(work.description) ?? interpretation.description ?? interpretation.matched_input_text ?? interpretation.raw_input_text ?? null,
+  };
+}
+
+function workWorkerId(interpretation: PendingInterpretation, workers: Worker[]): number | null {
+  if (interpretation.suggested_entity_id) return interpretation.suggested_entity_id;
+  const entityName = textValue(firstEntity(interpretation).name);
+  if (!entityName) return null;
+  return exactEntityIdByName(entityName, workers);
+}
+
 function entityTypeFromRecord(entity: Record<string, unknown>): string {
   const projectRole = typeof entity.project_role === "string" ? entity.project_role : undefined;
   const type = typeof entity.type === "string" ? entity.type : undefined;
@@ -439,7 +458,13 @@ function App() {
         semantic_action: "SET_ROLE",
         extracted_entities: extractedEntities,
       });
-      await api.confirmPendingInterpretation(interpretation.id, { create_new: true });
+      const exactEntityId = extractedEntities.length === 1
+        ? exactEntityIdByName(extractedEntities[0].name, workers)
+        : null;
+      await api.confirmPendingInterpretation(
+        interpretation.id,
+        exactEntityId ? { selected_person_id: exactEntityId } : { create_new: true },
+      );
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
       setNaturalInputJobId(null);
       await loadProjectData(activeProjectId);
@@ -746,7 +771,26 @@ function App() {
     const exactEntityId = interpretation.suggested_entity_id ?? exactEntityIdByName(entityName, workers);
 
     if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
-      await confirmInterpretation(interpretation, exactEntityId ? { entity_id: exactEntityId } : {});
+      await confirmInterpretation(interpretation, exactEntityId
+        ? { entity_id: exactEntityId }
+        : {
+          create_new: true,
+          name: entityName,
+          role,
+        });
+      return;
+    }
+    if (interpretation.canonical_event_type === "WORK_EVENT" || interpretation.semantic_action === "WORK_LOG") {
+      const work = workInfo(interpretation);
+      await confirmInterpretation(interpretation, {
+        entity_id: workWorkerId(interpretation, workers),
+        confirmed: true,
+        field_updates: {
+          quantity_days: work.quantity,
+          period_label: work.periodLabel,
+          description: work.description,
+        },
+      });
       return;
     }
     if (interpretation.semantic_action === "ENTITY_UPDATE" || interpretation.domain_route?.domain === "ENTITY_UPDATE") {
@@ -758,6 +802,9 @@ function App() {
         dailyRate: textValue(updates.daily_rate ?? entity.daily_rate),
         role,
         roleDetail: textValue(updates.role_detail ?? entity.role_detail),
+        create_new_entity: !exactEntityId,
+        entity_name: entityName,
+        project_role: role,
         field_updates: updates,
       });
       return;
@@ -909,7 +956,10 @@ function App() {
           setPendingTabEditingId(null);
         }}
         onResolveUnknownEntity={resolveUnknownEntity}
-        onClose={() => setReviewModalDismissed(true)}
+        onClose={() => {
+          setReviewModalDismissed(true);
+          setPendingTabEditingId(null);
+        }}
         onConfirmSetupEntities={async (interpretation, entities) => {
           await confirmSetupEntities(interpretation, entities);
           setPendingTabEditingId(null);

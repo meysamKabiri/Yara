@@ -1408,7 +1408,11 @@ def confirm_pending_interpretation(
                 status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
             )
         route = _domain_route(interpretation, db=db)
-        if route["domain"] == DomainType.MIXED.value:
+        is_true_mixed_event = interpretation.canonical_event_type not in {
+            CanonicalEventType.WORK.value,
+            CanonicalEventType.NOTE.value,
+        }
+        if route["domain"] == DomainType.MIXED.value and is_true_mixed_event:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Mixed setup and financial input must be split before confirmation",
