@@ -115,6 +115,30 @@ def process_input(
         if interpretations:
             return interpretations
 
+    fast_safe_note = None if len(chunks) > 1 else _build_safe_note_interpretation(project_id, text)
+    if fast_safe_note is not None:
+        db.add(fast_safe_note)
+        db.commit()
+        db.refresh(fast_safe_note)
+        cache.set_legacy_result(_shadow_legacy_payload([fast_safe_note]))
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "safe_note_fast_path",
+        })
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_safe_note]
+
     fast_setup = None if len(chunks) > 1 else _build_role_assignment_interpretation(project_id, text, entity_context)
     if (
         fast_setup is not None
@@ -408,6 +432,13 @@ def _process_split_fallback_chunks(
     llm_duration_ms = cache.timings_ms.get("llm_v2_duration_ms", 0.0)
 
     for chunk_index, chunk in enumerate(chunks):
+        safe_note = _build_safe_note_interpretation(project_id, chunk)
+        if safe_note is not None:
+            _retarget_interpretation_to_raw_text(safe_note, raw_text, chunk)
+            interpretations.append(safe_note)
+            _emit_chunk_processed(db, chunk_index, chunk, "FAST_PATH")
+            continue
+
         fast_setup = _build_role_assignment_interpretation(project_id, chunk, entity_context)
         if fast_setup is not None:
             _emit_fast_path_started(db, fast_setup)
@@ -1447,10 +1478,19 @@ def _financial_payment_fast_path_name(normalized: str, direction: str) -> str | 
     if match is None:
         return None
     name = re.sub(r"\s+", " ", match.group("name")).strip(" ،,")
+    if direction == "OUT":
+        name = _strip_payment_purpose_from_name(name)
     if not name or name in {"به", "از"}:
         return None
     if any(term in name for term in ["پروژه", "حساب", "کارت"]):
         return None
+    return name
+
+
+def _strip_payment_purpose_from_name(name: str) -> str:
+    for marker in (" بابت ", " برای ", " در ازای "):
+        if marker in name:
+            return name.split(marker, 1)[0].strip(" ،,")
     return name
 
 
@@ -1773,6 +1813,8 @@ def _has_note_or_unsupported_work_text(normalized_text: str) -> bool:
             "تایید",
             "تأیید",
             "به پایان رسید",
+            "تمام شد",
+            "تغییر داد",
             "شروع شد",
             "کار کرد",
             "روز کار کرد",
@@ -1793,6 +1835,8 @@ def _has_plain_note_text(normalized_text: str) -> bool:
             "تایید",
             "تأیید",
             "به پایان رسید",
+            "تمام شد",
+            "تغییر داد",
             "شروع شد",
         )
     )

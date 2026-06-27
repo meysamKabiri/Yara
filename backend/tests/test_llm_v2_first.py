@@ -1116,3 +1116,48 @@ def test_counterparty_low_confidence_ambiguous_does_not_preselect(
     pi = natural_input_interpretation(client, project["id"], "به محمد ۱ میلیون دادم")
 
     assert pi["suggested_entity_id"] is None, "Should not auto-select when multiple ambiguous candidates exist"
+
+
+def test_outgoing_worker_payment_strips_purpose_clause_and_links_existing_worker(client: TestClient) -> None:
+    project = client.post("/projects", json={"name": "purpose payment"}).json()
+    worker = _make_worker(client, "ریاحی", "SKILLED_WORKER", project["id"])
+
+    pi = natural_input_interpretation(
+        client,
+        project["id"],
+        "به ریاحی بابت سرامیک کاری 20 میلیون تومان پرداخت شد",
+    )
+
+    assert pi["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert pi["semantic_action"] == "PAYMENT"
+    assert pi["suggested_entity_id"] == worker["id"]
+    assert pi["extracted_entities"][0]["name"] == "ریاحی"
+
+    _confirm_financial(client, pi, {"entity_id": worker["id"], "confirmed": True})
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    assert [item["name"] for item in workers] == ["ریاحی"]
+    assert payments[0]["entity_id"] == worker["id"]
+    assert payments[0]["amount"] == "20000000.00"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "سرامیک طبقه اول تمام شد",
+        "کارفرما رنگ دیوار پذیرایی را تغییر داد",
+    ],
+)
+def test_realistic_progress_and_change_phrases_are_safe_notes(client: TestClient, text: str) -> None:
+    project = client.post("/projects", json={"name": "notes"}).json()
+
+    pi = natural_input_interpretation(client, project["id"], text)
+
+    assert pi["canonical_event_type"] == "NOTE_EVENT"
+    assert pi["semantic_action"] == "NOTE"
+    assert pi["extracted_entities"] is None
+    response = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert response.status_code == 200
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
