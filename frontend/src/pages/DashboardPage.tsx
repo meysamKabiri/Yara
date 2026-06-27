@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useMemo, useRef, useState } from "react";
-import { ArrowDownCircle, ArrowUpCircle, BriefcaseBusiness, Clock, FolderKanban, Hammer, Plus, Search, Scale, UserRound, Wallet } from "lucide-react";
+import { ArrowDownCircle, ArrowUpCircle, BriefcaseBusiness, Clock, FolderKanban, Hammer, Plus, Search, Scale, UserRound, Wallet, X } from "lucide-react";
 import { Project } from "../api";
 
 type ProjectFinancials = {
@@ -70,7 +70,7 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
             <span className="eyebrow inline-icon"><BriefcaseBusiness aria-hidden="true" size={17} />پروژه‌ها</span>
             <h2>پروژه‌ها</h2>
           </div>
-          <button className="primary-action with-icon" type="button" onClick={() => setIsCreateOpen(true)}><Plus aria-hidden="true" size={18} />پروژه جدید</button>
+          <button className="primary-action create-project-trigger with-icon" type="button" onClick={() => setIsCreateOpen(true)}><Plus aria-hidden="true" size={18} />پروژه جدید</button>
         </div>
         <label className="project-search">
           <Search aria-hidden="true" size={17} />
@@ -125,26 +125,31 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
 
       {isCreateOpen && (
         <div className="modal-backdrop">
-          <form className="confirmation-modal create-project-modal" onSubmit={submitCreate}>
+          <form className="confirmation-modal modal-shell create-project-modal" onSubmit={submitCreate}>
             <div className="modal-header">
               <div>
-                <span className="eyebrow">پروژه جدید</span>
-                <h2>ایجاد پروژه</h2>
-                <p>فعلا فقط نام پروژه ذخیره می‌شود. کارفرما را می‌توانید بعدا با ورودی هوشمند اضافه کنید.</p>
+                <h2 className="modal-title">ایجاد پروژه</h2>
+                <p>فعلاً فقط نام پروژه ذخیره می‌شود. کارفرما و جزئیات را می‌توانید بعداً با ورودی هوشمند اضافه کنید.</p>
               </div>
-              <button type="button" onClick={() => setIsCreateOpen(false)}>بستن</button>
+              <button className="modal-close icon-button" type="button" onClick={() => setIsCreateOpen(false)} aria-label="بستن">
+                <X aria-hidden="true" size={20} />
+              </button>
             </div>
-            <label>
-              <span>نام پروژه</span>
-              <input ref={projectNameInputRef} value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} placeholder="مثلا ویلا دماوند" autoFocus />
-            </label>
-            <label>
-              <span>توضیح اختیاری</span>
-              <textarea disabled placeholder="در نسخه فعلی ذخیره نمی‌شود" />
-            </label>
-            <div className="modal-actions">
-              <button type="button" onClick={() => setIsCreateOpen(false)}>انصراف</button>
+            <div className="modal-body">
+              <label>
+                <span>نام پروژه</span>
+                <input ref={projectNameInputRef} value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} placeholder="مثلا ویلا دماوند" autoFocus />
+              </label>
+              <label>
+                <span>توضیح اختیاری</span>
+                <textarea disabled placeholder="در نسخه فعلی ذخیره نمی‌شود" />
+              </label>
+            </div>
+            <div className="modal-footer">
+              <div className="modal-actions">
               <button className="primary-action with-icon" type="submit" disabled={isLoading || !projectName.trim()}><Plus aria-hidden="true" size={18} />ایجاد پروژه</button>
+                <button type="button" onClick={() => setIsCreateOpen(false)}>انصراف</button>
+              </div>
             </div>
           </form>
         </div>

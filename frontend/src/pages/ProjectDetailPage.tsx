@@ -21,6 +21,7 @@ import {
   Scale,
   Send,
   Users,
+  X,
 } from "lucide-react";
 import { api, HistoryEntry, Invoice, OperatingSummary, Payment, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog } from "../api";
 import { PersianDatePicker } from "../components/PersianDatePicker";
@@ -313,7 +314,9 @@ function PersonDetailDrawer({
             <h2>{worker.name}</h2>
             <p>{worker.role_detail || ROLE_LABELS[kind] || "نقش ثبت نشده"}</p>
           </div>
-          <button type="button" onClick={onClose}>بستن</button>
+          <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
+            <X aria-hidden="true" size={20} />
+          </button>
         </header>
         <section className="drawer-metrics">
           {kind === "CLIENT" && <><article><span>دریافتی</span><strong>{money(received)}</strong></article><article><span>تعداد پرداخت</span><strong>{incoming.length.toLocaleString("fa-IR")}</strong></article></>}

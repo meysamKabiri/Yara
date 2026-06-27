@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { X } from "lucide-react";
 import type { JobEvent, JobState, PendingInterpretation, Worker } from "../api";
 import { ROLE_OPTIONS } from "../constants";
 import type { SetupEntity } from "../types/domain";
@@ -322,10 +323,15 @@ function WorkLogModal({
   }
 
   return (
-    <article className="interpretation-card">
-      <h3>ثبت کارکرد کارگر</h3>
-      <p className="muted">{interpretation.matched_input_text || interpretation.raw_input_text}</p>
-      <div className="edit-grid">
+    <article className="interpretation-card modal-shell">
+      <header className="modal-header">
+        <div>
+          <h3 className="modal-title">ثبت کارکرد کارگر</h3>
+          <p>{interpretation.matched_input_text || interpretation.raw_input_text}</p>
+        </div>
+      </header>
+      <div className="modal-body">
+        <div className="edit-grid">
         <label>
           فرد / کارگر
           <select value={workerChoice} onChange={(event) => setWorkerChoice(event.target.value)}>
@@ -364,17 +370,20 @@ function WorkLogModal({
           توضیحات
           <textarea value={description} onChange={(event) => setDescription(event.target.value)} />
         </label>
+        </div>
       </div>
-      <div className="modal-actions">
-        <button className="primary-action" type="button" onClick={submit} disabled={isLoading || !canConfirm || !quantity.trim()}>
-          تایید
-        </button>
-        <button type="button" onClick={onLater ?? onDiscard} disabled={isLoading}>
-          بعدا بررسی می‌کنم
-        </button>
-        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          نادیده گرفتن
-        </button>
+      <div className="modal-footer">
+        <div className="modal-actions">
+          <button className="primary-action" type="button" onClick={submit} disabled={isLoading || !canConfirm || !quantity.trim()}>
+            تایید
+          </button>
+          <button type="button" onClick={onLater ?? onDiscard} disabled={isLoading}>
+            بعدا بررسی می‌کنم
+          </button>
+          <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+            نادیده گرفتن
+          </button>
+        </div>
       </div>
     </article>
   );
@@ -647,7 +656,7 @@ export function DomainUIController({
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="interpretation-title">
-      <section className="confirmation-modal">
+      <section className="confirmation-modal modal-shell">
         <div className="modal-header">
           <div>
             <span className="eyebrow">بررسی</span>
@@ -669,31 +678,32 @@ export function DomainUIController({
             )}
           </div>
           {onClose && safeInterpretations.length > 0 && (
-            <button className="secondary-action" type="button" onClick={onClose}>
-              بعدا بررسی می‌کنم
+            <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
+              <X aria-hidden="true" size={20} />
             </button>
           )}
         </div>
 
-        {!isJobDone && isJobActive && (
-          <section className="job-loading-panel" aria-live="polite">
-            <h3>در حال بررسی اطلاعات...</h3>
-            <p>لطفاً چند لحظه صبر کنید. نتیجه برای تایید نمایش داده می‌شود.</p>
-            {jobError && <div className="observability-error">{jobError}</div>}
-          </section>
-        )}
+        <div className="modal-body">
+          {!isJobDone && isJobActive && (
+            <section className="job-loading-panel" aria-live="polite">
+              <h3>در حال بررسی اطلاعات...</h3>
+              <p>لطفاً چند لحظه صبر کنید. نتیجه برای تایید نمایش داده می‌شود.</p>
+              {jobError && <div className="observability-error">{jobError}</div>}
+            </section>
+          )}
 
-        {!isJobDone && isJobActive ? null : shouldShowMultiReview ? (
-          <MultiInterpretationReview
-            interpretations={safeInterpretations}
-            isLoading={isLoading}
-            onEdit={(interpretation) => setEditingInterpretationId(interpretation.id)}
-            onConfirm={confirmFromReview}
-            onDiscard={onDiscard}
-          />
-        ) : (
+          {!isJobDone && isJobActive ? null : shouldShowMultiReview ? (
+            <MultiInterpretationReview
+              interpretations={safeInterpretations}
+              isLoading={isLoading}
+              onEdit={(interpretation) => setEditingInterpretationId(interpretation.id)}
+              onConfirm={confirmFromReview}
+              onDiscard={onDiscard}
+            />
+          ) : (
 
-        <div className="interpretation-stack">
+          <div className="interpretation-stack">
           {editingInterpretation && safeInterpretations.length > 1 && (
             <div className="multi-edit-toolbar">
               <button type="button" onClick={() => setEditingInterpretationId(null)} disabled={isLoading}>
@@ -785,14 +795,19 @@ export function DomainUIController({
                 const form = unknownEntityForms[interpretation.id] ?? newEntityForm(interpretation);
                 const canContinue = Boolean(form.name.trim() && form.type);
                 return (
-                  <article className="interpretation-card" key={interpretation.id}>
-                    <h3>{unresolvedEntityTitle(interpretation)}</h3>
-                    <p className="muted">
-                      {interpretation.canonical_event_type === "SETUP_EVENT"
-                        ? "این فرد به عنوان شخص جدید در پروژه ثبت می‌شود."
-                        : unresolvedEntityHelp(interpretation)}
-                    </p>
-                    <div className="edit-grid">
+                  <article className="interpretation-card modal-shell" key={interpretation.id}>
+                    <header className="modal-header">
+                      <div>
+                        <h3 className="modal-title">{unresolvedEntityTitle(interpretation)}</h3>
+                        <p>
+                          {interpretation.canonical_event_type === "SETUP_EVENT"
+                            ? "این فرد به عنوان شخص جدید در پروژه ثبت می‌شود."
+                            : unresolvedEntityHelp(interpretation)}
+                        </p>
+                      </div>
+                    </header>
+                    <div className="modal-body">
+                      <div className="edit-grid">
                       <label>
                         نام
                         <input
@@ -837,41 +852,44 @@ export function DomainUIController({
                           />
                         </label>
                       )}
+                      </div>
                     </div>
-                    <div className="modal-actions">
-                      <button
-                        className="primary-action"
-                        type="button"
-                        onClick={() => {
-                          const entityOverride: EntityOverride = {
-                            name: form.name.trim(),
-                            type: form.type,
-                            roleDetail: form.roleDetail.trim() || null,
-                          };
-                          const createPayload: ConfirmPayload = {
-                            create_new: true,
-                            name: entityOverride.name,
-                            role: entityOverride.type,
-                            role_detail: entityOverride.roleDetail,
-                          };
-                          if (isRole) {
-                            onConfirmRole(interpretation, createPayload, entityOverride);
-                          } else {
-                            onConfirmCandidate(interpretation, createPayload, entityOverride);
-                          }
-                        }}
-                        disabled={isLoading || !canContinue}
-                      >
-                        تأیید
-                      </button>
-                      <button
-                        className="danger-action"
-                        type="button"
-                        onClick={() => onDiscard(interpretation)}
-                        disabled={isLoading}
-                      >
-                        حذف
-                      </button>
+                    <div className="modal-footer">
+                      <div className="modal-actions">
+                        <button
+                          className="primary-action"
+                          type="button"
+                          onClick={() => {
+                            const entityOverride: EntityOverride = {
+                              name: form.name.trim(),
+                              type: form.type,
+                              roleDetail: form.roleDetail.trim() || null,
+                            };
+                            const createPayload: ConfirmPayload = {
+                              create_new: true,
+                              name: entityOverride.name,
+                              role: entityOverride.type,
+                              role_detail: entityOverride.roleDetail,
+                            };
+                            if (isRole) {
+                              onConfirmRole(interpretation, createPayload, entityOverride);
+                            } else {
+                              onConfirmCandidate(interpretation, createPayload, entityOverride);
+                            }
+                          }}
+                          disabled={isLoading || !canContinue}
+                        >
+                          تأیید
+                        </button>
+                        <button
+                          className="danger-action"
+                          type="button"
+                          onClick={() => onDiscard(interpretation)}
+                          disabled={isLoading}
+                        >
+                          حذف
+                        </button>
+                      </div>
                     </div>
                   </article>
                 );
@@ -901,16 +919,21 @@ export function DomainUIController({
                   isCreatingNewCandidate ? createForm.name.trim() && createForm.type : selectedCandidate,
                 );
                 return (
-                  <article className="interpretation-card" key={interpretation.id}>
-                    <h3>
-                      {isRole
-                        ? "تعیین نقش فرد"
-                        : preferredEntityType(interpretation) === "VENDOR"
-                          ? "کدام فروشنده مدنظر است؟"
-                          : `«${entityName(interpretation)}» کدام فرد است؟`}
-                    </h3>
-                    {isRole && <p className="muted">نقش این شخص در پروژه را مشخص کنید</p>}
-                    <div className="edit-grid">
+                  <article className="interpretation-card modal-shell" key={interpretation.id}>
+                    <header className="modal-header">
+                      <div>
+                        <h3 className="modal-title">
+                          {isRole
+                            ? "تعیین نقش فرد"
+                            : preferredEntityType(interpretation) === "VENDOR"
+                              ? "کدام فروشنده مدنظر است؟"
+                              : `«${entityName(interpretation)}» کدام فرد است؟`}
+                        </h3>
+                        {isRole && <p>نقش این شخص در پروژه را مشخص کنید</p>}
+                      </div>
+                    </header>
+                    <div className="modal-body">
+                      <div className="edit-grid">
                       <label>
                         انتخاب فرد
                         <select
@@ -1000,58 +1023,61 @@ export function DomainUIController({
                           />
                         </label>
                       )}
+                      </div>
                     </div>
-                    <div className="modal-actions">
-                      <button
-                        className="primary-action"
-                        type="button"
-                        onClick={() => {
-                          if (isCreatingNewCandidate) {
-                            const entityOverride: EntityOverride = {
-                              name: createForm.name.trim(),
-                              type: createForm.type,
-                              roleDetail: createForm.roleDetail.trim() || null,
-                            };
-                            const createPayload: ConfirmPayload = {
-                              create_new: true,
-                              name: entityOverride.name,
-                              role: entityOverride.type,
-                              role_detail: entityOverride.roleDetail,
-                            };
-                            if (isRole) {
-                              onConfirmRole(interpretation, createPayload, entityOverride);
-                            } else {
-                              onConfirmCandidate(interpretation, createPayload, entityOverride);
-                            }
-                            return;
-                          }
-                          if (selectedCandidate) {
-                            if (isRole) {
-                              onConfirmRole(interpretation, { selected_person_id: selectedCandidate.id });
-                            } else {
-                              onConfirm(
-                                interpretation,
-                                interpretation.canonical_event_type === "FINANCIAL_EVENT"
-                                  ? { entity_id: selectedCandidate.id, confirmed: true }
-                                  : { selected_person_id: selectedCandidate.id },
-                              );
-                            }
-                          }
-                        }}
-                        disabled={isLoading || !canConfirmCandidate}
-                      >
-                        تأیید
-                      </button>
-                      {!isRole && (
+                    <div className="modal-footer">
+                      <div className="modal-actions">
                         <button
-                          className="danger-action"
+                          className="primary-action"
                           type="button"
-                          onClick={() => onDiscard(interpretation)}
-                          disabled={isLoading}
+                          onClick={() => {
+                            if (isCreatingNewCandidate) {
+                              const entityOverride: EntityOverride = {
+                                name: createForm.name.trim(),
+                                type: createForm.type,
+                                roleDetail: createForm.roleDetail.trim() || null,
+                              };
+                              const createPayload: ConfirmPayload = {
+                                create_new: true,
+                                name: entityOverride.name,
+                                role: entityOverride.type,
+                                role_detail: entityOverride.roleDetail,
+                              };
+                              if (isRole) {
+                                onConfirmRole(interpretation, createPayload, entityOverride);
+                              } else {
+                                onConfirmCandidate(interpretation, createPayload, entityOverride);
+                              }
+                              return;
+                            }
+                            if (selectedCandidate) {
+                              if (isRole) {
+                                onConfirmRole(interpretation, { selected_person_id: selectedCandidate.id });
+                              } else {
+                                onConfirm(
+                                  interpretation,
+                                  interpretation.canonical_event_type === "FINANCIAL_EVENT"
+                                    ? { entity_id: selectedCandidate.id, confirmed: true }
+                                    : { selected_person_id: selectedCandidate.id },
+                                );
+                              }
+                            }
+                          }}
+                          disabled={isLoading || !canConfirmCandidate}
                         >
-                          حذف
+                          تأیید
                         </button>
-                      )}
+                        {!isRole && (
+                          <button
+                            className="danger-action"
+                            type="button"
+                            onClick={() => onDiscard(interpretation)}
+                            disabled={isLoading}
+                          >
+                            حذف
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </article>
                 );
@@ -1062,10 +1088,14 @@ export function DomainUIController({
                 const roleEntities = setupEditEntities[interpretation.id] ?? setupEntities(interpretation);
                 const editableEntities = roleEntities.length ? roleEntities : setupEntities(interpretation);
                 return (
-                  <article className="interpretation-card" key={interpretation.id}>
-                    <section className="approval-section">
-                      <h3>تعیین نقش فرد</h3>
-                      <p className="muted">نقش این شخص در پروژه را مشخص کنید</p>
+                  <article className="interpretation-card modal-shell" key={interpretation.id}>
+                    <header className="modal-header">
+                      <div>
+                        <h3 className="modal-title">تعیین نقش فرد</h3>
+                        <p>نقش این شخص در پروژه را مشخص کنید</p>
+                      </div>
+                    </header>
+                    <section className="approval-section modal-body">
                       <div className="edit-grid">
                         {editableEntities.slice(0, 1).map((entity, index) => (
                           <div className="setup-edit-row" key={`role-${interpretation.id}-${index}`}>
@@ -1123,23 +1153,25 @@ export function DomainUIController({
                         ))}
                       </div>
                     </section>
-                    <div className="modal-actions">
-                      <button
-                        className="primary-action"
-                        type="button"
-                        onClick={() => {
-                          const entity = editableEntities[0];
-                          onConfirmRole(interpretation, {
-                            create_new: true,
-                            name: entity.name.trim(),
-                            role: entity.type,
-                            role_detail: entity.roleDetail || null,
-                          });
-                        }}
-                        disabled={isLoading || editableEntities.length === 0 || !editableEntities[0].name.trim()}
-                      >
-                        تأیید
-                      </button>
+                    <div className="modal-footer">
+                      <div className="modal-actions">
+                        <button
+                          className="primary-action"
+                          type="button"
+                          onClick={() => {
+                            const entity = editableEntities[0];
+                            onConfirmRole(interpretation, {
+                              create_new: true,
+                              name: entity.name.trim(),
+                              role: entity.type,
+                              role_detail: entity.roleDetail || null,
+                            });
+                          }}
+                          disabled={isLoading || editableEntities.length === 0 || !editableEntities[0].name.trim()}
+                        >
+                          تأیید
+                        </button>
+                      </div>
                     </div>
                   </article>
                 );
@@ -1194,9 +1226,49 @@ export function DomainUIController({
             // NOTE
             if (kind === "NOTE") {
               return (
-                <article className="interpretation-card" key={interpretation.id}>
-                  <h3>یادداشت</h3>
-                  <p>{interpretation.description ?? interpretation.raw_input_text}</p>
+                <article className="interpretation-card modal-shell" key={interpretation.id}>
+                  <header className="modal-header">
+                    <div>
+                      <h3 className="modal-title">یادداشت</h3>
+                    </div>
+                  </header>
+                  <div className="modal-body">
+                    <p>{interpretation.description ?? interpretation.raw_input_text}</p>
+                  </div>
+                  <div className="modal-footer">
+                    <div className="modal-actions">
+                      <button
+                        className="primary-action"
+                        type="button"
+                        onClick={() => onConfirm(interpretation, { confirmed: true })}
+                        disabled={isLoading}
+                      >
+                        تأیید
+                      </button>
+                      <button
+                        className="danger-action"
+                        type="button"
+                        onClick={() => onDiscard(interpretation)}
+                        disabled={isLoading}
+                      >
+                        حذف
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            }
+
+            // UNKNOWN fallback
+            return (
+              <article className="interpretation-card modal-shell" key={interpretation.id}>
+                <header className="modal-header">
+                  <div>
+                    <h3 className="modal-title">نوع ناشناخته</h3>
+                    <p>{interpretation.description ?? interpretation.raw_input_text}</p>
+                  </div>
+                </header>
+                <div className="modal-footer">
                   <div className="modal-actions">
                     <button
                       className="primary-action"
@@ -1215,38 +1287,13 @@ export function DomainUIController({
                       حذف
                     </button>
                   </div>
-                </article>
-              );
-            }
-
-            // UNKNOWN fallback
-            return (
-              <article className="interpretation-card" key={interpretation.id}>
-                <h3>نوع ناشناخته</h3>
-                <p className="muted">{interpretation.description ?? interpretation.raw_input_text}</p>
-                <div className="modal-actions">
-                  <button
-                    className="primary-action"
-                    type="button"
-                    onClick={() => onConfirm(interpretation, { confirmed: true })}
-                    disabled={isLoading}
-                  >
-                    تأیید
-                  </button>
-                  <button
-                    className="danger-action"
-                    type="button"
-                    onClick={() => onDiscard(interpretation)}
-                    disabled={isLoading}
-                  >
-                    حذف
-                  </button>
                 </div>
               </article>
             );
           })}
+          </div>
+          )}
         </div>
-        )}
       </section>
     </div>
   );

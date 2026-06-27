@@ -27,6 +27,7 @@ import { toJobState, useNaturalInputJob } from "./observability/hooks/useNatural
 import { DomainUIController } from "./ui/DomainUIController";
 import { buildConfirmPayload, exactEntityIdByName, exactNeedsSelectionEntityId, normalizeNeedsSelection } from "./ui/confirmPayload";
 import { SetupEntity } from "./types/domain";
+import { AiProcessingStatus } from "./components/AiProcessingStatus";
 
 const exampleInputs = [
   "کارفرمای پروژه میثم کبیری است",
@@ -212,6 +213,7 @@ function App() {
   const [reviewModalDismissed, setReviewModalDismissed] = useState(true);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const notificationShellRef = useRef<HTMLDivElement>(null);
+  const submittedTextRef = useRef("");
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
@@ -331,7 +333,8 @@ function App() {
     if (naturalInputJob.state !== "DONE") return;
     const interpretations = naturalInputJob.interpretations;
     setPendingInterpretations(interpretations);
-    setNaturalInputJobId(null);
+    const timer = setTimeout(() => setNaturalInputJobId(null), 600);
+    return () => clearTimeout(timer);
   }, [naturalInputJob.state, naturalInputJob.job?.job_id, naturalInputJob.job?.updated_at]);
 
   function navigate(path: string, replace = false) {
@@ -445,14 +448,32 @@ function App() {
     }
     if (!naturalText.trim()) return;
     const submittedText = naturalText.trim();
+    submittedTextRef.current = submittedText;
+    setNaturalText("");
+    setPendingInterpretations([]);
+    setReviewModalDismissed(false);
+    setSuccessMessage(null);
+    setError(null);
     await runAction("در حال ارسال ورودی", async () => {
-      setSuccessMessage(null);
-      setPendingInterpretations([]);
-      setReviewModalDismissed(false);
       const job = await api.processNaturalInput(activeProjectId, submittedText);
       setNaturalInputJobId(job.job_id);
-      setNaturalText("");
     });
+  }
+
+  function retryProcessing() {
+    if (!activeProjectId || !submittedTextRef.current) return;
+    setNaturalInputJobId(null);
+    setError(null);
+    setPendingInterpretations([]);
+    setReviewModalDismissed(false);
+    runAction("در حال ارسال ورودی", async () => {
+      const job = await api.processNaturalInput(activeProjectId, submittedTextRef.current);
+      setNaturalInputJobId(job.job_id);
+    });
+  }
+
+  function closeProcessing() {
+    setNaturalInputJobId(null);
   }
 
   async function confirmSetupEntities(
@@ -853,7 +874,7 @@ function App() {
           rawEntries={rawEntries}
           text={naturalText}
           examples={exampleInputs}
-          isLoading={loadingAction === "در حال ارسال ورودی"}
+          isLoading={loadingAction === "در حال ارسال ورودی" || naturalInputJobId !== null}
           onBack={() => navigate("/dashboard")}
           onTextChange={setNaturalText}
           onSubmit={submitNaturalInput}
@@ -956,6 +977,15 @@ function App() {
           <span>گزارش‌ها</span>
         </button>
       </nav>
+
+      {naturalInputJobId !== null && (
+        <AiProcessingStatus
+          jobState={naturalInputJob.state}
+          error={naturalInputJob.error}
+          onRetry={retryProcessing}
+          onClose={closeProcessing}
+        />
+      )}
 
       {(pendingTabEditingId || (!reviewModalDismissed && pendingInterpretations.length > 0)) && (
       <DomainUIController

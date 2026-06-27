@@ -215,9 +215,14 @@ export function FinancialModal({
   const workerOptions = workers;
 
   return (
-    <article className="interpretation-card">
-      <section className="approval-section">
-        <span className="eyebrow">برداشت مالی</span>
+    <article className="interpretation-card modal-shell">
+      <header className="modal-header">
+        <div>
+          <h3 className="modal-title">ثبت مالی</h3>
+          <p>طرف حساب، مبلغ و جهت مالی را پیش از ثبت بررسی کنید.</p>
+        </div>
+      </header>
+      <section className="approval-section modal-body">
         <div className="edit-grid">
           <label>
             نوع ثبت
@@ -305,18 +310,20 @@ export function FinancialModal({
           </label>
         </div>
       </section>
-      <div className="modal-actions">
-        <button
-          className="primary-action"
-          type="button"
-          onClick={handleConfirm}
-          disabled={isLoading || !canConfirm}
-        >
-          تایید و ثبت
-        </button>
-        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          نادیده گرفتن
-        </button>
+      <div className="modal-footer">
+        <div className="modal-actions">
+          <button
+            className="primary-action"
+            type="button"
+            onClick={handleConfirm}
+            disabled={isLoading || !canConfirm}
+          >
+            تایید و ثبت
+          </button>
+          <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+            نادیده گرفتن
+          </button>
+        </div>
       </div>
     </article>
   );

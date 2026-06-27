@@ -396,11 +396,16 @@ export function EntityUpdateModal({
     : Boolean(entityId && name.trim());
 
   return (
-    <article className="interpretation-card">
+    <article className="interpretation-card modal-shell">
       {selectionCandidates ? (
         <>
-          <section className="approval-section">
-            <span className="eyebrow">این مورد مربوط به کدام شخص است؟</span>
+          <header className="modal-header">
+            <div>
+              <h3 className="modal-title">انتخاب فرد</h3>
+              <p>این مورد مربوط به کدام شخص است؟</p>
+            </div>
+          </header>
+          <section className="approval-section modal-body">
             <div className="candidate-list">
               {selectionCandidates.map((candidate, index) => (
                 <button
@@ -426,16 +431,23 @@ export function EntityUpdateModal({
               </button>
             </div>
           </section>
-          <div className="modal-actions">
-            <button className="danger-action" type="button" onClick={onDiscard} disabled={localLoading}>
-              انصراف
-            </button>
+          <div className="modal-footer">
+            <div className="modal-actions">
+              <button className="danger-action" type="button" onClick={onDiscard} disabled={localLoading}>
+                انصراف
+              </button>
+            </div>
           </div>
         </>
       ) : (
         <>
-          <section className="approval-section">
-            <span className="eyebrow">به‌روزرسانی اطلاعات فرد</span>
+          <header className="modal-header">
+            <div>
+              <h3 className="modal-title">به‌روزرسانی اطلاعات فرد</h3>
+              <p>فرد و فیلدهای تغییر کرده را پیش از ثبت بررسی کنید.</p>
+            </div>
+          </header>
+          <section className="approval-section modal-body">
             <div className="setup-edit-list">
               <div className="setup-edit-row">
                 <label>
@@ -543,18 +555,20 @@ export function EntityUpdateModal({
               </div>
             </div>
           </section>
-          <div className="modal-actions">
-            <button
-              className="primary-action"
-              type="button"
-              onClick={handleConfirm}
-              disabled={isLoadingActive || !canConfirm}
-            >
-              تایید و ثبت
-            </button>
-            <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoadingActive}>
-              نادیده گرفتن
-            </button>
+          <div className="modal-footer">
+            <div className="modal-actions">
+              <button
+                className="primary-action"
+                type="button"
+                onClick={handleConfirm}
+                disabled={isLoadingActive || !canConfirm}
+              >
+                تایید و ثبت
+              </button>
+              <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoadingActive}>
+                نادیده گرفتن
+              </button>
+            </div>
           </div>
         </>
       )}
