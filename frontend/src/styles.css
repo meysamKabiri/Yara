@@ -506,6 +506,17 @@ textarea {
   font-size: 0.72rem;
 }
 
+.summary-helper {
+  background: #ffffff;
+  border: 1px solid #e4ebe7;
+  border-radius: 12px;
+  color: #4d605b;
+  font-size: 0.83rem;
+  line-height: 1.9;
+  margin: 0.75rem 0 0;
+  padding: 0.65rem 0.85rem;
+}
+
 .success-feedback {
   align-items: center;
   background: #edf8f1;
@@ -2319,6 +2330,14 @@ mark {
   color: #4f6970;
 }
 
+.vpc-detail-list {
+  color: #4f6970;
+  display: grid;
+  font-size: 0.8rem;
+  gap: 0.15rem;
+  line-height: 1.7;
+}
+
 .vpc-meta {
   display: flex;
   flex-wrap: wrap;
@@ -2356,6 +2375,7 @@ mark {
 .trx-person {
   font-weight: 700;
   font-size: 0.9rem;
+  overflow-wrap: anywhere;
 }
 
 .trx-amount {
@@ -2370,6 +2390,7 @@ mark {
   gap: 0.3rem 0.7rem;
   font-size: 0.75rem;
   color: #65727d;
+  line-height: 1.8;
 }
 
 .trx-incoming {
@@ -2463,6 +2484,21 @@ mark {
 .visibility-vendor-debts {
   border-top: 1px solid #eef3f0;
   padding-top: 0.75rem;
+}
+
+.payable-section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.payable-section + .payable-section {
+  margin-top: 0.85rem;
+}
+
+.vendor-debt-row {
+  background: transparent;
+  border: 0;
+  padding: 0.4rem 0.8rem;
 }
 
 /* ── Tab Navigation for Project Detail ── */

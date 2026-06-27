@@ -20,7 +20,6 @@ import {
   Scale,
   Send,
   Users,
-  Wallet,
 } from "lucide-react";
 import { HistoryEntry, Invoice, OperatingSummary, Payment, PendingInterpretation, ProjectDetail, RawEntry, Worker, WorkerType, WorkLog } from "../api";
 
@@ -29,8 +28,8 @@ type PersonKind = WorkerType | "OTHER";
 const ROLE_LABELS: Record<PersonKind, string> = {
   CLIENT: "کارفرما",
   DAILY_WORKER: "کارگر روزمزد",
-  SKILLED_WORKER: "استادکار",
-  VENDOR: "فروشنده",
+  SKILLED_WORKER: "نیروی متخصص",
+  VENDOR: "فروشنده / تامین‌کننده",
   OTHER: "سایر",
 };
 
@@ -39,16 +38,18 @@ const ROLE_ORDER: PersonKind[] = ["CLIENT", "SKILLED_WORKER", "DAILY_WORKER", "V
 const DIRECTION_LABELS: Record<string, string> = {
   INCOMING: "دریافتی",
   OUTGOING: "پرداختی",
-  DEBT: "بدهی",
-  DEFERRED: "معوق/چک",
+  DEBT: "بدهی پرداخت‌نشده",
+  DEFERRED: "پرداخت مدت‌دار",
 };
 
 const PAYMENT_TYPE_LABELS: Record<string, string> = {
-  CASH: "نقد",
-  BANK_TRANSFER: "حواله / کارت به کارت",
+  CASH: "نقدی",
+  BANK_TRANSFER: "انتقال بانکی",
   CHECK: "چک",
   OTHER: "سایر",
 };
+
+const UNKNOWN_LABEL = "نامشخص";
 
 type TabKey = "summary" | "people" | "financial" | "payables" | "notes" | "pending";
 
@@ -96,13 +97,17 @@ function personKind(worker: Worker): PersonKind {
 }
 
 function PersonCard({ worker }: { worker: Worker }) {
+  const roleLabel = ROLE_LABELS[personKind(worker)] ?? ROLE_LABELS.OTHER;
   return (
     <article className="visibility-person-card">
       <div className="vpc-head">
         <strong>{worker.name}</strong>
-        <mark className="role-pill">{ROLE_LABELS[personKind(worker)] ?? "سایر"}</mark>
+        <mark className="role-pill">{roleLabel}</mark>
       </div>
-      {worker.role_detail && <span className="vpc-detail">{worker.role_detail}</span>}
+      <div className="vpc-detail-list">
+        <span>نقش: {roleLabel}</span>
+        {worker.role_detail && <span>تخصص/توضیح: {worker.role_detail}</span>}
+      </div>
       <div className="vpc-meta">
         {worker.phone && <span><Phone size={12} />{worker.phone}</span>}
         {worker.account_number && <span><CreditCard size={12} />{worker.account_number}</span>}
@@ -117,7 +122,8 @@ function PaymentRow({ payment, workerMap }: { payment: Payment; workerMap: Recor
   const isIncoming = payment.direction === "INCOMING";
   const isDeferred = payment.direction === "DEFERRED";
   const directionClass = isIncoming ? "trx-incoming" : isDeferred ? "trx-deferred" : "trx-outgoing";
-  const directionLabel = DIRECTION_LABELS[payment.direction] ?? payment.direction;
+  const directionLabel = DIRECTION_LABELS[payment.direction] ?? UNKNOWN_LABEL;
+  const methodLabel = isDeferred && payment.type !== "CHECK" ? "مدت‌دار" : PAYMENT_TYPE_LABELS[payment.type] ?? UNKNOWN_LABEL;
   return (
     <div className={`visibility-trx-row ${directionClass}`}>
       <div className="trx-main">
@@ -127,7 +133,7 @@ function PaymentRow({ payment, workerMap }: { payment: Payment; workerMap: Recor
       <div className="trx-meta">
         <span>{shortDate(payment.created_at)}</span>
         <span>{directionLabel}</span>
-        <span>{PAYMENT_TYPE_LABELS[payment.type] ?? payment.type}</span>
+        <span>{methodLabel}</span>
         {payment.due_date && <span>سررسید: {shortDate(payment.due_date)}</span>}
       </div>
     </div>
@@ -136,7 +142,7 @@ function PaymentRow({ payment, workerMap }: { payment: Payment; workerMap: Recor
 
 function InvoiceRow({ invoice, workerMap }: { invoice: Invoice; workerMap: Record<number, Worker> }) {
   const vendor = workerMap[invoice.vendor_id];
-  const statusLabel = invoice.status === "OPEN" ? "پرداخت نشده" : invoice.status === "PARTIAL" ? "قسمت پرداخت شده" : "پرداخت شده";
+  const statusLabel = invoice.status === "OPEN" ? "پرداخت‌نشده" : invoice.status === "PARTIAL" ? "بخشی پرداخت شده" : "پرداخت شده";
   return (
     <div className="visibility-trx-row trx-payable">
       <div className="trx-main">
@@ -150,6 +156,10 @@ function InvoiceRow({ invoice, workerMap }: { invoice: Invoice; workerMap: Recor
       </div>
     </div>
   );
+}
+
+function EmptyState({ children }: { children: string }) {
+  return <p className="empty-state">{children}</p>;
 }
 
 function pendingTitle(pi: PendingInterpretation): string {
@@ -203,7 +213,7 @@ function TabBar({ tabs, activeTab, onTabChange }: { tabs: { key: TabKey; label: 
 }
 
 export function ProjectDetailPage({
-  project, summary, workers, pendingInterpretations, workLogs, payments, invoices, history,
+  project, summary, workers, pendingInterpretations, payments, invoices, history,
   rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
   onVoicePlaceholder, onAttachPlaceholder, successMessage,
   onConfirmPending, onEditPending, onDiscardPending,
@@ -243,11 +253,15 @@ export function ProjectDetailPage({
     return invoices.filter((inv) => inv.status === "OPEN" || inv.status === "PARTIAL");
   }, [invoices]);
 
+  const deferredPayments = useMemo(() => {
+    return confirmedPayments.filter((payment) => payment.direction === "DEFERRED" || payment.type === "CHECK");
+  }, [confirmedPayments]);
+
   const tabs = [
     { key: "summary" as TabKey, label: "خلاصه" },
     { key: "people" as TabKey, label: "افراد", count: workers.length },
     { key: "financial" as TabKey, label: "مالی", count: confirmedPayments.length },
-    { key: "payables" as TabKey, label: "بدهی‌ها", count: openInvoices.length },
+    { key: "payables" as TabKey, label: "بدهی‌ها / چک‌ها", count: openInvoices.length + deferredPayments.length },
     { key: "notes" as TabKey, label: "یادداشت‌ها", count: notes.length },
     { key: "pending" as TabKey, label: "در انتظار تایید", count: pending.length },
   ];
@@ -296,15 +310,15 @@ export function ProjectDetailPage({
           <section className="summary-grid six-up project-summary-grid">
             <article className="metric-card positive">
               <ArrowDownCircle aria-hidden="true" />
-              <span>دریافتی</span>
+              <span>دریافتی از کارفرما</span>
               <strong>{money(received)}</strong>
-              <small>کل پول دریافتی پروژه</small>
+              <small>پول تاییدشده ورودی به پروژه</small>
             </article>
             <article className="metric-card negative">
               <ArrowUpCircle aria-hidden="true" />
-              <span>پرداختی</span>
+              <span>پرداخت‌شده</span>
               <strong>{money(paidOut)}</strong>
-              <small>پول پرداخت‌شده به افراد و فروشندگان</small>
+              <small>شامل پرداخت نقدی، بانکی و مدت‌دار</small>
             </article>
             <article className="metric-card pending">
               <ReceiptText aria-hidden="true" />
@@ -312,44 +326,33 @@ export function ProjectDetailPage({
               <strong>{money(payables)}</strong>
               <small>پرداخت‌های انجام‌نشده</small>
             </article>
-            {deferredAmount > 0 && (
-              <article className="metric-card pending">
-                <Banknote aria-hidden="true" />
-                <span>چک / معوق</span>
-                <strong>{money(deferredAmount)}</strong>
-                <small>پرداخت‌های معوق</small>
-              </article>
-            )}
-            {checkAmount > 0 && deferredAmount === 0 && (
-              <article className="metric-card pending">
-                <Banknote aria-hidden="true" />
-                <span>چک</span>
-                <strong>{money(checkAmount)}</strong>
-                <small>پرداخت چکی</small>
-              </article>
-            )}
+            <article className="metric-card pending">
+              <Banknote aria-hidden="true" />
+              <span>چک / پرداخت مدت‌دار</span>
+              <strong>{money(deferredAmount || checkAmount)}</strong>
+              <small>در عدد پرداخت‌شده هم حساب شده است</small>
+            </article>
             <article className={netBalance >= 0 ? "metric-card positive" : "metric-card negative"}>
               <Scale aria-hidden="true" />
-              <span>مانده</span>
+              <span>مانده پروژه</span>
               <strong>{money(netBalance >= 0 ? Number(summary?.available_balance ?? netBalance) : netBalance)}</strong>
               <small>{netBalance >= 0 ? "موجودی پروژه" : "کسری بودجه"}</small>
             </article>
-            {summary && (
-              <article className="metric-card">
-                <Wallet aria-hidden="true" />
-                <span>کارکردها</span>
-                <strong>{workLogs.length.toLocaleString("fa-IR")}</strong>
-                <small>آیتم کارکرد ثبت شده</small>
-              </article>
-            )}
+            <article className={pending.length > 0 ? "metric-card pending" : "metric-card"}>
+              <ClipboardList aria-hidden="true" />
+              <span>موارد در انتظار تایید</span>
+              <strong>{pending.length.toLocaleString("fa-IR")}</strong>
+              <small>{pending.length > 0 ? "هنوز در totals حساب نشده‌اند" : "همه موارد بررسی شده‌اند"}</small>
+            </article>
           </section>
+          <p className="summary-helper">مانده پروژه = دریافتی از کارفرما - پرداخت‌شده - بدهی باز. پرداخت‌شده شامل چک‌ها و پرداخت‌های مدت‌دار تاییدشده هم هست.</p>
         </div>
       )}
 
       {activeTab === "people" && (
         <div className="detail-tab-content">
           {workers.length === 0 ? (
-            <p className="empty-state">هنوز شخصی ثبت نشده است.</p>
+            <EmptyState>هیچ شخصی ثبت نشده است</EmptyState>
           ) : (
             <div className="visibility-people-grid">
               {ROLE_ORDER.map((role) => {
@@ -376,7 +379,7 @@ export function ProjectDetailPage({
       {activeTab === "financial" && (
         <div className="detail-tab-content">
           {confirmedPayments.length === 0 ? (
-            <p className="empty-state">هنوز پرداختی ثبت نشده است.</p>
+            <EmptyState>هیچ تراکنشی ثبت نشده است</EmptyState>
           ) : (
             <div className="visibility-trx-list">
               {confirmedPayments.map((payment) => <PaymentRow key={payment.id} payment={payment} workerMap={workerMap} />)}
@@ -387,20 +390,31 @@ export function ProjectDetailPage({
 
       {activeTab === "payables" && (
         <div className="detail-tab-content">
-          {openInvoices.length === 0 && (!summary?.vendor_debts || summary.vendor_debts.length === 0) ? (
-            <p className="empty-state">بدهی بازی وجود ندارد.</p>
+          {openInvoices.length === 0 && deferredPayments.length === 0 && (!summary?.vendor_debts || summary.vendor_debts.length === 0) ? (
+            <EmptyState>بدهی یا چک ثبت نشده است</EmptyState>
           ) : (
             <>
               {openInvoices.length > 0 && (
-                <div className="visibility-trx-list">
-                  {openInvoices.map((invoice) => <InvoiceRow key={invoice.id} invoice={invoice} workerMap={workerMap} />)}
-                </div>
+                <section className="payable-section">
+                  <h4 className="role-group-title"><ReceiptText size={14} />بدهی‌های باز</h4>
+                  <div className="visibility-trx-list">
+                    {openInvoices.map((invoice) => <InvoiceRow key={invoice.id} invoice={invoice} workerMap={workerMap} />)}
+                  </div>
+                </section>
+              )}
+              {deferredPayments.length > 0 && (
+                <section className="payable-section">
+                  <h4 className="role-group-title"><Banknote size={14} />چک‌ها / پرداخت‌های مدت‌دار</h4>
+                  <div className="visibility-trx-list">
+                    {deferredPayments.map((payment) => <PaymentRow key={payment.id} payment={payment} workerMap={workerMap} />)}
+                  </div>
+                </section>
               )}
               {summary && summary.vendor_debts && summary.vendor_debts.length > 0 && (
-                <div className="visibility-vendor-debts" style={{ marginTop: "0.75rem" }}>
+                <div className="visibility-vendor-debts">
                   <h4 className="role-group-title">خلاصه بدهی فروشندگان</h4>
                   {summary.vendor_debts.map((debt) => (
-                    <div key={debt.vendor_id} className="visibility-trx-row trx-payable" style={{ border: "none", background: "transparent", padding: "0.4rem 0.8rem" }}>
+                    <div key={debt.vendor_id} className="visibility-trx-row trx-payable vendor-debt-row">
                       <div className="trx-main">
                         <span className="trx-person">{debt.vendor_name}</span>
                         <span className="trx-amount">{money(debt.debt)}</span>
@@ -421,7 +435,7 @@ export function ProjectDetailPage({
       {activeTab === "notes" && (
         <div className="detail-tab-content">
           {notes.length === 0 ? (
-            <p className="empty-state">یادداشتی ثبت نشده است.</p>
+            <EmptyState>یادداشتی ثبت نشده است</EmptyState>
           ) : (
             <div className="visibility-notes-list">
               {notes.map((note) => (
@@ -440,7 +454,7 @@ export function ProjectDetailPage({
       {activeTab === "pending" && (
         <div className="detail-tab-content">
           {pending.length === 0 ? (
-            <p className="empty-state">بدون مورد در انتظار تایید</p>
+            <EmptyState>بدون مورد در انتظار تایید</EmptyState>
           ) : (
             <div className="visibility-pending-list">
               {pending.map((pi) => (
@@ -453,8 +467,8 @@ export function ProjectDetailPage({
                   <div className="vpc-meta">
                     {pendingEntityName(pi) && <span>فرد: {pendingEntityName(pi)}</span>}
                     {pi.extracted_amount && <span>مبلغ: {money(pi.extracted_amount)}</span>}
-                    {pi.financial_direction && <span>{DIRECTION_LABELS[pi.financial_direction] ?? pi.financial_direction}</span>}
-                    {pi.payment_method && <span>{PAYMENT_TYPE_LABELS[pi.payment_method] ?? pi.payment_method}</span>}
+                    {pi.financial_direction && <span>{DIRECTION_LABELS[pi.financial_direction] ?? UNKNOWN_LABEL}</span>}
+                    {pi.payment_method && <span>{PAYMENT_TYPE_LABELS[pi.payment_method] ?? UNKNOWN_LABEL}</span>}
                     {pendingFieldUpdates(pi).map((part) => <span key={part}>{part}</span>)}
                     <span>{date(pi.created_at)}</span>
                   </div>

@@ -502,12 +502,12 @@ export function DomainUIController({
             {safeInterpretations.length > 1 ? (
               <>
                 <h2 id="interpretation-title">بررسی موارد استخراج‌شده</h2>
-                <p>موارد زیر از متن شما شناسایی شد. لطفاً بررسی و تایید کنید</p>
+                <p>موارد زیر از متن شما شناسایی شد. تایید، آن‌ها را در پروژه ثبت می‌کند؛ می‌توانید هر مورد را ویرایش کنید یا برای بررسی بعدی نگه دارید.</p>
               </>
             ) : safeInterpretations.length === 1 ? (
               <>
                 <h2 id="interpretation-title">بررسی اطلاعات</h2>
-                <p>لطفاً اطلاعات استخراج‌شده را بررسی و تایید کنید</p>
+                <p>اگر تایید کنید، همین اطلاعات در پروژه ثبت می‌شود. برای اصلاح، ویرایش کنید؛ برای نگه داشتن در صف، بعدا بررسی کنید.</p>
               </>
             ) : (
               <>
@@ -518,7 +518,7 @@ export function DomainUIController({
           </div>
           {onClose && safeInterpretations.length > 0 && (
             <button className="secondary-action" type="button" onClick={onClose}>
-              بعدا
+              بعدا بررسی می‌کنم
             </button>
           )}
         </div>
