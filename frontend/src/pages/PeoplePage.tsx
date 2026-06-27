@@ -189,12 +189,12 @@ export function PeoplePage({
     const state = workerStates.find((item) => item.worker_id === selected.id);
     const personPayments = payments.filter((payment) => payment.entity_id === selected.id);
     const outgoingPayments = personPayments.filter((payment) =>
-      ["OUTGOING", "DEFERRED"].includes(payment.direction)
+      payment.direction === "OUTGOING"
     );
     const incomingPayments = personPayments.filter((payment) => payment.direction === "INCOMING");
     const personInvoices = invoices.filter((invoice) => invoice.vendor_id === selected.id);
     const personWorkLogs = workLogs.filter((workLog) => workLog.worker_id === selected.id);
-    const paidOut = paymentTotal(personPayments, ["OUTGOING", "DEFERRED"]);
+    const paidOut = paymentTotal(personPayments, ["OUTGOING"]);
     const balance = Number(state?.financial_balance ?? 0);
     const invoiceTotal = personInvoices.reduce(
       (total, invoice) => total + Number(invoice.total_amount || 0),
@@ -358,13 +358,13 @@ export function PeoplePage({
                 const kind = personKind(worker);
                 const state = workerStates.find((item) => item.worker_id === worker.id);
                 const personPayments = payments.filter((payment) => payment.entity_id === worker.id);
-                const paidOut = paymentTotal(personPayments, ["OUTGOING", "DEFERRED"]);
+                const paidOut = paymentTotal(personPayments, ["OUTGOING"]);
                 const clientPaid = paymentTotal(personPayments, ["INCOMING"]);
                 const balance = Number(state?.financial_balance ?? 0);
                 const personInvoices = invoices.filter((invoice) => invoice.vendor_id === worker.id);
                 const invoiceTotal = personInvoices.reduce((total, invoice) => total + Number(invoice.total_amount || 0), 0);
                 const directPurchaseTotal = personPayments
-                  .filter((payment) => ["OUTGOING", "DEFERRED"].includes(payment.direction) && payment.related_invoice_id === null)
+                  .filter((payment) => payment.direction === "OUTGOING" && payment.related_invoice_id === null)
                   .reduce((total, payment) => total + Number(payment.amount || 0), 0);
                 const vendorDebt = Number(summary?.vendor_debts.find((debt) => debt.vendor_id === worker.id)?.debt ?? 0);
                 const fundingNeed = Number(summary?.total_paid_out ?? 0) + Number(summary?.open_payables ?? 0);

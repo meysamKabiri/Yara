@@ -41,7 +41,7 @@ def project_operating_summary(db: Session, project_id: int) -> dict[str, Any]:
     total_paid_out = db.scalar(
         select(func.coalesce(func.sum(Payment.amount), 0)).where(
             Payment.project_id == project_id,
-            Payment.direction.in_([FinancialDirection.OUTGOING, FinancialDirection.DEFERRED]),
+            Payment.direction == FinancialDirection.OUTGOING,
         )
     )
     total_received = db.scalar(

@@ -205,7 +205,7 @@ def _project_totals(db: DbSession, project_id: int) -> ProjectTotals:
     for payment in payments:
         if payment.direction == FinancialDirection.INCOMING:
             money_in += payment.amount
-        elif payment.direction in (FinancialDirection.OUTGOING, FinancialDirection.DEFERRED):
+        elif payment.direction == FinancialDirection.OUTGOING:
             money_out += payment.amount
     return ProjectTotals(
         money_in=money_in, money_out=money_out, net=money_in - money_out

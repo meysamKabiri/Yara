@@ -263,7 +263,7 @@ export function ProjectDetailPage({
 }: ProjectDetailPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("summary");
 
-  const paidOut = summary ? Number(summary.total_paid_out) : payments.filter((p) => p.direction === "OUTGOING" || p.direction === "DEFERRED").reduce((t, p) => t + Number(p.amount || 0), 0);
+  const paidOut = summary ? Number(summary.total_paid_out) : payments.filter((p) => p.direction === "OUTGOING").reduce((t, p) => t + Number(p.amount || 0), 0);
   const received = summary ? Number(summary.total_received_from_client ?? summary.total_received) : payments.filter((p) => p.direction === "INCOMING").reduce((t, p) => t + Number(p.amount || 0), 0);
   const payables = Number(summary?.open_payables ?? 0);
   const deferredAmount = summary ? Number(summary.deferred_amount ?? 0) : payments.filter((p) => p.direction === "DEFERRED").reduce((t, p) => t + Number(p.amount || 0), 0);
@@ -306,7 +306,7 @@ export function ProjectDetailPage({
       const worker = workerMap[payment.entity_id];
       if (!worker || worker.type !== "DAILY_WORKER") continue;
       const current = stats[payment.entity_id] ?? { totalDays: 0, totalCost: 0, paidOut: 0, balance: 0 };
-      if (payment.direction === "OUTGOING" || payment.direction === "DEFERRED") {
+      if (payment.direction === "OUTGOING") {
         current.paidOut += Number(payment.amount || 0);
       }
       stats[payment.entity_id] = current;
@@ -393,7 +393,7 @@ export function ProjectDetailPage({
               <ArrowUpCircle aria-hidden="true" />
               <span>پرداخت‌شده</span>
               <strong>{money(paidOut)}</strong>
-              <small>شامل پرداخت نقدی، بانکی و مدت‌دار</small>
+              <small>فقط پرداخت واقعی نقدی یا بانکی</small>
             </article>
             <article className="metric-card pending">
               <Hammer aria-hidden="true" />
@@ -411,7 +411,7 @@ export function ProjectDetailPage({
               <Banknote aria-hidden="true" />
               <span>چک / پرداخت مدت‌دار</span>
               <strong>{money(deferredAmount || checkAmount)}</strong>
-              <small>در عدد پرداخت‌شده هم حساب شده است</small>
+              <small>جدا از پرداخت‌شده نمایش داده می‌شود</small>
             </article>
             <article className={netBalance >= 0 ? "metric-card positive" : "metric-card negative"}>
               <Scale aria-hidden="true" />
