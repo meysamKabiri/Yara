@@ -214,6 +214,66 @@ export type OperatingSummary = {
   }>;
 };
 
+export type ProjectReportSummary = {
+  money_in: string;
+  paid_out: string;
+  open_payables: string;
+  deferred_checks: string;
+  labor_cost: string;
+  worker_payments: string;
+  approximate_balance: string;
+  pending_count: number;
+};
+
+export type ClientPaymentReportRow = {
+  entity_id: number;
+  name: string;
+  total_paid: string;
+  payment_count: number;
+  last_payment_at: string | null;
+};
+
+export type WorkerReportRow = {
+  worker_id: number;
+  entity_id: number;
+  name: string;
+  total_days: string;
+  total_labor_cost: string;
+  total_paid: string;
+  remaining_balance: string;
+  daily_rate: string | null;
+};
+
+export type PayableReportRow = {
+  id: string;
+  entity_id: number;
+  name: string;
+  kind: "vendor_payable" | "deferred_check" | "worker_labor";
+  amount: string;
+  due_date: string | null;
+  description: string | null;
+};
+
+export type ExpenseReportSummary = {
+  vendor_paid_total: string;
+  worker_paid_total: string;
+  other_outgoing_total: string;
+  open_vendor_payables: string;
+  deferred_check_total: string;
+};
+
+export type ProjectReportResponse = {
+  project_id: number;
+  project_name: string;
+  from_date: string | null;
+  to_date: string | null;
+  summary: ProjectReportSummary;
+  client_payments: ClientPaymentReportRow[];
+  workers: WorkerReportRow[];
+  expense_summary: ExpenseReportSummary;
+  payables: PayableReportRow[];
+};
+
 export type HistoryEntry = {
   id: number;
   project_id: number;
@@ -573,6 +633,14 @@ export const api = {
 
   getOperatingSummary: (projectId: number) =>
     request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
+
+  getProjectReportSummary: (projectId: number, filters: { from_date?: string; to_date?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.from_date) params.set("from_date", filters.from_date);
+    if (filters.to_date) params.set("to_date", filters.to_date);
+    const query = params.toString();
+    return request<ProjectReportResponse>(`/projects/${projectId}/reports/summary${query ? `?${query}` : ""}`);
+  },
 
   getTrace: (traceId: string) => request<TraceDetail>(`/traces/${traceId}`),
 

@@ -2549,6 +2549,98 @@ mark {
   animation: fadeIn 0.2s ease;
 }
 
+.reports-tab {
+  display: grid;
+  gap: 1rem;
+}
+
+.report-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 220px)) minmax(260px, 1fr);
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.date-field {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.date-field label {
+  color: #507266;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.date-field input {
+  width: 100%;
+  border: 1px solid #dce7e1;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #1f3026;
+  padding: 0.62rem 0.7rem;
+  font: inherit;
+}
+
+.quick-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.quick-filter-group button {
+  border: 1px solid #dce7e1;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #2d4f43;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  min-height: 38px;
+  padding: 0.45rem 0.7rem;
+}
+
+.quick-filter-group button:hover {
+  background: #f2f7f4;
+}
+
+.report-table-section {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.report-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e4ebe7;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.report-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.report-table th,
+.report-table td {
+  border-bottom: 1px solid #eef3f0;
+  padding: 0.7rem 0.8rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.report-table th {
+  color: #507266;
+  font-weight: 800;
+}
+
+.report-table tr:last-child td {
+  border-bottom: 0;
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
@@ -2562,5 +2654,11 @@ mark {
   .detail-tabs button {
     font-size: 0.75rem;
     padding: 0.4rem 0.5rem;
+  }
+  .report-controls {
+    grid-template-columns: 1fr;
+  }
+  .quick-filter-group button {
+    flex: 1 1 calc(50% - 0.4rem);
   }
 }

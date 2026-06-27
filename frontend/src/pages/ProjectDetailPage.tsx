@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   ArrowDownCircle,
   ArrowUpCircle,
@@ -22,7 +22,7 @@ import {
   Send,
   Users,
 } from "lucide-react";
-import { HistoryEntry, Invoice, OperatingSummary, Payment, PendingInterpretation, ProjectDetail, RawEntry, Worker, WorkerType, WorkLog } from "../api";
+import { api, HistoryEntry, Invoice, OperatingSummary, Payment, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog } from "../api";
 
 type PersonKind = WorkerType | "OTHER";
 
@@ -52,7 +52,15 @@ const PAYMENT_TYPE_LABELS: Record<string, string> = {
 
 const UNKNOWN_LABEL = "نامشخص";
 
-type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "pending";
+const REPORT_PAYABLE_KIND_LABELS: Record<PayableReportRow["kind"], string> = {
+  vendor_payable: "بدهی فروشنده",
+  deferred_check: "چک / مدت‌دار",
+  worker_labor: "مانده کارگر",
+};
+
+type ReportFilterKey = "week" | "month" | "year" | "all";
+
+type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "reports" | "pending";
 
 type ProjectDetailPageProps = {
   project: ProjectDetail | null;
@@ -92,6 +100,28 @@ function date(value: string): string {
 
 function shortDate(value: string): string {
   return new Date(value).toLocaleDateString("fa-IR");
+}
+
+function isoDate(value: Date): string {
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${value.getFullYear()}-${month}-${day}`;
+}
+
+function quickReportRange(key: ReportFilterKey): { from_date: string; to_date: string } | { from_date: ""; to_date: "" } {
+  if (key === "all") return { from_date: "", to_date: "" };
+  const now = new Date();
+  const start = new Date(now);
+  if (key === "week") {
+    const day = start.getDay();
+    const daysFromSaturday = (day + 1) % 7;
+    start.setDate(start.getDate() - daysFromSaturday);
+  } else if (key === "month") {
+    start.setDate(1);
+  } else {
+    start.setMonth(0, 1);
+  }
+  return { from_date: isoDate(start), to_date: isoDate(now) };
 }
 
 function personKind(worker: Worker): PersonKind {
@@ -255,6 +285,157 @@ function TabBar({ tabs, activeTab, onTabChange }: { tabs: { key: TabKey; label: 
   );
 }
 
+function ProjectReportsTab({ projectId, pendingCount }: { projectId: number; pendingCount: number }) {
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [report, setReport] = useState<ProjectReportResponse | null>(null);
+  const [isReportLoading, setIsReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsReportLoading(true);
+    setReportError(null);
+    api.getProjectReportSummary(projectId, { from_date: fromDate || undefined, to_date: toDate || undefined })
+      .then((nextReport) => {
+        if (!cancelled) setReport(nextReport);
+      })
+      .catch((error: Error) => {
+        if (!cancelled) setReportError(error.message || "خطا در دریافت گزارش");
+      })
+      .finally(() => {
+        if (!cancelled) setIsReportLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fromDate, projectId, toDate]);
+
+  const applyQuickFilter = (key: ReportFilterKey) => {
+    const range = quickReportRange(key);
+    setFromDate(range.from_date);
+    setToDate(range.to_date);
+  };
+  const updateFromDate = (value: string) => setFromDate(value);
+  const updateToDate = (value: string) => setToDate(value);
+
+  const summary = report?.summary;
+  return (
+    <div className="detail-tab-content reports-tab">
+      <section className="report-controls" aria-label="بازه گزارش">
+        <div className="date-field">
+          <label htmlFor="report-from">از تاریخ</label>
+          <input id="report-from" type="date" value={fromDate} onInput={(event) => updateFromDate(event.currentTarget.value)} onChange={(event) => updateFromDate(event.target.value)} />
+        </div>
+        <div className="date-field">
+          <label htmlFor="report-to">تا تاریخ</label>
+          <input id="report-to" type="date" value={toDate} onInput={(event) => updateToDate(event.currentTarget.value)} onChange={(event) => updateToDate(event.target.value)} />
+        </div>
+        <div className="quick-filter-group" aria-label="فیلتر سریع">
+          <button type="button" onClick={() => applyQuickFilter("week")}>این هفته</button>
+          <button type="button" onClick={() => applyQuickFilter("month")}>این ماه</button>
+          <button type="button" onClick={() => applyQuickFilter("year")}>امسال</button>
+          <button type="button" onClick={() => applyQuickFilter("all")}>همه</button>
+        </div>
+      </section>
+
+      {reportError && <div className="empty-state">{reportError}</div>}
+      {isReportLoading && !report && <div className="empty-state">در حال دریافت گزارش...</div>}
+
+      {report && summary && (
+        <>
+          <section className="summary-grid six-up project-summary-grid">
+            <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>دریافتی</span><strong>{money(summary.money_in)}</strong><small>پرداخت‌های تاییدشده کارفرما</small></article>
+            <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده واقعی</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
+            <article className="metric-card pending"><Hammer aria-hidden="true" /><span>کارکرد ثبت‌شده</span><strong>{money(summary.labor_cost)}</strong><small>هزینه کارکرد تاییدشده</small></article>
+            <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی باز</span><strong>{money(summary.open_payables)}</strong><small>فروشنده + کارکرد پرداخت‌نشده</small></article>
+            <article className="metric-card pending"><Banknote aria-hidden="true" /><span>چک / پرداخت مدت‌دار</span><strong>{money(summary.deferred_checks)}</strong><small>جدا از پرداخت‌شده واقعی</small></article>
+            <article className={Number(summary.approximate_balance) >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>مانده تقریبی</span><strong>{money(summary.approximate_balance)}</strong><small>دریافتی - پرداختی - بدهی باز</small></article>
+          </section>
+          <p className="summary-helper">
+            گزارش فقط از رکوردهای تاییدشده ساخته می‌شود. موارد در انتظار تایید فعلی: {pendingCount.toLocaleString("fa-IR")}
+          </p>
+
+          <ReportTable
+            title="پرداخت‌های کارفرما"
+            empty="پرداختی از کارفرما ثبت نشده است"
+            headers={["کارفرما", "مبلغ پرداختی", "تعداد پرداخت", "آخرین پرداخت"]}
+            rows={report.client_payments.map((row) => [
+              row.name,
+              money(row.total_paid),
+              row.payment_count.toLocaleString("fa-IR"),
+              row.last_payment_at ? shortDate(row.last_payment_at) : "-",
+            ])}
+          />
+
+          <WorkerReportTable workers={report.workers} />
+
+          <ReportTable
+            title="بدهی‌ها و چک‌ها"
+            empty="بدهی یا چکی ثبت نشده است"
+            headers={["شخص / فروشنده", "نوع", "مبلغ", "سررسید", "توضیح"]}
+            rows={report.payables.map((row) => [
+              row.name,
+              REPORT_PAYABLE_KIND_LABELS[row.kind],
+              money(row.amount),
+              row.due_date || "-",
+              row.description || "-",
+            ])}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function WorkerReportTable({ workers }: { workers: WorkerReportRow[] }) {
+  return (
+    <ReportTable
+      title="گزارش کارگران"
+      empty="کارکردی برای کارگران ثبت نشده است"
+      headers={["کارگر", "روز کارکرد", "مبلغ کارکرد", "پرداخت‌شده", "مانده"]}
+      rows={workers.map((row) => [
+        row.name,
+        days(row.total_days),
+        money(row.total_labor_cost),
+        money(row.total_paid),
+        money(row.remaining_balance),
+      ])}
+    />
+  );
+}
+
+function ReportTable({ title, empty, headers, rows }: { title: string; empty: string; headers: string[]; rows: string[][] }) {
+  return (
+    <section className="report-table-section">
+      <div className="section-title compact-title">
+        <div>
+          <span className="eyebrow">گزارش</span>
+          <h2>{title}</h2>
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <EmptyState>{empty}</EmptyState>
+      ) : (
+        <div className="report-table-wrap">
+          <table className="report-table">
+            <thead>
+              <tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${title}-${index}`}>
+                  {row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`}>{cell}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ProjectDetailPage({
   project, summary, workers, pendingInterpretations, workLogs, payments, invoices, history,
   rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
@@ -338,6 +519,7 @@ export function ProjectDetailPage({
     { key: "financial" as TabKey, label: "مالی", count: confirmedPayments.length },
     { key: "payables" as TabKey, label: "بدهی‌ها / چک‌ها", count: openInvoices.length + deferredPayments.length },
     { key: "notes" as TabKey, label: "یادداشت‌ها", count: notes.length },
+    { key: "reports" as TabKey, label: "گزارش‌ها" },
     { key: "pending" as TabKey, label: "در انتظار تایید", count: pending.length },
   ];
 
@@ -568,6 +750,10 @@ export function ProjectDetailPage({
             </div>
           )}
         </div>
+      )}
+
+      {activeTab === "reports" && (
+        <ProjectReportsTab projectId={project.id} pendingCount={pending.length} />
       )}
 
       {activeTab === "pending" && (

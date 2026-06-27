@@ -99,6 +99,7 @@ from app.services.persian_project_payment import (
     detect_purchase_payment,
 )
 from app.services.persian_role_extractor import PersianRoleExtractor
+from app.services.reporting_service import project_report_summary
 from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
@@ -3964,6 +3965,22 @@ def list_payments(project_id: int, db: DbSession) -> list[Payment]:
 def get_operating_summary(project_id: int, db: DbSession) -> dict[str, Any]:
     _get_project(db, project_id)
     return project_operating_summary(db, project_id)
+
+
+@router.get("/projects/{project_id}/reports/summary")
+def get_project_report_summary(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> dict[str, Any]:
+    _get_project(db, project_id)
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="from_date must be before or equal to to_date",
+        )
+    return project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
 
 
 @router.post(
