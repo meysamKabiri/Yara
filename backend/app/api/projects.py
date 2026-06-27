@@ -1,14 +1,16 @@
 import logging
 import os
 import re
+import csv
+from io import StringIO
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -128,6 +130,82 @@ def _get_project(db: DbSession, project_id: int) -> Project:
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
         )
     return project
+
+
+ROLE_LABELS = {
+    WorkerType.CLIENT: "کارفرما",
+    WorkerType.DAILY_WORKER: "کارگر روزمزد",
+    WorkerType.SKILLED_WORKER: "نیروی متخصص",
+    WorkerType.VENDOR: "فروشنده / تامین‌کننده",
+    WorkerType.OTHER: "سایر",
+}
+
+DIRECTION_LABELS = {
+    FinancialDirection.INCOMING: "دریافتی",
+    FinancialDirection.OUTGOING: "پرداختی",
+    FinancialDirection.DEFERRED: "پرداخت مدت‌دار",
+    FinancialDirection.DEBT: "بدهی پرداخت‌نشده",
+}
+
+PAYMENT_TYPE_LABELS = {
+    PaymentType.CASH: "نقدی",
+    PaymentType.BANK_TRANSFER: "انتقال بانکی",
+    PaymentType.CHECK: "چک",
+    PaymentType.OTHER: "سایر",
+}
+
+PAYABLE_KIND_LABELS = {
+    "vendor_payable": "بدهی فروشنده",
+    "deferred_check": "چک / مدت‌دار",
+    "worker_labor": "مانده کارگر",
+}
+
+
+def _csv_response(filename: str, headers: list[str], rows: list[list[Any]]) -> Response:
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    content = "\ufeff" + buffer.getvalue()
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _decimal_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(Decimal(str(value)))
+
+
+def _datetime_text(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def _date_range_bounds(
+    from_date: date | None,
+    to_date: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="from_date must be before or equal to to_date",
+        )
+    return (
+        datetime.combine(from_date, time.min) if from_date else None,
+        datetime.combine(to_date, time.max) if to_date else None,
+    )
+
+
+def _apply_datetime_range(statement, column, from_date: date | None, to_date: date | None):
+    start_at, end_at = _date_range_bounds(from_date, to_date)
+    if start_at is not None:
+        statement = statement.where(column >= start_at)
+    if end_at is not None:
+        statement = statement.where(column <= end_at)
+    return statement
 
 
 def _get_raw_entry(db: DbSession, project_id: int, raw_entry_id: int) -> RawEntry:
@@ -3985,6 +4063,238 @@ def get_project_report_summary(
             detail="from_date must be before or equal to to_date",
         )
     return project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
+
+
+@router.get("/projects/{project_id}/exports/payments.csv")
+def export_project_payments_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    workers = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.project_id == project_id))
+    }
+    statement = _apply_datetime_range(
+        select(Payment).where(Payment.project_id == project_id),
+        Payment.created_at,
+        from_date,
+        to_date,
+    ).order_by(Payment.created_at.asc(), Payment.id.asc())
+    rows = []
+    for payment in db.scalars(statement):
+        worker = workers.get(payment.entity_id)
+        rows.append([
+            _datetime_text(payment.created_at),
+            worker.name if worker else "نامشخص",
+            ROLE_LABELS.get(worker.type, "نامشخص") if worker else "نامشخص",
+            DIRECTION_LABELS.get(payment.direction, payment.direction.value),
+            PAYMENT_TYPE_LABELS.get(payment.type, payment.type.value),
+            _decimal_text(payment.amount),
+            payment.due_date or "",
+        ])
+    return _csv_response(
+        f"project-{project_id}-payments.csv",
+        ["تاریخ ثبت", "شخص", "نقش", "جهت", "روش پرداخت", "مبلغ", "توضیح"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/people.csv")
+def export_project_people_csv(project_id: int, db: DbSession) -> Response:
+    _get_project(db, project_id)
+    report = project_report_summary(db, project_id)
+    worker_rows = {row["entity_id"]: row for row in report["workers"]}
+    workers = db.scalars(
+        select(Worker)
+        .where(Worker.project_id == project_id)
+        .order_by(Worker.created_at.asc(), Worker.id.asc())
+    )
+    rows = []
+    for worker in workers:
+        stats = worker_rows.get(worker.id, {})
+        rows.append([
+            worker.name,
+            ROLE_LABELS.get(worker.type, worker.type.value),
+            worker.role_detail or "",
+            worker.phone or "",
+            worker.account_number or "",
+            _decimal_text(worker.daily_rate),
+            _decimal_text(stats.get("total_days", "0")),
+            _decimal_text(stats.get("total_labor_cost", "0")),
+            _decimal_text(stats.get("total_paid", "0")),
+            _decimal_text(stats.get("remaining_balance", "0")),
+        ])
+    return _csv_response(
+        f"project-{project_id}-people.csv",
+        ["نام", "نقش", "جزئیات نقش", "شماره تماس", "شماره حساب", "نرخ روزانه", "مجموع روز کارکرد", "مبلغ کارکرد", "پرداخت‌شده", "مانده"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/work-logs.csv")
+def export_project_work_logs_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    statement = _apply_datetime_range(
+        select(WorkLog).where(WorkLog.project_id == project_id),
+        WorkLog.created_at,
+        from_date,
+        to_date,
+    ).order_by(WorkLog.created_at.asc(), WorkLog.id.asc())
+    rows = []
+    for log in db.scalars(statement):
+        rows.append([
+            _datetime_text(log.created_at),
+            log.worker.name if log.worker else "نامشخص",
+            log.period_label or "",
+            _decimal_text(log.quantity),
+            _decimal_text(log.rate_per_unit),
+            _decimal_text(log.total_amount),
+            log.description or log.task_name or "",
+        ])
+    return _csv_response(
+        f"project-{project_id}-work-logs.csv",
+        ["تاریخ ثبت", "کارگر", "بازه", "تعداد روز", "نرخ روزانه", "مبلغ کارکرد", "توضیح"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/payables.csv")
+def export_project_payables_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    workers = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.project_id == project_id))
+    }
+    rows: list[list[Any]] = []
+
+    invoice_statement = _apply_datetime_range(
+        select(Invoice).where(Invoice.project_id == project_id),
+        Invoice.created_at,
+        from_date,
+        to_date,
+    ).order_by(Invoice.created_at.asc(), Invoice.id.asc())
+    for invoice in db.scalars(invoice_statement):
+        debt = max(invoice.total_amount - invoice_paid_amount(db, invoice.id), Decimal("0"))
+        if debt <= 0:
+            continue
+        vendor = workers.get(invoice.vendor_id)
+        rows.append([
+            _datetime_text(invoice.created_at),
+            vendor.name if vendor else "نامشخص",
+            PAYABLE_KIND_LABELS["vendor_payable"],
+            _decimal_text(debt),
+            "",
+            "باز",
+            invoice.description or "",
+        ])
+
+    payment_statement = _apply_datetime_range(
+        select(Payment).where(
+            Payment.project_id == project_id,
+            (Payment.direction == FinancialDirection.DEFERRED) | (Payment.type == PaymentType.CHECK),
+        ),
+        Payment.created_at,
+        from_date,
+        to_date,
+    ).order_by(Payment.created_at.asc(), Payment.id.asc())
+    for payment in db.scalars(payment_statement):
+        worker = workers.get(payment.entity_id)
+        rows.append([
+            _datetime_text(payment.created_at),
+            worker.name if worker else "نامشخص",
+            PAYABLE_KIND_LABELS["deferred_check"],
+            _decimal_text(payment.amount),
+            payment.due_date or "",
+            "پرداخت مدت‌دار",
+            "",
+        ])
+
+    report = project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
+    for payable in report["payables"]:
+        if payable["kind"] != "worker_labor":
+            continue
+        rows.append([
+            "",
+            payable["name"],
+            PAYABLE_KIND_LABELS["worker_labor"],
+            _decimal_text(payable["amount"]),
+            payable.get("due_date") or "",
+            "باز",
+            payable.get("description") or "",
+        ])
+
+    return _csv_response(
+        f"project-{project_id}-payables.csv",
+        ["تاریخ ثبت", "شخص / فروشنده", "نوع", "مبلغ", "سررسید", "وضعیت", "توضیح"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/notes.csv")
+def export_project_notes_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    statement = _apply_datetime_range(
+        select(HistoryEntry).where(
+            HistoryEntry.project_id == project_id,
+            HistoryEntry.change_type == HistoryChangeType.NOTE,
+        ),
+        HistoryEntry.created_at,
+        from_date,
+        to_date,
+    ).order_by(HistoryEntry.created_at.asc(), HistoryEntry.id.asc())
+    rows = [
+        [_datetime_text(note.created_at), note.input_text]
+        for note in db.scalars(statement)
+    ]
+    return _csv_response(
+        f"project-{project_id}-notes.csv",
+        ["تاریخ ثبت", "متن یادداشت"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/summary.csv")
+def export_project_summary_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    report = project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
+    summary = report["summary"]
+    rows = [
+        ["دریافتی", summary["money_in"]],
+        ["پرداخت‌شده واقعی", summary["paid_out"]],
+        ["کارکرد ثبت‌شده", summary["labor_cost"]],
+        ["بدهی باز", summary["open_payables"]],
+        ["چک / پرداخت مدت‌دار", summary["deferred_checks"]],
+        ["مانده تقریبی", summary["approximate_balance"]],
+        ["موارد در انتظار تایید", summary["pending_count"]],
+    ]
+    return _csv_response(
+        f"project-{project_id}-summary.csv",
+        ["عنوان", "مقدار"],
+        rows,
+    )
 
 
 @router.post(

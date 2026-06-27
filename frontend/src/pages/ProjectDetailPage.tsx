@@ -55,12 +55,21 @@ const PAYMENT_TYPE_LABELS: Record<string, string> = {
 const UNKNOWN_LABEL = "نامشخص";
 
 const REPORT_PAYABLE_KIND_LABELS: Record<PayableReportRow["kind"], string> = {
-  vendor_payable: "بدهی فروشنده",
-  deferred_check: "چک / مدت‌دار",
-  worker_labor: "مانده کارگر",
+  vendor_payable: "بدهی باز",
+  deferred_check: "چک / پرداخت مدت‌دار",
+  worker_labor: "کارکرد پرداخت‌نشده",
 };
 
 type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "reports" | "pending";
+
+const CSV_EXPORTS = [
+  { label: "خلاصه پروژه", path: "summary.csv" },
+  { label: "پرداخت‌ها", path: "payments.csv" },
+  { label: "افراد", path: "people.csv" },
+  { label: "کارکرد کارگران", path: "work-logs.csv" },
+  { label: "بدهی‌ها و چک‌ها", path: "payables.csv" },
+  { label: "یادداشت‌ها", path: "notes.csv" },
+];
 
 type ProjectDetailPageProps = {
   project: ProjectDetail | null;
@@ -103,6 +112,32 @@ function shortDate(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleDateString("fa-IR");
+}
+
+function exportHref(projectId: number, path: string, fromDate: string, toDate: string): string {
+  const params = new URLSearchParams();
+  if (fromDate) params.set("from_date", fromDate);
+  if (toDate) params.set("to_date", toDate);
+  const query = params.toString();
+  return `/api/projects/${projectId}/exports/${path}${query ? `?${query}` : ""}`;
+}
+
+function CsvExportMenu({ projectId, fromDate, toDate }: { projectId: number; fromDate: string; toDate: string }) {
+  return (
+    <details className="csv-export-menu">
+      <summary>خروجی CSV</summary>
+      <div className="csv-export-panel">
+        <p>خروجی‌ها فقط از رکوردهای تاییدشده ساخته می‌شوند.</p>
+        <div className="csv-export-actions">
+          {CSV_EXPORTS.map((item) => (
+            <a key={item.path} href={exportHref(projectId, item.path, fromDate, toDate)} download>
+              {item.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
 }
 
 function personKind(worker: Worker): PersonKind {
@@ -409,100 +444,120 @@ function ProjectReportsTab({ projectId, pendingCount }: { projectId: number; pen
         </div>
       </section>
 
+      <div className="report-actions-row">
+        <CsvExportMenu projectId={projectId} fromDate={fromDate} toDate={toDate} />
+      </div>
+
       {reportError && <div className="empty-state">{reportError}</div>}
       {isReportLoading && !report && <div className="empty-state">در حال دریافت گزارش...</div>}
 
       {report && summary && (
         <>
-          <section className="summary-grid six-up project-summary-grid">
+          <section className="report-summary-grid">
             <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>دریافتی</span><strong>{money(summary.money_in)}</strong><small>پرداخت‌های تاییدشده کارفرما</small></article>
             <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده واقعی</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
-            <article className="metric-card pending"><Hammer aria-hidden="true" /><span>کارکرد ثبت‌شده</span><strong>{money(summary.labor_cost)}</strong><small>هزینه کارکرد تاییدشده</small></article>
-            <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی باز</span><strong>{money(summary.open_payables)}</strong><small>فروشنده + کارکرد پرداخت‌نشده</small></article>
-            <article className="metric-card pending"><Banknote aria-hidden="true" /><span>چک / پرداخت مدت‌دار</span><strong>{money(summary.deferred_checks)}</strong><small>جدا از پرداخت‌شده واقعی</small></article>
+            <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی‌ها و چک‌ها</span><strong>{money(Number(summary.open_payables) + Number(summary.deferred_checks))}</strong><small>بدهی باز: {money(summary.open_payables)} · چک/مدت‌دار: {money(summary.deferred_checks)} · کارکرد: {money(summary.labor_cost)}</small></article>
             <article className={Number(summary.approximate_balance) >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>مانده تقریبی</span><strong>{money(summary.approximate_balance)}</strong><small>دریافتی - پرداختی - بدهی باز</small></article>
           </section>
           <p className="summary-helper">
             گزارش فقط از رکوردهای تاییدشده ساخته می‌شود. موارد در انتظار تایید فعلی: {pendingCount.toLocaleString("fa-IR")}
           </p>
 
-          <ReportTable
-            title="پرداخت‌های کارفرما"
-            empty="پرداختی از کارفرما ثبت نشده است"
-            headers={["کارفرما", "مبلغ پرداختی", "تعداد پرداخت", "آخرین پرداخت"]}
-            rows={report.client_payments.map((row) => [
-              row.name,
-              money(row.total_paid),
-              row.payment_count.toLocaleString("fa-IR"),
-              row.last_payment_at ? shortDate(row.last_payment_at) : "-",
-            ])}
-          />
+          <section className="report-sections">
+            <article className="report-section-card">
+              <div className="section-title compact-title">
+                <div>
+                  <span className="eyebrow">کارفرما</span>
+                  <h2>پرداخت‌های کارفرما</h2>
+                </div>
+              </div>
+              {report.client_payments.length === 0 ? (
+                <EmptyState>پرداختی از کارفرما ثبت نشده است</EmptyState>
+              ) : (
+                <div className="report-row-list">
+                  {report.client_payments.map((row) => (
+                    <article className="report-list-row" key={row.entity_id}>
+                      <div className="report-row-head">
+                        <strong>{row.name}</strong>
+                        <span>{row.payment_count.toLocaleString("fa-IR")} پرداخت</span>
+                      </div>
+                      <div className="report-row-amount">{money(row.total_paid)}</div>
+                      <p className="report-description">آخرین پرداخت: {row.last_payment_at ? shortDate(row.last_payment_at) : "-"}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </article>
 
-          <WorkerReportTable workers={report.workers} />
+            <WorkerReportSection workers={report.workers} />
 
-          <ReportTable
-            title="بدهی‌ها و چک‌ها"
-            empty="بدهی یا چکی ثبت نشده است"
-            headers={["شخص / فروشنده", "نوع", "مبلغ", "سررسید", "توضیح"]}
-            rows={report.payables.map((row) => [
-              row.name,
-              REPORT_PAYABLE_KIND_LABELS[row.kind],
-              money(row.amount),
-              row.due_date || "-",
-              row.description || "-",
-            ])}
-          />
+            <PayableReportSection payables={report.payables} />
+          </section>
         </>
       )}
     </div>
   );
 }
 
-function WorkerReportTable({ workers }: { workers: WorkerReportRow[] }) {
+function WorkerReportSection({ workers }: { workers: WorkerReportRow[] }) {
   return (
-    <ReportTable
-      title="گزارش کارگران"
-      empty="کارکردی برای کارگران ثبت نشده است"
-      headers={["کارگر", "روز کارکرد", "مبلغ کارکرد", "پرداخت‌شده", "مانده"]}
-      rows={workers.map((row) => [
-        row.name,
-        days(row.total_days),
-        money(row.total_labor_cost),
-        money(row.total_paid),
-        money(row.remaining_balance),
-      ])}
-    />
+    <article className="report-section-card">
+      <div className="section-title compact-title">
+        <div>
+          <span className="eyebrow">کارگران</span>
+          <h2>گزارش کارگران</h2>
+        </div>
+      </div>
+      {workers.length === 0 ? (
+        <EmptyState>کارکردی برای کارگران ثبت نشده است</EmptyState>
+      ) : (
+        <div className="report-row-list">
+          {workers.map((row) => (
+            <article className="report-list-row" key={row.worker_id}>
+              <div className="report-row-head">
+                <strong>{row.name}</strong>
+                <span>{days(row.total_days)} کارکرد</span>
+              </div>
+              <dl className="report-labeled-values">
+                <div><dt>مبلغ کارکرد</dt><dd>{money(row.total_labor_cost)}</dd></div>
+                <div><dt>پرداخت‌شده</dt><dd>{money(row.total_paid)}</dd></div>
+                <div><dt>مانده</dt><dd>{money(row.remaining_balance)}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      )}
+    </article>
   );
 }
 
-function ReportTable({ title, empty, headers, rows }: { title: string; empty: string; headers: string[]; rows: string[][] }) {
+function PayableReportSection({ payables }: { payables: PayableReportRow[] }) {
   return (
-    <section className="report-table-section">
+    <article className="report-section-card">
       <div className="section-title compact-title">
         <div>
-          <span className="eyebrow">گزارش</span>
-          <h2>{title}</h2>
+          <span className="eyebrow">بدهی</span>
+          <h2>بدهی‌ها و چک‌ها</h2>
         </div>
       </div>
-      {rows.length === 0 ? (
-        <EmptyState>{empty}</EmptyState>
+      {payables.length === 0 ? (
+        <EmptyState>بدهی یا چکی ثبت نشده است</EmptyState>
       ) : (
-        <div className="report-table-wrap">
-          <table className="report-table">
-            <thead>
-              <tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <tr key={`${title}-${index}`}>
-                  {row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`}>{cell}</td>)}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="report-row-list">
+          {payables.map((row) => (
+            <article className="report-list-row" key={row.id}>
+              <div className="report-row-head">
+                <strong>{row.name}</strong>
+                <span className="report-badge">{REPORT_PAYABLE_KIND_LABELS[row.kind]}</span>
+              </div>
+              <div className="report-row-amount">{money(row.amount)}</div>
+              <p className="report-description">{row.description || "بدون توضیح"}</p>
+              {row.due_date && <span className="report-due-date">سررسید: {shortDate(row.due_date)}</span>}
+            </article>
+          ))}
         </div>
       )}
-    </section>
+    </article>
   );
 }
 
