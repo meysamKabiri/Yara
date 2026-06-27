@@ -23,6 +23,8 @@ import {
   Users,
 } from "lucide-react";
 import { api, HistoryEntry, Invoice, OperatingSummary, Payment, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog } from "../api";
+import { PersianDatePicker } from "../components/PersianDatePicker";
+import { quickReportRange, ReportFilterKey } from "../utils/jalaliDate";
 
 type PersonKind = WorkerType | "OTHER";
 
@@ -57,8 +59,6 @@ const REPORT_PAYABLE_KIND_LABELS: Record<PayableReportRow["kind"], string> = {
   deferred_check: "چک / مدت‌دار",
   worker_labor: "مانده کارگر",
 };
-
-type ReportFilterKey = "week" | "month" | "year" | "all";
 
 type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "reports" | "pending";
 
@@ -103,28 +103,6 @@ function shortDate(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleDateString("fa-IR");
-}
-
-function isoDate(value: Date): string {
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  return `${value.getFullYear()}-${month}-${day}`;
-}
-
-function quickReportRange(key: ReportFilterKey): { from_date: string; to_date: string } | { from_date: ""; to_date: "" } {
-  if (key === "all") return { from_date: "", to_date: "" };
-  const now = new Date();
-  const start = new Date(now);
-  if (key === "week") {
-    const day = start.getDay();
-    const daysFromSaturday = (day + 1) % 7;
-    start.setDate(start.getDate() - daysFromSaturday);
-  } else if (key === "month") {
-    start.setDate(1);
-  } else {
-    start.setMonth(0, 1);
-  }
-  return { from_date: isoDate(start), to_date: isoDate(now) };
 }
 
 function personKind(worker: Worker): PersonKind {
@@ -416,21 +394,13 @@ function ProjectReportsTab({ projectId, pendingCount }: { projectId: number; pen
     setFromDate(range.from_date);
     setToDate(range.to_date);
   };
-  const updateFromDate = (value: string) => setFromDate(value);
-  const updateToDate = (value: string) => setToDate(value);
 
   const summary = report?.summary;
   return (
     <div className="detail-tab-content reports-tab">
       <section className="report-controls" aria-label="بازه گزارش">
-        <div className="date-field">
-          <label htmlFor="report-from">از تاریخ</label>
-          <input id="report-from" type="date" value={fromDate} onInput={(event) => updateFromDate(event.currentTarget.value)} onChange={(event) => updateFromDate(event.target.value)} />
-        </div>
-        <div className="date-field">
-          <label htmlFor="report-to">تا تاریخ</label>
-          <input id="report-to" type="date" value={toDate} onInput={(event) => updateToDate(event.currentTarget.value)} onChange={(event) => updateToDate(event.target.value)} />
-        </div>
+        <PersianDatePicker id="report-from" label="از تاریخ" value={fromDate} onChange={setFromDate} />
+        <PersianDatePicker id="report-to" label="تا تاریخ" value={toDate} onChange={setToDate} />
         <div className="quick-filter-group" aria-label="فیلتر سریع">
           <button type="button" onClick={() => applyQuickFilter("week")}>این هفته</button>
           <button type="button" onClick={() => applyQuickFilter("month")}>این ماه</button>

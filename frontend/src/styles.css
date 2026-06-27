@@ -373,19 +373,30 @@ textarea {
 }
 
 .project-overview-card {
+  cursor: pointer;
   gap: 0.9rem;
   min-height: 0;
+  outline: none;
   padding: 1rem;
   transition:
     border-color 160ms ease,
+    box-shadow 160ms ease,
     transform 160ms ease,
     background 160ms ease;
 }
 
-.project-overview-card:hover {
+.project-overview-card:hover,
+.project-overview-card:focus-visible {
   background: #fbfdfc;
-  border-color: #cddbd4;
+  border-color: #b9cfc4;
+  box-shadow: 0 16px 42px rgb(31 48 38 / 0.09);
   transform: translateY(-1px);
+}
+
+.project-overview-card:focus-visible {
+  box-shadow:
+    0 0 0 3px rgb(90 138 118 / 0.18),
+    0 16px 42px rgb(31 48 38 / 0.09);
 }
 
 .project-overview-card strong {
@@ -427,6 +438,20 @@ textarea {
 .project-card-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.project-card-link {
+  align-items: center;
+  color: #426c5a;
+  display: inline-flex;
+  font-size: 0.86rem;
+  font-weight: 800;
+  line-height: 1.6;
+}
+
+.project-overview-card:hover .project-card-link,
+.project-overview-card:focus-visible .project-card-link {
+  color: #255541;
 }
 
 .create-project-modal {
@@ -2606,6 +2631,7 @@ mark {
 
 .notification-shell {
   position: relative;
+  z-index: 70;
 }
 
 .notification-dropdown {
@@ -2616,11 +2642,15 @@ mark {
   display: grid;
   gap: 0.5rem;
   inset-inline-start: 0;
+  max-height: min(520px, calc(100vh - 96px));
   min-width: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0.75rem;
   position: absolute;
   top: calc(100% + 0.5rem);
-  z-index: 20;
+  width: min(380px, calc(100vw - 24px));
+  z-index: 80;
 }
 
 .notification-dropdown-head {
@@ -2637,9 +2667,11 @@ mark {
 
 .notification-empty {
   align-items: center;
-  display: inline-flex;
+  display: flex;
   gap: 0.35rem;
+  line-height: 1.7;
   margin: 0;
+  min-height: 44px;
 }
 
 .notification-list {
@@ -2657,13 +2689,21 @@ mark {
   display: grid;
   gap: 0.5rem;
   grid-template-columns: auto minmax(0, 1fr);
-  padding: 0.55rem;
+  min-height: 44px;
+  padding: 0.68rem;
   text-align: right;
 }
 
 .notification-list button span {
   display: grid;
   gap: 0.15rem;
+  min-width: 0;
+}
+
+.notification-list button strong,
+.notification-list small {
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .notification-list small {
@@ -2871,6 +2911,7 @@ mark {
 .date-field {
   display: grid;
   gap: 0.3rem;
+  position: relative;
 }
 
 .date-field label {
@@ -2879,7 +2920,8 @@ mark {
   font-weight: 700;
 }
 
-.date-field input {
+.date-field input,
+.persian-date-trigger {
   width: 100%;
   border: 1px solid #dce7e1;
   border-radius: 10px;
@@ -2887,6 +2929,116 @@ mark {
   color: #1f3026;
   padding: 0.62rem 0.7rem;
   font: inherit;
+}
+
+.persian-date-trigger {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 0.45rem;
+  justify-content: flex-start;
+  min-height: 42px;
+  text-align: right;
+}
+
+.persian-date-trigger:not(.has-value) {
+  color: #6b7780;
+}
+
+.persian-date-trigger:hover,
+.persian-date-trigger[aria-expanded="true"] {
+  border-color: #b9cfc4;
+  background: #fbfdfc;
+}
+
+.persian-date-popover {
+  background: #ffffff;
+  border: 1px solid #dce7e1;
+  border-radius: 16px;
+  box-shadow: 0 18px 45px rgb(31 48 38 / 0.14);
+  display: grid;
+  gap: 0.65rem;
+  inset-inline-start: 0;
+  padding: 0.75rem;
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  width: min(320px, calc(100vw - 24px));
+  z-index: 90;
+}
+
+.persian-calendar-head {
+  align-items: center;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: 36px minmax(0, 1fr) 36px;
+}
+
+.persian-calendar-head strong {
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.persian-calendar-head button,
+.persian-calendar-grid button,
+.persian-calendar-actions button {
+  border-radius: 10px;
+  min-height: 36px;
+  padding: 0.35rem;
+}
+
+.persian-calendar-head button {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.persian-calendar-weekdays,
+.persian-calendar-grid {
+  display: grid;
+  gap: 0.3rem;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.persian-calendar-weekdays span {
+  color: #65727d;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.persian-calendar-grid button {
+  aspect-ratio: 1;
+  color: #273b31;
+  font-weight: 800;
+}
+
+.persian-calendar-grid button:hover {
+  background: #f2f7f4;
+  border-color: #cddbd4;
+}
+
+.persian-calendar-grid button.selected {
+  background: #2f8f5a;
+  border-color: #2f8f5a;
+  color: #ffffff;
+}
+
+.persian-calendar-actions {
+  display: flex;
+  gap: 0.45rem;
+  justify-content: space-between;
+}
+
+.persian-calendar-actions button {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.3rem;
+  justify-content: center;
+  padding-inline: 0.65rem;
+}
+
+.ghost-icon-action {
+  color: #52625b;
 }
 
 .quick-filter-group {
@@ -2965,7 +3117,45 @@ mark {
   .report-controls {
     grid-template-columns: 1fr;
   }
+  .persian-date-popover {
+    left: 12px;
+    max-height: calc(100dvh - 90px);
+    overflow-y: auto;
+    position: fixed;
+    right: 12px;
+    top: 72px;
+    width: auto;
+  }
   .quick-filter-group button {
     flex: 1 1 calc(50% - 0.4rem);
+  }
+}
+
+@media (max-width: 980px) {
+  .notification-dropdown {
+    inset-inline-end: 0;
+    inset-inline-start: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .notification-dropdown {
+    border-radius: 18px;
+    left: 12px;
+    max-height: calc(100dvh - 90px);
+    min-width: 0;
+    padding: 0.8rem;
+    position: fixed;
+    right: 12px;
+    top: 64px;
+    width: auto;
+  }
+
+  .notification-list {
+    gap: 0.45rem;
+  }
+
+  .notification-list button {
+    padding: 0.75rem;
   }
 }

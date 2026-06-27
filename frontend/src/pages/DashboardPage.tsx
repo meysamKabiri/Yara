@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useMemo, useRef, useState } from "react";
 import { ArrowDownCircle, ArrowUpCircle, BriefcaseBusiness, Clock, FolderKanban, Hammer, Plus, Search, Scale, UserRound, Wallet } from "lucide-react";
 import { Project } from "../api";
 
@@ -49,6 +49,12 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
     if (projectName.trim()) setIsCreateOpen(false);
   }
 
+  function openProjectFromKeyboard(event: KeyboardEvent<HTMLElement>, projectId: number) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onOpenProject(projectId);
+  }
+
   return (
     <div className="page-stack home-page">
       <section className="home-hero">
@@ -75,7 +81,15 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
             const financials = projectFinancials[project.id] ?? { received: 0, paid: 0, net: 0, debt: 0, labor: 0, pending: 0, deferred: 0, clientName: null, lastActivity: project.updated_at };
             const status = projectStatus(financials);
             return (
-              <article className="project-card project-overview-card" key={project.id}>
+              <article
+                aria-label={`مشاهده جزئیات پروژه ${project.name}`}
+                className="project-card project-overview-card"
+                key={project.id}
+                onClick={() => onOpenProject(project.id)}
+                onKeyDown={(event) => openProjectFromKeyboard(event, project.id)}
+                role="button"
+                tabIndex={0}
+              >
                 <div className="project-card-head">
                   <div>
                     <strong>{project.name}</strong>
@@ -93,7 +107,7 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
                   <div><dt>در انتظار تایید</dt><dd className={financials.pending > 0 ? "money-pending" : ""}>{financials.pending.toLocaleString("fa-IR")}</dd></div>
                 </dl>
                 <div className="project-card-actions">
-                  <button className="primary-action" type="button" onClick={() => onOpenProject(project.id)}>باز کردن</button>
+                  <span className="project-card-link">مشاهده جزئیات ←</span>
                 </div>
               </article>
             );

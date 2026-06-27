@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { ArrowDownCircle, ArrowUpCircle, Banknote, Hammer, ReceiptText, Scale } from "lucide-react";
 import { api, Project, ProjectReportResponse } from "../api";
+import { PersianDatePicker } from "../components/PersianDatePicker";
+import { quickReportRange, ReportFilterKey } from "../utils/jalaliDate";
 
 type ReportsPageProps = {
   projects: Project[];
   selectedProjectId: number | null;
   onProjectChange: (projectId: number) => void;
 };
-
-type ReportFilterKey = "week" | "month" | "year" | "all";
 
 function money(value: string | number | null | undefined): string {
   return `${Number(value ?? 0).toLocaleString("fa-IR")} تومان`;
@@ -20,28 +20,6 @@ function days(value: string | number | null | undefined): string {
 
 function shortDate(value: string): string {
   return new Date(value).toLocaleDateString("fa-IR");
-}
-
-function isoDate(value: Date): string {
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  return `${value.getFullYear()}-${month}-${day}`;
-}
-
-function quickReportRange(key: ReportFilterKey): { from_date: string; to_date: string } | { from_date: ""; to_date: "" } {
-  if (key === "all") return { from_date: "", to_date: "" };
-  const now = new Date();
-  const start = new Date(now);
-  if (key === "week") {
-    const day = start.getDay();
-    const daysFromSaturday = (day + 1) % 7;
-    start.setDate(start.getDate() - daysFromSaturday);
-  } else if (key === "month") {
-    start.setDate(1);
-  } else {
-    start.setMonth(0, 1);
-  }
-  return { from_date: isoDate(start), to_date: isoDate(now) };
 }
 
 export function ReportsPage({ projects, selectedProjectId, onProjectChange }: ReportsPageProps) {
@@ -97,14 +75,8 @@ export function ReportsPage({ projects, selectedProjectId, onProjectChange }: Re
       </section>
 
       <section className="report-controls" aria-label="بازه گزارش">
-        <div className="date-field">
-          <label htmlFor="global-report-from">از تاریخ</label>
-          <input id="global-report-from" type="date" value={fromDate} onInput={(event) => setFromDate(event.currentTarget.value)} onChange={(event) => setFromDate(event.target.value)} />
-        </div>
-        <div className="date-field">
-          <label htmlFor="global-report-to">تا تاریخ</label>
-          <input id="global-report-to" type="date" value={toDate} onInput={(event) => setToDate(event.currentTarget.value)} onChange={(event) => setToDate(event.target.value)} />
-        </div>
+        <PersianDatePicker id="global-report-from" label="از تاریخ" value={fromDate} onChange={setFromDate} />
+        <PersianDatePicker id="global-report-to" label="تا تاریخ" value={toDate} onChange={setToDate} />
         <div className="quick-filter-group" aria-label="فیلتر سریع">
           <button type="button" onClick={() => applyQuickFilter("week")}>این هفته</button>
           <button type="button" onClick={() => applyQuickFilter("month")}>این ماه</button>

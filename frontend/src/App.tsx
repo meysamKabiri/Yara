@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowUpCircle, BarChart3, Bell, CheckCircle2, Clock, Home, ReceiptText, Users } from "lucide-react";
 import {
   api,
@@ -192,6 +192,7 @@ function App() {
   const [pendingTabEditingId, setPendingTabEditingId] = useState<number | null>(null);
   const [reviewModalDismissed, setReviewModalDismissed] = useState(true);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+  const notificationShellRef = useRef<HTMLDivElement>(null);
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
@@ -268,6 +269,16 @@ function App() {
   useEffect(() => {
     if (routeProjectId && routeProjectId !== selectedProjectId) setSelectedProjectId(routeProjectId);
   }, [routeProjectId, selectedProjectId]);
+
+  useEffect(() => {
+    if (!isNotificationOpen) return;
+    function closeNotificationsOnOutsidePress(event: PointerEvent) {
+      if (notificationShellRef.current?.contains(event.target as Node)) return;
+      setIsNotificationOpen(false);
+    }
+    document.addEventListener("pointerdown", closeNotificationsOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeNotificationsOnOutsidePress);
+  }, [isNotificationOpen]);
 
   useEffect(() => {
     if ((route.name === "people" || route.name === "reports") && !selectedProjectId && projects.length > 0) {
@@ -824,7 +835,7 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="notification-shell">
+        <div className="notification-shell" ref={notificationShellRef}>
           <button className={openDebtCount > 0 ? "header-bell has-alerts" : "header-bell"} type="button" aria-label="هشدارها" onClick={() => setIsNotificationOpen((value) => !value)}>
             <Bell aria-hidden="true" size={17} />
             <span>{openDebtCount.toLocaleString("fa-IR")}</span>
