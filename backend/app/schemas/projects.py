@@ -197,6 +197,8 @@ class WorkLogRead(BaseModel):
     quantity: Decimal
     rate_per_unit: Decimal | None
     total_amount: Decimal | None
+    period_label: str | None = None
+    source_pending_interpretation_id: int | None = None
     description: str | None
     created_at: datetime
     updated_at: datetime

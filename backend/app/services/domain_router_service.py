@@ -22,6 +22,7 @@ def _field_updates_has_profile_keys(field_updates: dict) -> bool:
 class DomainType(StrEnum):
     SETUP = "SETUP"
     FINANCIAL = "FINANCIAL"
+    WORK = "WORK"
     MIXED = "MIXED"
     ENTITY_UPDATE = "ENTITY_UPDATE"
 
@@ -35,11 +36,13 @@ class DomainRouterService:
 
     SETUP_SCHEMA = "setup_confirmation"
     FINANCIAL_SCHEMA = "financial_confirmation"
+    WORK_SCHEMA = "work_log_confirmation"
     MIXED_SCHEMA = "split_confirmation"
     ENTITY_UPDATE_SCHEMA = "entity_update_confirmation"
 
     SETUP_UI = "SetupModal"
     FINANCIAL_UI = "FinancialModal"
+    WORK_UI = "WorkLogModal"
     MIXED_UI = "SplitFlow"
     ENTITY_UPDATE_UI = "EntityUpdateModal"
 
@@ -102,7 +105,13 @@ class DomainRouterService:
         setup_score = self._setup_score(text, interpretation)
         financial_score = self._financial_score(text, interpretation)
         financial_intent = self._has_financial_intent(interpretation)
+        work_intent = self._has_work_intent(interpretation)
 
+        if work_intent and financial_score == 0:
+            result = self._result(DomainType.WORK, 0.9)
+            if db is not None:
+                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            return result
         if has_profile_update and financial_score == 0:
             result = self._result(DomainType.ENTITY_UPDATE, min(0.95, 0.75 + setup_score * 0.05))
             if db is not None:
@@ -193,6 +202,14 @@ class DomainRouterService:
         financial = interpretation.get("financial")
         return isinstance(financial, dict) and financial.get("amount") is not None
 
+    def _has_work_intent(self, interpretation: dict[str, Any]) -> bool:
+        action = str(interpretation.get("action") or interpretation.get("semantic_action") or "").upper()
+        intent = str(interpretation.get("intent") or "").upper()
+        if action == "WORK_LOG" or intent == "WORK":
+            return True
+        work = interpretation.get("work")
+        return isinstance(work, dict) and work.get("quantity") is not None
+
     def _has_explicit_setup_declaration(self, text: str) -> bool:
         declaration_terms = (
             "کارفرمای پروژه است",
@@ -221,6 +238,13 @@ class DomainRouterService:
                 "confidence": confidence,
                 "required_schema": self.FINANCIAL_SCHEMA,
                 "ui_mode": self.FINANCIAL_UI,
+            }
+        if domain == DomainType.WORK:
+            return {
+                "domain": domain.value,
+                "confidence": confidence,
+                "required_schema": self.WORK_SCHEMA,
+                "ui_mode": self.WORK_UI,
             }
         if domain == DomainType.MIXED:
             return {

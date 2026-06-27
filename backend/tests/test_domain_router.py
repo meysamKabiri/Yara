@@ -49,6 +49,22 @@ def test_project_account_deposit_with_client_word_routes_to_financial_schema() -
     assert route["ui_mode"] == "FinancialModal"
 
 
+def test_work_log_routes_to_work_schema_even_with_daily_rate_snapshot() -> None:
+    route = DomainRouterService().route(
+        "اکبر امروز کار کرد",
+        {
+            "intent": "WORK",
+            "action": "WORK_LOG",
+            "entities": [{"name": "اکبر", "project_role": "DAILY_WORKER", "daily_rate": "1000000.00"}],
+            "work": {"quantity": 1, "unit": "day"},
+        },
+    )
+
+    assert route["domain"] == DomainType.WORK.value
+    assert route["required_schema"] == "work_log_confirmation"
+    assert route["ui_mode"] == "WorkLogModal"
+
+
 def test_profile_update_fields_route_to_entity_update_schema_even_if_action_is_set_role() -> None:
     route = DomainRouterService().route(
         "شماره تماس میثم 09123456789",

@@ -1,6 +1,7 @@
 export type DomainType =
   | "SETUP"
   | "FINANCIAL"
+  | "WORK"
   | "ENTITY_UPDATE"
   | "MIXED";
 

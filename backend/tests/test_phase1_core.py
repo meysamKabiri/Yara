@@ -49,6 +49,18 @@ def confirm_interpretation(client: TestClient, interpretation: dict) -> dict:
         candidates = entities[0].get("candidate_matches") if entities else None
         if candidates:
             payload["selected_person_id"] = candidates[0]["person_id"]
+    if interpretation["semantic_action"] == "WORK_LOG":
+        if interpretation.get("suggested_entity_id") is not None:
+            payload["entity_id"] = interpretation["suggested_entity_id"]
+            payload["confirmed"] = True
+        else:
+            entities = interpretation.get("extracted_entities") or []
+            name = entities[0].get("name") if entities else None
+            payload["create_new"] = True
+            payload["confirmed"] = True
+            if name:
+                payload["name"] = name
+            payload["role"] = "DAILY_WORKER"
     response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm", json=payload)
     assert response.status_code == 200
     body = response.json()
@@ -2609,3 +2621,169 @@ def test_create_new_daily_worker_with_daily_rate(client: TestClient) -> None:
     assert worker is not None
     assert worker["type"] == "DAILY_WORKER"
     assert worker["daily_rate"] == "1200000.00"
+
+
+def test_daily_worker_today_work_creates_work_log_without_payment(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "مش رحیم", "DAILY_WORKER", daily_rate="1200000")
+
+    interpretation = create_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
+
+    assert interpretation["canonical_event_type"] == "WORK_EVENT"
+    assert interpretation["semantic_action"] == "WORK_LOG"
+    assert interpretation["suggested_entity_id"] == worker["id"]
+    assert interpretation["extracted_quantity"] == "1.00"
+
+    before_summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    work_logs = client.get(f"/projects/{project['id']}/work-logs").json()
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    after_summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert len(work_logs) == 1
+    assert work_logs[0]["worker_id"] == worker["id"]
+    assert work_logs[0]["quantity"] == "1.00"
+    assert work_logs[0]["rate_per_unit"] == "1200000.00"
+    assert work_logs[0]["total_amount"] == "1200000.00"
+    assert work_logs[0]["period_label"] == "امروز"
+    assert payments == []
+    assert Decimal(before_summary["total_paid_out"]) == Decimal("0")
+    assert Decimal(after_summary["total_paid_out"]) == Decimal("0")
+    assert after_summary["total_work_amount"] == "1200000.00"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_quantity", "expected_period"),
+    [
+        ("مش رحیم هفته قبل ۴ روز و نصفی کار کرد", "4.50", "هفته قبل"),
+        ("جواد ماه اردیبهشت ۱۵ روز و نیم کار کرده", "15.50", "ماه اردیبهشت"),
+        (
+            "مجید در هفته گذشته روز های شنبه یک شنبه دوشنبه و چهارشنبه نصفه روز و پنج شنبه کار کرد",
+            "4.50",
+            "هفته گذشته",
+        ),
+    ],
+)
+def test_daily_worker_attendance_quantity_patterns(
+    client: TestClient,
+    text: str,
+    expected_quantity: str,
+    expected_period: str,
+) -> None:
+    project = create_project(client)
+    name = text.split()[0] if not text.startswith("مش رحیم") else "مش رحیم"
+    worker = create_worker(client, project["id"], name, "DAILY_WORKER", daily_rate="1000000")
+
+    interpretation = create_interpretation(client, project["id"], text)
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    work_logs = client.get(f"/projects/{project['id']}/work-logs").json()
+    assert len(work_logs) == 1
+    assert work_logs[0]["worker_id"] == worker["id"]
+    assert work_logs[0]["quantity"] == expected_quantity
+    assert work_logs[0]["period_label"] == expected_period
+
+
+def test_multiple_daily_worker_lines_create_separate_work_logs(client: TestClient) -> None:
+    project = create_project(client)
+    akbar = create_worker(client, project["id"], "اکبر", "DAILY_WORKER", daily_rate="1000000")
+    javad = create_worker(client, project["id"], "جواد", "DAILY_WORKER", daily_rate="900000")
+
+    interpretations = natural_input_interpretations(
+        client,
+        project["id"],
+        "اکبر امروز کار کرد\nجواد امروز کار کرد\nجواد دیروز کار کرد",
+    )
+
+    assert len(interpretations) == 3
+    for interpretation in interpretations:
+        entity_id = akbar["id"] if interpretation["extracted_entities"][0]["name"] == "اکبر" else javad["id"]
+        response = client.post(
+            f"/pending-interpretations/{interpretation['id']}/confirm",
+            json={"entity_id": entity_id, "confirmed": True},
+        )
+        assert response.status_code == 200
+
+    work_logs = client.get(f"/projects/{project['id']}/work-logs").json()
+    assert len(work_logs) == 3
+    assert sum(Decimal(log["quantity"]) for log in work_logs if log["worker_id"] == javad["id"]) == Decimal("2.00")
+    assert sum(Decimal(log["quantity"]) for log in work_logs if log["worker_id"] == akbar["id"]) == Decimal("1.00")
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+
+
+def test_daily_worker_work_log_with_missing_rate_has_no_labor_cost(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "اکبر", "DAILY_WORKER")
+
+    interpretation = create_interpretation(client, project["id"], "اکبر امروز کار کرد")
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    work_log = client.get(f"/projects/{project['id']}/work-logs").json()[0]
+    assert work_log["quantity"] == "1.00"
+    assert work_log["rate_per_unit"] is None
+    assert work_log["total_amount"] is None
+
+
+def test_discard_daily_worker_work_log_creates_no_work_log(client: TestClient) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "اکبر", "DAILY_WORKER")
+
+    interpretation = create_interpretation(client, project["id"], "اکبر امروز کار کرد")
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/discard")
+
+    assert response.status_code == 200
+    assert client.get(f"/projects/{project['id']}/work-logs").json() == []
+
+
+def test_worker_payment_is_separate_from_daily_work_log(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "مش رحیم", "DAILY_WORKER", daily_rate="1200000")
+
+    work = create_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
+    assert client.post(
+        f"/pending-interpretations/{work['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    ).status_code == 200
+    after_work = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    payment = create_interpretation(client, project["id"], "به مش رحیم ۲ میلیون تومان پرداخت شد")
+    assert client.post(
+        f"/pending-interpretations/{payment['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    ).status_code == 200
+    after_payment = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert Decimal(after_work["total_paid_out"]) == Decimal("0")
+    assert after_work["total_work_amount"] == "1200000.00"
+    assert after_payment["total_paid_out"] == "2000000.00"
+    assert after_payment["total_work_amount"] == "1200000.00"
+    assert len(client.get(f"/projects/{project['id']}/work-logs").json()) == 1
+    assert len(client.get(f"/projects/{project['id']}/payments").json()) == 1
+
+
+def test_daily_worker_work_log_exact_match_does_not_duplicate_worker(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "جواد", "DAILY_WORKER", daily_rate="900000")
+
+    interpretation = create_interpretation(client, project["id"], "جواد دیروز کار کرد")
+    assert interpretation["suggested_entity_id"] == worker["id"]
+    assert client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    ).status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert [item["name"] for item in workers] == ["جواد"]

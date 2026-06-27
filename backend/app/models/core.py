@@ -224,6 +224,8 @@ class WorkLog(TimestampMixin, Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     rate_per_unit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     total_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    period_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_pending_interpretation_id: Mapped[int | None] = mapped_column(ForeignKey("pendinginterpretation.id"), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="work_logs")

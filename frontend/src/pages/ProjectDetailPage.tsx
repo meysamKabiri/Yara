@@ -12,6 +12,7 @@ import {
   Coins,
   CreditCard,
   FileText,
+  Hammer,
   Landmark,
   Mic,
   Paperclip,
@@ -51,7 +52,7 @@ const PAYMENT_TYPE_LABELS: Record<string, string> = {
 
 const UNKNOWN_LABEL = "نامشخص";
 
-type TabKey = "summary" | "people" | "financial" | "payables" | "notes" | "pending";
+type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "pending";
 
 type ProjectDetailPageProps = {
   project: ProjectDetail | null;
@@ -81,6 +82,10 @@ function money(value: string | number | null | undefined): string {
   return `${Number(value ?? 0).toLocaleString("fa-IR")} تومان`;
 }
 
+function days(value: string | number | null | undefined): string {
+  return `${Number(value ?? 0).toLocaleString("fa-IR")} روز`;
+}
+
 function date(value: string): string {
   return new Date(value).toLocaleString("fa-IR");
 }
@@ -96,8 +101,16 @@ function personKind(worker: Worker): PersonKind {
   return "OTHER";
 }
 
-function PersonCard({ worker }: { worker: Worker }) {
+type LaborStats = {
+  totalDays: number;
+  totalCost: number;
+  paidOut: number;
+  balance: number;
+};
+
+function PersonCard({ worker, laborStats }: { worker: Worker; laborStats?: LaborStats }) {
   const roleLabel = ROLE_LABELS[personKind(worker)] ?? ROLE_LABELS.OTHER;
+  const showLabor = worker.type === "DAILY_WORKER" && laborStats && (laborStats.totalDays > 0 || laborStats.totalCost > 0 || laborStats.paidOut > 0);
   return (
     <article className="visibility-person-card">
       <div className="vpc-head">
@@ -112,6 +125,10 @@ function PersonCard({ worker }: { worker: Worker }) {
         {worker.phone && <span><Phone size={12} />{worker.phone}</span>}
         {worker.account_number && <span><CreditCard size={12} />{worker.account_number}</span>}
         {worker.daily_rate && Number(worker.daily_rate) > 0 && <span><Clock size={12} />دستمزد روزانه: {money(worker.daily_rate)}</span>}
+        {showLabor && <span><Hammer size={12} />کارکرد ثبت‌شده: {days(laborStats.totalDays)}</span>}
+        {showLabor && <span>مبلغ کارکرد: {money(laborStats.totalCost)}</span>}
+        {showLabor && <span>پرداخت‌شده: {money(laborStats.paidOut)}</span>}
+        {showLabor && <span>مانده تقریبی: {money(laborStats.balance)}</span>}
       </div>
     </article>
   );
@@ -158,12 +175,32 @@ function InvoiceRow({ invoice, workerMap }: { invoice: Invoice; workerMap: Recor
   );
 }
 
+function WorkLogRow({ workLog, workerMap }: { workLog: WorkLog; workerMap: Record<number, Worker> }) {
+  const worker = workerMap[workLog.worker_id];
+  return (
+    <div className="visibility-trx-row labor-row">
+      <div className="trx-main">
+        <span className="trx-person">{worker?.name ?? `کارگر ${workLog.worker_id}`}</span>
+        <span className="trx-amount">{workLog.total_amount ? money(workLog.total_amount) : "نرخ روزانه ثبت نشده"}</span>
+      </div>
+      <div className="trx-meta">
+        <span>{workLog.period_label || "بازه ثبت نشده"}</span>
+        <span>{days(workLog.quantity)}</span>
+        <span>{workLog.rate_per_unit ? `نرخ: ${money(workLog.rate_per_unit)}` : "نرخ روزانه ثبت نشده"}</span>
+        <span>{shortDate(workLog.created_at)}</span>
+        {workLog.description && <span>{workLog.description}</span>}
+      </div>
+    </div>
+  );
+}
+
 function EmptyState({ children }: { children: string }) {
   return <p className="empty-state">{children}</p>;
 }
 
 function pendingTitle(pi: PendingInterpretation): string {
   if (pi.semantic_action === "SET_ROLE") return "تعریف طرف حساب";
+  if (pi.semantic_action === "WORK_LOG" || pi.canonical_event_type === "WORK_EVENT") return "ثبت کارکرد کارگر";
   if (pi.semantic_action === "ENTITY_UPDATE" || pi.domain_route?.domain === "ENTITY_UPDATE") return "به‌روزرسانی اطلاعات فرد";
   if (pi.canonical_event_type === "FINANCIAL_EVENT") return "ثبت مالی";
   if (pi.semantic_action === "NOTE") return "یادداشت";
@@ -184,10 +221,16 @@ function pendingFieldUpdates(pi: PendingInterpretation): string[] {
   const phone = updates.phone ?? entity.phone;
   const account = updates.account_number ?? entity.account_number;
   const dailyRate = updates.daily_rate ?? entity.daily_rate;
+  const si = pi.structured_interpretation as Record<string, unknown> | null;
+  const work = typeof si?.work === "object" && si.work !== null ? si.work as Record<string, unknown> : {};
+  const quantity = pi.extracted_quantity ?? work.quantity;
+  const period = work.period_label;
   const notes = updates.notes ?? entity.notes;
   if (phone) parts.push(`شماره تماس: ${String(phone)}`);
   if (account) parts.push(`شماره حساب: ${String(account)}`);
   if (dailyRate) parts.push(`دستمزد روزانه: ${money(String(dailyRate))}`);
+  if (quantity) parts.push(`تعداد روز: ${days(String(quantity))}`);
+  if (period) parts.push(`بازه: ${String(period)}`);
   if (notes) parts.push(`توضیحات: ${String(notes)}`);
   return parts;
 }
@@ -213,7 +256,7 @@ function TabBar({ tabs, activeTab, onTabChange }: { tabs: { key: TabKey; label: 
 }
 
 export function ProjectDetailPage({
-  project, summary, workers, pendingInterpretations, payments, invoices, history,
+  project, summary, workers, pendingInterpretations, workLogs, payments, invoices, history,
   rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
   onVoicePlaceholder, onAttachPlaceholder, successMessage,
   onConfirmPending, onEditPending, onDiscardPending,
@@ -225,6 +268,8 @@ export function ProjectDetailPage({
   const payables = Number(summary?.open_payables ?? 0);
   const deferredAmount = summary ? Number(summary.deferred_amount ?? 0) : payments.filter((p) => p.direction === "DEFERRED").reduce((t, p) => t + Number(p.amount || 0), 0);
   const checkAmount = summary ? Number(summary.check_amount ?? 0) : payments.filter((p) => p.type === "CHECK").reduce((t, p) => t + Number(p.amount || 0), 0);
+  const totalLaborCost = summary ? Number(summary.total_work_amount ?? 0) : workLogs.reduce((t, log) => t + Number(log.total_amount || 0), 0);
+  const workerPayables = summary?.worker_payables ?? [];
   const netBalance = Number(summary?.project_balance ?? received - paidOut - payables);
   const notes = history.filter((entry) => entry.change_type === "NOTE");
   const pending = pendingInterpretations.filter((pi) => pi.status === "PENDING" || pi.status === "EDITED");
@@ -249,6 +294,35 @@ export function ProjectDetailPage({
     return [...payments].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   }, [payments]);
 
+  const laborStatsByWorker = useMemo(() => {
+    const stats: Record<number, LaborStats> = {};
+    for (const log of workLogs) {
+      const current = stats[log.worker_id] ?? { totalDays: 0, totalCost: 0, paidOut: 0, balance: 0 };
+      current.totalDays += Number(log.quantity || 0);
+      current.totalCost += Number(log.total_amount || 0);
+      stats[log.worker_id] = current;
+    }
+    for (const payment of payments) {
+      const worker = workerMap[payment.entity_id];
+      if (!worker || worker.type !== "DAILY_WORKER") continue;
+      const current = stats[payment.entity_id] ?? { totalDays: 0, totalCost: 0, paidOut: 0, balance: 0 };
+      if (payment.direction === "OUTGOING" || payment.direction === "DEFERRED") {
+        current.paidOut += Number(payment.amount || 0);
+      }
+      stats[payment.entity_id] = current;
+    }
+    for (const item of Object.values(stats)) item.balance = item.totalCost - item.paidOut;
+    return stats;
+  }, [payments, workLogs, workerMap]);
+
+  const totalLaborDays = useMemo(() => {
+    return workLogs.reduce((total, log) => total + Number(log.unit === "day" ? log.quantity || 0 : 0), 0);
+  }, [workLogs]);
+
+  const dailyWorkerPaidOut = useMemo(() => {
+    return Object.values(laborStatsByWorker).reduce((total, stats) => total + stats.paidOut, 0);
+  }, [laborStatsByWorker]);
+
   const openInvoices = useMemo(() => {
     return invoices.filter((inv) => inv.status === "OPEN" || inv.status === "PARTIAL");
   }, [invoices]);
@@ -260,6 +334,7 @@ export function ProjectDetailPage({
   const tabs = [
     { key: "summary" as TabKey, label: "خلاصه" },
     { key: "people" as TabKey, label: "افراد", count: workers.length },
+    { key: "labor" as TabKey, label: "کارکرد کارگران", count: workLogs.length },
     { key: "financial" as TabKey, label: "مالی", count: confirmedPayments.length },
     { key: "payables" as TabKey, label: "بدهی‌ها / چک‌ها", count: openInvoices.length + deferredPayments.length },
     { key: "notes" as TabKey, label: "یادداشت‌ها", count: notes.length },
@@ -321,10 +396,16 @@ export function ProjectDetailPage({
               <small>شامل پرداخت نقدی، بانکی و مدت‌دار</small>
             </article>
             <article className="metric-card pending">
+              <Hammer aria-hidden="true" />
+              <span>کارکرد ثبت‌شده کارگران</span>
+              <strong>{money(totalLaborCost)}</strong>
+              <small>هزینه کارکرد؛ پرداخت نقدی نیست</small>
+            </article>
+            <article className="metric-card pending">
               <ReceiptText aria-hidden="true" />
               <span>بدهی باز</span>
               <strong>{money(payables)}</strong>
-              <small>پرداخت‌های انجام‌نشده</small>
+              <small>{workerPayables.length > 0 ? "بدهی فروشندگان + کارکرد پرداخت‌نشده" : "پرداخت‌های انجام‌نشده"}</small>
             </article>
             <article className="metric-card pending">
               <Banknote aria-hidden="true" />
@@ -345,7 +426,7 @@ export function ProjectDetailPage({
               <small>{pending.length > 0 ? "هنوز در totals حساب نشده‌اند" : "همه موارد بررسی شده‌اند"}</small>
             </article>
           </section>
-          <p className="summary-helper">مانده پروژه = دریافتی از کارفرما - پرداخت‌شده - بدهی باز. پرداخت‌شده شامل چک‌ها و پرداخت‌های مدت‌دار تاییدشده هم هست.</p>
+          <p className="summary-helper">مانده پروژه = دریافتی از کارفرما - پرداخت‌شده - بدهی باز. پرداخت‌شده فقط پول واقعی تاییدشده است؛ کارکرد کارگران جداگانه نمایش داده می‌شود.</p>
         </div>
       )}
 
@@ -366,11 +447,49 @@ export function ProjectDetailPage({
                       <mark>{roleWorkers.length.toLocaleString("fa-IR")}</mark>
                     </h4>
                     <div className="visibility-people-list">
-                      {roleWorkers.map((worker) => <PersonCard key={worker.id} worker={worker} />)}
+                      {roleWorkers.map((worker) => <PersonCard key={worker.id} worker={worker} laborStats={laborStatsByWorker[worker.id]} />)}
                     </div>
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "labor" && (
+        <div className="detail-tab-content">
+          <section className="summary-grid four-up">
+            <article className="metric-card pending">
+              <Clock aria-hidden="true" />
+              <span>مجموع روزهای کارکرد</span>
+              <strong>{days(totalLaborDays)}</strong>
+              <small>بر اساس ثبت‌های تاییدشده</small>
+            </article>
+            <article className="metric-card pending">
+              <Hammer aria-hidden="true" />
+              <span>مجموع مبلغ کارکرد</span>
+              <strong>{money(totalLaborCost)}</strong>
+              <small>هزینه کارکرد؛ پرداخت نشده محسوب می‌شود</small>
+            </article>
+            <article className="metric-card negative">
+              <ArrowUpCircle aria-hidden="true" />
+              <span>پرداخت‌شده به کارگران</span>
+              <strong>{money(dailyWorkerPaidOut)}</strong>
+              <small>پرداخت واقعی ثبت‌شده</small>
+            </article>
+            <article className={totalLaborCost - dailyWorkerPaidOut > 0 ? "metric-card pending" : "metric-card"}>
+              <Scale aria-hidden="true" />
+              <span>مانده تقریبی کارگران</span>
+              <strong>{money(totalLaborCost - dailyWorkerPaidOut)}</strong>
+              <small>کارکرد منهای پرداخت به کارگران روزمزد</small>
+            </article>
+          </section>
+          {workLogs.length === 0 ? (
+            <EmptyState>کارکردی ثبت نشده است</EmptyState>
+          ) : (
+            <div className="visibility-trx-list labor-log-list">
+              {workLogs.map((workLog) => <WorkLogRow key={workLog.id} workLog={workLog} workerMap={workerMap} />)}
             </div>
           )}
         </div>

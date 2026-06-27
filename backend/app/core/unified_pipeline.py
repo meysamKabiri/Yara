@@ -115,6 +115,34 @@ def process_input(
         if interpretations:
             return interpretations
 
+    fast_work_log = None if len(chunks) > 1 else _build_daily_work_log_interpretation(project_id, text, entity_context)
+    if fast_work_log is not None:
+        _emit_fast_path_started(db, fast_work_log)
+        db.add(fast_work_log)
+        db.commit()
+        db.refresh(fast_work_log)
+        cache.set_legacy_result(_shadow_legacy_payload([fast_work_log]))
+        cache.set_timing("llm_v2_duration_ms", 0.0)
+        cache.set_timing("legacy_duration_ms", 0.0)
+        cache.set_timing("governance_duration_ms", 0.0)
+        _emit_fast_path_matched(db, fast_work_log)
+        _emit_event(db, "PENDING_INTERPRETATION_SAVED", {
+            "interpretation_count": 1,
+            "path": "fast_daily_work_log",
+            "fast_path_type": _fast_path_type(fast_work_log),
+            "skipped_llm": True,
+        })
+        record_pipeline_performance(
+            project_id=project_id,
+            input_text=text,
+            total_duration_ms=_elapsed_ms(total_start),
+            legacy_duration_ms=0.0,
+            shadow_duration_ms=0.0,
+            governance_duration_ms=0.0,
+            fallback_required=False,
+        )
+        return [fast_work_log]
+
     fast_safe_note = None if len(chunks) > 1 else _build_safe_note_interpretation(project_id, text)
     if fast_safe_note is not None:
         db.add(fast_safe_note)
@@ -432,6 +460,15 @@ def _process_split_fallback_chunks(
     llm_duration_ms = cache.timings_ms.get("llm_v2_duration_ms", 0.0)
 
     for chunk_index, chunk in enumerate(chunks):
+        fast_work_log = _build_daily_work_log_interpretation(project_id, chunk, entity_context)
+        if fast_work_log is not None:
+            _emit_fast_path_started(db, fast_work_log)
+            _retarget_interpretation_to_raw_text(fast_work_log, raw_text, chunk)
+            interpretations.append(fast_work_log)
+            _emit_fast_path_matched(db, fast_work_log)
+            _emit_chunk_processed(db, chunk_index, chunk, "FAST_PATH")
+            continue
+
         safe_note = _build_safe_note_interpretation(project_id, chunk)
         if safe_note is not None:
             _retarget_interpretation_to_raw_text(safe_note, raw_text, chunk)
@@ -1331,6 +1368,188 @@ def _build_safe_note_interpretation(
     )
 
 
+_PERSIAN_INT_WORDS = {
+    "یک": Decimal("1"),
+    "یه": Decimal("1"),
+    "دو": Decimal("2"),
+    "سه": Decimal("3"),
+    "چهار": Decimal("4"),
+    "پنج": Decimal("5"),
+    "شش": Decimal("6"),
+    "هفت": Decimal("7"),
+    "هشت": Decimal("8"),
+    "نه": Decimal("9"),
+    "ده": Decimal("10"),
+    "یازده": Decimal("11"),
+    "دوازده": Decimal("12"),
+    "سیزده": Decimal("13"),
+    "چهارده": Decimal("14"),
+    "پانزده": Decimal("15"),
+    "شانزده": Decimal("16"),
+    "هفده": Decimal("17"),
+    "هجده": Decimal("18"),
+    "نوزده": Decimal("19"),
+    "بیست": Decimal("20"),
+}
+
+_WORK_PERIOD_PATTERNS = [
+    "ماه اردیبهشت",
+    "هفته گذشته",
+    "هفته قبل",
+    "دیروز",
+    "امروز",
+]
+
+
+def _build_daily_work_log_interpretation(
+    project_id: int,
+    raw_text: str,
+    entity_context: list[Worker],
+) -> PendingInterpretation | None:
+    normalized = normalize_text(raw_text).replace("\u200c", " ")
+    if _text_has_financial_signal(raw_text):
+        return None
+    if "کار کرد" not in normalized and "کار کرده" not in normalized:
+        return None
+
+    quantity = _daily_work_quantity(normalized)
+    if quantity is None or quantity <= 0:
+        return None
+    name = _daily_work_name(normalized)
+    if name is None:
+        return None
+    period_label = _daily_work_period_label(normalized)
+    matched_worker = _unique_normalized_entity_match(name, entity_context)
+    display_name = matched_worker.name if matched_worker is not None else name
+    entity: dict[str, Any] = {
+        "name": display_name,
+        "kind": "PERSON",
+        "project_role": "DAILY_WORKER",
+        "role_detail": None,
+        "type": "DAILY_WORKER",
+        "phone": None,
+        "account_number": None,
+        "daily_rate": str(matched_worker.daily_rate) if matched_worker and matched_worker.daily_rate is not None else None,
+        "notes": None,
+        "field_updates": None,
+    }
+    if matched_worker is None:
+        entity["requires_confirmation"] = True
+        entity["create_new"] = True
+        resolution = resolve_candidates(name, entity_context)
+        if resolution["candidates"]:
+            entity["candidate_matches"] = resolution["candidates"]
+
+    structured = {
+        "intent": "WORK",
+        "action": "WORK_LOG",
+        "entities": [entity],
+        "financial": {
+            "amount": None,
+            "direction": "NONE",
+            "payment_method": None,
+            "due_date_text": None,
+        },
+        "work": {
+            "quantity": float(quantity),
+            "unit": "day",
+            "description": raw_text,
+            "period_label": period_label,
+        },
+        "note": {"text": None},
+        "confidence": 0.94,
+        "ambiguity": matched_worker is None,
+        "missing_fields": [] if matched_worker is not None else ["entity"],
+        "reasoning_summary": "deterministic daily worker attendance fast path",
+    }
+    semantic_explanation = {
+        "triggered_rule": "WORK_RULE_01",
+        "event_type": "WORK_EVENT",
+        "matched_signals": ["کار کرد" if "کار کرد" in normalized else "کار کرده"],
+        "decision_path": [
+            "deterministic daily worker attendance fast path",
+            "event classified as WORK_EVENT",
+        ],
+    }
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text=raw_text,
+        canonical_event_type="WORK_EVENT",
+        semantic_action="WORK_LOG",
+        suggested_entity_id=matched_worker.id if matched_worker is not None else None,
+        matched_input_text=name if matched_worker is not None and name != matched_worker.name else None,
+        extracted_entities=[entity],
+        extracted_amount=None,
+        extracted_quantity=quantity,
+        payment_method=None,
+        financial_direction=None,
+        due_date=None,
+        description=raw_text if period_label is None else f"{period_label} - {raw_text}",
+        semantic_explanation=semantic_explanation,
+        confidence=0.94,
+        structured_interpretation=structured,
+        status=PendingInterpretationStatus.PENDING,
+    )
+
+
+def _daily_work_period_label(normalized: str) -> str | None:
+    for pattern in _WORK_PERIOD_PATTERNS:
+        if pattern in normalized:
+            return pattern
+    return None
+
+
+def _daily_work_name(normalized: str) -> str | None:
+    text = re.split(r"\s+(?:امروز|دیروز|هفته قبل|هفته گذشته|ماه اردیبهشت|در هفته قبل|در هفته گذشته)\b", normalized, maxsplit=1)[0]
+    text = re.split(r"\s+(?:[۰-۹٠-٩\d]+|[آ-ی]+)\s+روز\b", text, maxsplit=1)[0]
+    text = text.replace("در ", " ")
+    name = re.sub(r"\s+", " ", text).strip(" ،,")
+    return name or None
+
+
+def _daily_work_quantity(normalized: str) -> Decimal | None:
+    explicit = _explicit_day_count(normalized)
+    if explicit is not None:
+        return explicit
+    weekday_count = _weekday_day_count(normalized)
+    if weekday_count is not None:
+        return weekday_count
+    if "امروز" in normalized or "دیروز" in normalized:
+        return Decimal("1")
+    return None
+
+
+def _explicit_day_count(normalized: str) -> Decimal | None:
+    match = re.search(r"(?P<count>[۰-۹٠-٩\d]+|[آ-ی]+)\s+روز(?:\s+و\s+(?P<half>نصفی|نیم))?", normalized)
+    if match is None:
+        return None
+    count = _parse_persian_int(match.group("count"))
+    if count is None:
+        return None
+    if match.group("half"):
+        count += Decimal("0.5")
+    return count
+
+
+def _weekday_day_count(normalized: str) -> Decimal | None:
+    matches = list(re.finditer(r"(یک\s*شنبه|دو\s*شنبه|سه\s*شنبه|چهار\s*شنبه|پنج\s*شنبه|شنبه|جمعه)", normalized))
+    if not matches:
+        return None
+    total = Decimal("0")
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+        segment = normalized[match.end():end]
+        total += Decimal("0.5") if any(term in segment for term in ["نصفه روز", "نیم روز", "نصفی"]) else Decimal("1")
+    return total
+
+
+def _parse_persian_int(value: str) -> Decimal | None:
+    normalized = value.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")).strip()
+    if normalized.isdigit():
+        return Decimal(normalized)
+    return _PERSIAN_INT_WORDS.get(normalized)
+
+
 _PERSIAN_AMOUNT_MARKER = (
     r"(?:\d|[۰-۹]|[٠-٩]|یک|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|"
     r"یازده|دوازده|سیزده|چهارده|پانزده|شانزده|هفده|هجده|نوزده|"
@@ -2165,7 +2384,8 @@ def _split_multi_event_text(text: str) -> list[str]:
         has_financial_verb = any(v in chunk for v in financial_verbs)
         has_profile = any(p in chunk for p in profile_terms)
         has_setup = any(s in chunk for s in setup_terms)
-        return (has_money and has_financial_verb) or has_profile or has_setup
+        has_daily_work = ("کار کرد" in chunk or "کار کرده" in chunk) and not has_money
+        return (has_money and has_financial_verb) or has_profile or has_setup or has_daily_work
 
     signalled = [c for c in candidate_chunks if _has_signal(c)]
     if len(signalled) < 2:

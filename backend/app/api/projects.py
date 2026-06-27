@@ -1519,6 +1519,7 @@ def _apply_confirmation_edit_payload(
         interpretation.due_date = payload.due_date.strip() or None
         _set_structured_financial_value(interpretation, "due_date_text", interpretation.due_date)
     if isinstance(payload.field_updates, dict) and payload.field_updates:
+        _apply_work_updates_to_pending_interpretation(interpretation, payload.field_updates)
         _apply_field_updates_to_pending_entity(interpretation, payload.field_updates)
 
 
@@ -1548,6 +1549,53 @@ def _structured_direction_value(direction: FinancialDirection) -> str:
     }:
         return "OUT"
     return "NONE"
+
+
+def _apply_work_updates_to_pending_interpretation(
+    interpretation: PendingInterpretation,
+    updates: dict[str, Any],
+) -> None:
+    if interpretation.canonical_event_type != CanonicalEventType.WORK.value:
+        return
+    if "quantity_days" in updates:
+        interpretation.extracted_quantity = Decimal(str(updates["quantity_days"]))
+        _set_structured_work_value(interpretation, "quantity", float(interpretation.extracted_quantity))
+    if "period_label" in updates:
+        _set_structured_work_value(interpretation, "period_label", updates["period_label"])
+    if "description" in updates and isinstance(updates["description"], str):
+        interpretation.description = updates["description"].strip() or interpretation.description
+        _set_structured_work_value(interpretation, "description", interpretation.description)
+
+
+def _set_structured_work_value(
+    interpretation: PendingInterpretation,
+    key: str,
+    value: Any,
+) -> None:
+    structured = interpretation.structured_interpretation
+    if not isinstance(structured, dict):
+        return
+    work = structured.get("work")
+    if not isinstance(work, dict):
+        work = {}
+    work[key] = value
+    structured["work"] = work
+    interpretation.structured_interpretation = structured
+
+
+def _work_period_label(interpretation: PendingInterpretation) -> str | None:
+    structured = interpretation.structured_interpretation
+    if isinstance(structured, dict):
+        work = structured.get("work")
+        if isinstance(work, dict):
+            period = work.get("period_label")
+            if isinstance(period, str) and period.strip():
+                return period.strip()
+    description = interpretation.description or interpretation.raw_input_text
+    for label in ("ماه اردیبهشت", "هفته گذشته", "هفته قبل", "دیروز", "امروز"):
+        if label in description:
+            return label
+    return None
 
 
 def _apply_field_updates_to_pending_entity(
@@ -2104,10 +2152,12 @@ def _allows_create_new_confirmation(interpretation: PendingInterpretation) -> bo
     if interpretation.canonical_event_type not in {
         CanonicalEventType.SETUP.value,
         CanonicalEventType.FINANCIAL.value,
+        CanonicalEventType.WORK.value,
         "SETUP_EVENT",
+        "WORK_EVENT",
     }:
         return False
-    if interpretation.semantic_action in {"SETUP", "SET_ROLE", "ADD_ENTITY", "ENTITY_UPDATE"}:
+    if interpretation.semantic_action in {"SETUP", "SET_ROLE", "ADD_ENTITY", "ENTITY_UPDATE", "WORK_LOG"}:
         return True
     structured = interpretation.structured_interpretation
     return bool(
@@ -2623,7 +2673,9 @@ def _execute_llm_v2_interpretation(
                 else None
             ),
             total_amount=_daily_worker_wage(db.get(Worker, state.worker_id), quantity),
-            description=si.work.description,
+            period_label=_work_period_label(interpretation),
+            source_pending_interpretation_id=interpretation.id,
+            description=si.work.description or interpretation.description,
         )
         db.add(work_log)
         db.flush()
@@ -3105,6 +3157,8 @@ def _execute_legacy_interpretation(
                 else None
             ),
             total_amount=_daily_worker_wage(db.get(Worker, state.worker_id), quantity),
+            period_label=_work_period_label(interpretation),
+            source_pending_interpretation_id=interpretation.id,
             description=interpretation.description,
         )
         db.add(work_log)

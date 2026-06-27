@@ -18,9 +18,10 @@ type ConfirmPayload = {
   name?: string | null;
   role?: string | null;
   role_detail?: string | null;
+  field_updates?: Record<string, unknown> | null;
 };
 
-type ModalKind = "MIXED" | "FINANCIAL" | "PROFILE" | "ROLE_OR_SETUP" | "NOTE" | "UNKNOWN";
+type ModalKind = "MIXED" | "FINANCIAL" | "PROFILE" | "WORK" | "ROLE_OR_SETUP" | "NOTE" | "UNKNOWN";
 
 interface DomainUIControllerProps {
   interpretations: PendingInterpretation[];
@@ -170,6 +171,7 @@ function hasActualFinancialData(interpretation: PendingInterpretation): boolean 
 
 function getModalKind(interpretation: PendingInterpretation): ModalKind {
   if (interpretation.domain_route?.domain === "MIXED") return "MIXED";
+  if (interpretation.semantic_action === "WORK_LOG" || interpretation.canonical_event_type === "WORK_EVENT") return "WORK";
   if (interpretation.semantic_action === "NOTE") return "NOTE";
   if (hasActualFinancialData(interpretation)) return "FINANCIAL";
   if (hasProfileUpdateFields(interpretation)) return "PROFILE";
@@ -247,6 +249,137 @@ function moneyLabel(value: string | null): string | null {
   return `${new Intl.NumberFormat("fa-IR").format(numeric)} تومان`;
 }
 
+function workInfo(interpretation: PendingInterpretation): { quantity: string; periodLabel: string; description: string } {
+  const structured = interpretation.structured_interpretation as Record<string, unknown> | null;
+  const work = typeof structured?.work === "object" && structured.work !== null
+    ? structured.work as Record<string, unknown>
+    : {};
+  return {
+    quantity: textValue(interpretation.extracted_quantity ?? work.quantity) ?? "1",
+    periodLabel: textValue(work.period_label) ?? "",
+    description: textValue(work.description) ?? interpretation.description ?? interpretation.matched_input_text ?? interpretation.raw_input_text,
+  };
+}
+
+function workWorkerId(interpretation: PendingInterpretation, workers: Worker[]): number | null {
+  if (interpretation.suggested_entity_id) return interpretation.suggested_entity_id;
+  const name = entityName(interpretation);
+  if (!name || isUnknownEntity(interpretation)) return null;
+  return exactEntityIdByName(name, workers);
+}
+
+function WorkLogModal({
+  interpretation,
+  workers,
+  isLoading,
+  onConfirm,
+  onDiscard,
+  onLater,
+}: {
+  interpretation: PendingInterpretation;
+  workers: Worker[];
+  isLoading: boolean;
+  onConfirm: (payload: ConfirmPayload) => void;
+  onDiscard: () => void;
+  onLater?: () => void;
+}) {
+  const initial = workInfo(interpretation);
+  const initialWorkerId = workWorkerId(interpretation, workers);
+  const [workerChoice, setWorkerChoice] = useState(initialWorkerId ? String(initialWorkerId) : "");
+  const [newWorkerName, setNewWorkerName] = useState(entityName(interpretation) === "نامشخص" ? "" : entityName(interpretation));
+  const [quantity, setQuantity] = useState(initial.quantity);
+  const [periodLabel, setPeriodLabel] = useState(initial.periodLabel);
+  const [description, setDescription] = useState(initial.description);
+  const selectedWorker = workers.find((worker) => String(worker.id) === workerChoice);
+  const isCreateNew = workerChoice === "create-new";
+  const dailyRate = selectedWorker?.daily_rate ?? null;
+  const amount = dailyRate && Number.isFinite(Number(quantity))
+    ? String(Number(dailyRate) * Number(quantity))
+    : null;
+  const canConfirm = isCreateNew ? newWorkerName.trim().length > 0 : Boolean(selectedWorker);
+
+  function submit() {
+    const field_updates = {
+      quantity_days: quantity.trim(),
+      period_label: periodLabel.trim() || null,
+      description: description.trim() || null,
+    };
+    if (isCreateNew) {
+      onConfirm({
+        confirmed: true,
+        create_new: true,
+        name: newWorkerName.trim(),
+        role: "DAILY_WORKER",
+        field_updates,
+      });
+      return;
+    }
+    onConfirm({
+      entity_id: selectedWorker?.id ?? null,
+      confirmed: true,
+      field_updates,
+    });
+  }
+
+  return (
+    <article className="interpretation-card">
+      <h3>ثبت کارکرد کارگر</h3>
+      <p className="muted">{interpretation.matched_input_text || interpretation.raw_input_text}</p>
+      <div className="edit-grid">
+        <label>
+          فرد / کارگر
+          <select value={workerChoice} onChange={(event) => setWorkerChoice(event.target.value)}>
+            <option value="">انتخاب کنید...</option>
+            {workers.filter((worker) => worker.type === "DAILY_WORKER").map((worker) => (
+              <option key={worker.id} value={worker.id}>
+                {workerOptionLabel(worker)}
+              </option>
+            ))}
+            <option value="create-new">ایجاد کارگر جدید</option>
+          </select>
+        </label>
+        {isCreateNew && (
+          <label>
+            نام کارگر
+            <input value={newWorkerName} onChange={(event) => setNewWorkerName(event.target.value)} />
+          </label>
+        )}
+        <label>
+          تعداد روز
+          <input inputMode="decimal" value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+        </label>
+        <label>
+          نرخ روزانه
+          <input value={dailyRate ? moneyLabel(dailyRate) ?? dailyRate : "نرخ روزانه ثبت نشده"} readOnly />
+        </label>
+        <label>
+          مبلغ کارکرد
+          <input value={amount ? moneyLabel(amount) ?? amount : "نرخ روزانه ثبت نشده"} readOnly />
+        </label>
+        <label>
+          بازه / توضیح زمان
+          <input value={periodLabel} onChange={(event) => setPeriodLabel(event.target.value)} />
+        </label>
+        <label className="wide-field">
+          توضیحات
+          <textarea value={description} onChange={(event) => setDescription(event.target.value)} />
+        </label>
+      </div>
+      <div className="modal-actions">
+        <button className="primary-action" type="button" onClick={submit} disabled={isLoading || !canConfirm || !quantity.trim()}>
+          تایید
+        </button>
+        <button type="button" onClick={onLater ?? onDiscard} disabled={isLoading}>
+          بعدا بررسی می‌کنم
+        </button>
+        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+          نادیده گرفتن
+        </button>
+      </div>
+    </article>
+  );
+}
+
 
 
 function profileFieldKind(interpretation: PendingInterpretation): "phone" | "account" | null {
@@ -262,6 +395,7 @@ function profileFieldKind(interpretation: PendingInterpretation): "phone" | "acc
 }
 
 function interpretationLabel(interpretation: PendingInterpretation): string {
+  if (interpretation.semantic_action === "WORK_LOG" || interpretation.canonical_event_type === "WORK_EVENT") return "ثبت کارکرد کارگر";
   const profileKind = profileFieldKind(interpretation);
   if (profileKind === "phone") return "ثبت شماره تماس";
   if (profileKind === "account") return "ثبت شماره حساب";
@@ -486,6 +620,20 @@ export function DomainUIController({
       });
       return;
     }
+    if (kind === "WORK") {
+      const entityId = workWorkerId(interpretation, safeWorkers);
+      const work = workInfo(interpretation);
+      onConfirm(interpretation, {
+        entity_id: entityId,
+        confirmed: true,
+        field_updates: {
+          quantity_days: work.quantity,
+          period_label: work.periodLabel || null,
+          description: work.description || null,
+        },
+      });
+      return;
+    }
     if (kind === "ROLE_OR_SETUP") {
       onConfirmSetupEntities(interpretation, setupEntities(interpretation));
       return;
@@ -606,6 +754,21 @@ export function DomainUIController({
                   isLoading={isLoading}
                   onConfirm={(data) => onConfirmEntityUpdate(interpretation, data)}
                   onDiscard={() => onDiscard(interpretation)}
+                />
+              );
+            }
+
+            // WORK
+            if (kind === "WORK") {
+              return (
+                <WorkLogModal
+                  key={interpretation.id}
+                  interpretation={interpretation}
+                  workers={safeWorkers}
+                  isLoading={isLoading}
+                  onConfirm={(payload) => onConfirm(interpretation, payload)}
+                  onDiscard={() => onDiscard(interpretation)}
+                  onLater={onClose}
                 />
               );
             }

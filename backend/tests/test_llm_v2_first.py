@@ -126,10 +126,13 @@ def test_llm_v2_work_records_daily_labor(client: TestClient, monkeypatch: pytest
     project = client.post("/projects", json={"name": "test2"}).json()
     pi = natural_input_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
     assert pi["canonical_event_type"] == "WORK_EVENT"
-    assert pi["semantic_action"] == "INCREMENT"
+    assert pi["semantic_action"] == "WORK_LOG"
     assert pi["structured_interpretation"]["intent"] == "WORK"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"create_new": True, "name": "مش رحیم", "role": "DAILY_WORKER", "confirmed": True},
+    ).json()
     assert len(confirm["work_logs"]) == 1
     states = client.get(f"/projects/{project['id']}/worker-states").json()
     assert any(s["name"] == "مش رحیم" and s["total_days_worked"] == "1.00" for s in states)
@@ -640,10 +643,14 @@ def test_work_like_setup_misclassification_does_not_create_corrupted_person(
 
     pi = natural_input_interpretation(client, project["id"], "مش رحیم امروز کار کرد.")
 
-    assert pi["canonical_event_type"] == "NOTE_EVENT"
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert pi["canonical_event_type"] == "WORK_EVENT"
+    assert pi["semantic_action"] == "WORK_LOG"
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"entity_id": existing["id"], "confirmed": True},
+    )
     assert confirm.status_code == 200
-    assert confirm.json()["workers"] == []
+    assert confirm.json()["work_logs"]
     workers = client.get(f"/projects/{project['id']}/workers").json()
     assert workers == [existing]
     assert all(worker["name"] != "مش رح:م" for worker in workers)

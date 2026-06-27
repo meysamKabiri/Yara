@@ -156,6 +156,8 @@ export type WorkLog = {
   quantity: string;
   rate_per_unit: string | null;
   total_amount: string | null;
+  period_label: string | null;
+  source_pending_interpretation_id: number | null;
   description: string | null;
   created_at: string;
   updated_at: string;
@@ -247,7 +249,7 @@ export type PendingInterpretation = {
   confidence: number | null;
   structured_interpretation: Record<string, unknown> | null;
   domain_route: {
-    domain: "SETUP" | "FINANCIAL" | "ENTITY_UPDATE" | "MIXED";
+    domain: "SETUP" | "FINANCIAL" | "WORK" | "ENTITY_UPDATE" | "MIXED";
     confidence: number;
     required_schema: "setup_confirmation" | "entity_update_confirmation" | "financial_confirmation" | "split_confirmation";
     ui_mode: "SetupModal" | "EntityUpdateModal" | "FinancialModal" | "SplitFlow";
