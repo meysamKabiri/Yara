@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowUpCircle, BarChart3, Bell, CheckCircle2, Clock, Home, ReceiptText, Users } from "lucide-react";
+import { Activity, ArrowUpCircle, BarChart3, Bell, CheckCircle2, Clock, Home, Plus, ReceiptText, Users } from "lucide-react";
 import {
   api,
   FinancialDirection,
@@ -267,6 +267,24 @@ function App() {
     ],
     [route.name],
   );
+
+  const pageTitle = useMemo(() => {
+    if (route.name === "dashboard") return "خانه";
+    if (route.name === "project") return projectDetail?.name ?? "پروژه";
+    if (route.name === "people" || route.name === "person") return "افراد";
+    if (route.name === "reports") return "گزارش‌ها";
+    if (route.name === "jobs") return "وظایف";
+    if (route.name === "job") return "جزئیات";
+    return "";
+  }, [route.name, projectDetail?.name]);
+
+  function handleRegister() {
+    if (activeProjectId) {
+      navigate(`/projects/${activeProjectId}`);
+    } else {
+      navigate("/dashboard");
+    }
+  }
 
   useEffect(() => {
     function handlePopState() {
@@ -873,6 +891,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand-block">
           <strong>Yara</strong>
+          <span className="mobile-page-title">{pageTitle}</span>
         </div>
         <nav className="main-nav" aria-label="Primary navigation">
           {navItems.map((item) => (
@@ -918,6 +937,25 @@ function App() {
         {loadingAction && <div className="loading-banner">{loadingAction}...</div>}
         {renderPage()}
       </section>
+
+      <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
+        <button className={(route.name === "dashboard" || route.name === "project") ? "active" : ""} type="button" onClick={() => navigate("/dashboard")}>
+          <Home aria-hidden="true" size={20} />
+          <span>خانه</span>
+        </button>
+        <button className={(route.name === "people" || route.name === "person") ? "active" : ""} type="button" onClick={() => navigate("/people")}>
+          <Users aria-hidden="true" size={20} />
+          <span>افراد</span>
+        </button>
+        <button type="button" onClick={handleRegister}>
+          <Plus aria-hidden="true" size={20} />
+          <span>ثبت</span>
+        </button>
+        <button className={route.name === "reports" ? "active" : ""} type="button" onClick={() => navigate("/reports")}>
+          <BarChart3 aria-hidden="true" size={20} />
+          <span>گزارش‌ها</span>
+        </button>
+      </nav>
 
       {(pendingTabEditingId || (!reviewModalDismissed && pendingInterpretations.length > 0)) && (
       <DomainUIController
