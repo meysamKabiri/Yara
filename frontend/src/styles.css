@@ -1083,32 +1083,38 @@ mark {
   z-index: 20;
   display: grid;
   place-items: center;
-  overflow: auto;
+  overflow: hidden;
   background: rgb(27 37 48 / 0.45);
   padding: 1rem;
 }
 
 .confirmation-modal {
   width: min(920px, 100%);
-  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 24px);
   overflow: hidden;
   border-radius: 8px;
   background: #ffffff;
 }
 
 .modal-shell {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 24px);
   min-width: 0;
+  min-height: 0;
 }
 
 .modal-header {
   align-items: flex-start;
+  background: #ffffff;
   border-bottom: 1px solid #e2e8eb;
   display: flex;
+  flex: 0 0 auto;
   gap: 0.85rem;
   justify-content: space-between;
   padding: 1rem;
+  position: relative;
+  z-index: 3;
 }
 
 .modal-header h2,
@@ -1131,17 +1137,27 @@ mark {
 }
 
 .modal-body {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
   gap: 0.85rem;
+  min-height: 0;
   min-width: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   padding: 1rem;
 }
 
 .modal-footer {
+  background: #ffffff;
   border-top: 1px solid #e7eeea;
+  box-shadow: 0 -8px 18px rgb(31 48 38 / 0.05);
+  flex: 0 0 auto;
   padding: 0.85rem 1rem;
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
 }
 
 .modal-footer .modal-actions {
@@ -1149,8 +1165,11 @@ mark {
 }
 
 .interpretation-stack {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.9rem;
+  min-height: 0;
+  min-width: 0;
 }
 
 .multi-review {
@@ -1264,10 +1283,13 @@ mark {
 }
 
 .interpretation-card {
-  display: grid;
   border: 1px solid #dde5e8;
   border-radius: 8px;
   overflow: hidden;
+}
+
+.interpretation-card.modal-shell {
+  max-height: 100%;
 }
 
 .approval-section,
@@ -1724,12 +1746,12 @@ mark {
   }
 
   .modal-backdrop {
-    padding: 0.65rem;
+    padding: 12px;
   }
 
   .confirmation-modal {
-    max-height: calc(100dvh - 1.3rem);
-    width: min(100%, 390px);
+    max-height: calc(100dvh - 24px);
+    width: calc(100vw - 24px);
   }
 
   .modal-header,
@@ -1744,7 +1766,8 @@ mark {
 
   .modal-actions {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
     width: 100%;
   }
 
@@ -1755,9 +1778,19 @@ mark {
     width: 100%;
   }
 
+  .modal-actions > button {
+    min-height: 44px;
+  }
+
   .create-project-trigger {
     min-width: 0;
     width: 100%;
+  }
+}
+
+@media (max-width: 360px) {
+  .modal-actions {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3476,7 +3509,8 @@ mark {
   border: 1px solid #e4ebe7;
   border-radius: 24px;
   box-shadow: 0 18px 48px rgb(31 48 38 / 0.12);
-  display: grid;
+  display: flex;
+  flex-direction: column;
   max-width: 480px;
   overflow: hidden;
   position: relative;

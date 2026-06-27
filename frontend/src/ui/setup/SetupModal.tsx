@@ -89,7 +89,7 @@ export function SetupModal({
       <header className="modal-header">
         <div>
           <h3 className="modal-title">افزودن فرد به پروژه</h3>
-          <p>اطلاعات فرد پیشنهادی را پیش از ثبت بررسی کنید.</p>
+          <p>اطلاعات فرد را بررسی کنید.</p>
         </div>
       </header>
       <section className="approval-section modal-body">

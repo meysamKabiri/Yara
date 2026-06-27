@@ -219,7 +219,7 @@ export function FinancialModal({
       <header className="modal-header">
         <div>
           <h3 className="modal-title">ثبت مالی</h3>
-          <p>طرف حساب، مبلغ و جهت مالی را پیش از ثبت بررسی کنید.</p>
+          <p>مبلغ و طرف حساب را بررسی کنید.</p>
         </div>
       </header>
       <section className="approval-section modal-body">

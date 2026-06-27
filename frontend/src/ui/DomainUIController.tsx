@@ -663,12 +663,12 @@ export function DomainUIController({
             {safeInterpretations.length > 1 ? (
               <>
                 <h2 id="interpretation-title">بررسی موارد استخراج‌شده</h2>
-                <p>موارد زیر از متن شما شناسایی شد. تایید، آن‌ها را در پروژه ثبت می‌کند؛ می‌توانید هر مورد را ویرایش کنید یا برای بررسی بعدی نگه دارید.</p>
+                <p>موارد استخراج‌شده را تایید یا ویرایش کنید.</p>
               </>
             ) : safeInterpretations.length === 1 ? (
               <>
                 <h2 id="interpretation-title">بررسی اطلاعات</h2>
-                <p>اگر تایید کنید، همین اطلاعات در پروژه ثبت می‌شود. برای اصلاح، ویرایش کنید؛ برای نگه داشتن در صف، بعدا بررسی کنید.</p>
+                <p>موارد استخراج‌شده را تایید یا ویرایش کنید.</p>
               </>
             ) : (
               <>
@@ -929,7 +929,7 @@ export function DomainUIController({
                               ? "کدام فروشنده مدنظر است؟"
                               : `«${entityName(interpretation)}» کدام فرد است؟`}
                         </h3>
-                        {isRole && <p>نقش این شخص در پروژه را مشخص کنید</p>}
+                        {isRole && <p>نقش فرد را مشخص کنید.</p>}
                       </div>
                     </header>
                     <div className="modal-body">
@@ -1092,7 +1092,7 @@ export function DomainUIController({
                     <header className="modal-header">
                       <div>
                         <h3 className="modal-title">تعیین نقش فرد</h3>
-                        <p>نقش این شخص در پروژه را مشخص کنید</p>
+                        <p>نقش فرد را مشخص کنید.</p>
                       </div>
                     </header>
                     <section className="approval-section modal-body">

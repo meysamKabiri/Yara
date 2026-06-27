@@ -402,7 +402,7 @@ export function EntityUpdateModal({
           <header className="modal-header">
             <div>
               <h3 className="modal-title">انتخاب فرد</h3>
-              <p>این مورد مربوط به کدام شخص است؟</p>
+              <p>فرد مرتبط را انتخاب کنید.</p>
             </div>
           </header>
           <section className="approval-section modal-body">
@@ -444,7 +444,7 @@ export function EntityUpdateModal({
           <header className="modal-header">
             <div>
               <h3 className="modal-title">به‌روزرسانی اطلاعات فرد</h3>
-              <p>فرد و فیلدهای تغییر کرده را پیش از ثبت بررسی کنید.</p>
+              <p>تغییرات فرد را بررسی کنید.</p>
             </div>
           </header>
           <section className="approval-section modal-body">
