@@ -49,6 +49,7 @@ ROLE_PHRASES: list[RolePhrase] = [
     RolePhrase("برقکار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("برق کار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("لوله کش", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("تاسیساتی", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("نقاش", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("کابینت کار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("کناف کار", WorkerType.SKILLED_WORKER, priority=7),

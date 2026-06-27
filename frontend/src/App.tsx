@@ -273,7 +273,7 @@ function App() {
 
   async function loadProjectData(projectId: number) {
     await runAction("در حال بارگذاری پروژه", async () => {
-      const [detail, rawEntryList, workerList, states, historyList, invoiceList, paymentList, workLogList, summary] = await Promise.all([
+      const [detail, rawEntryList, workerList, states, historyList, invoiceList, paymentList, workLogList, summary, pendingList] = await Promise.all([
         api.getProject(projectId),
         api.listRawEntries(projectId),
         api.listWorkers(projectId),
@@ -283,6 +283,7 @@ function App() {
         api.listPayments(projectId),
         api.listWorkLogs(projectId),
         api.getOperatingSummary(projectId),
+        api.listPendingInterpretations(projectId),
       ]);
       setProjectDetail(detail);
       setRawEntries(rawEntryList);
@@ -293,6 +294,7 @@ function App() {
       setPayments(paymentList);
       setWorkLogs(workLogList);
       setOperatingSummary(summary);
+      setPendingInterpretations(pendingList);
     });
   }
 

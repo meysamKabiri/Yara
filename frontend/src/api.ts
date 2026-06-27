@@ -491,6 +491,9 @@ export const api = {
       `/projects/${projectId}/extracted-events/pending`,
     ),
 
+  listPendingInterpretations: (projectId: number) =>
+    request<PendingInterpretation[]>(`/projects/${projectId}/pending-interpretations`),
+
   listConfirmedEvents: (projectId: number) =>
     request<ExtractedEvent[]>(
       `/projects/${projectId}/extracted-events/confirmed`,

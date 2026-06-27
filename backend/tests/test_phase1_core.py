@@ -450,6 +450,155 @@ def test_entity_normalizer_name_compaction_and_scoring() -> None:
     assert match_score("میثم", "رحیم") == 0.0
 
 
+def test_followup_client_payment_uses_existing_client_and_stays_incoming(client: TestClient) -> None:
+    project = create_project(client)
+
+    role_pi = create_interpretation(client, project["id"], "میثم کبیری کارفرمای پروژه است")
+    confirm = client.post(
+        f"/pending-interpretations/{role_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert confirm.status_code == 200
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    client_id = workers[0]["id"]
+    assert workers[0]["name"] == "میثم کبیری"
+    assert workers[0]["type"] == "CLIENT"
+
+    first_payment = create_interpretation(
+        client,
+        project["id"],
+        "میثم کبیری 300 میلیون تومان به حساب پروژه واریز کرد",
+    )
+    assert first_payment["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert first_payment["financial_direction"] == "INCOMING"
+    response = client.post(
+        f"/pending-interpretations/{first_payment['id']}/confirm",
+        json={"entity_id": client_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    followup = create_interpretation(
+        client,
+        project["id"],
+        "میثم 150 میلیون تومان دیگر پرداخت کرد",
+    )
+    assert followup["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert followup["semantic_action"] == "PAYMENT"
+    assert followup["financial_direction"] == "INCOMING"
+    assert followup["suggested_entity_id"] == client_id
+    response = client.post(
+        f"/pending-interpretations/{followup['id']}/confirm",
+        json={"entity_id": client_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    project_detail = client.get(f"/projects/{project['id']}").json()
+    assert project_detail["summary"]["total_received"] == "450000000.00"
+    assert project_detail["summary"]["total_paid_out"] == "0.00"
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert [worker["name"] for worker in workers] == ["میثم کبیری"]
+
+
+def test_persian_honorific_profile_update_does_not_create_latin_duplicate(client: TestClient) -> None:
+    project = create_project(client)
+
+    role_pi = create_interpretation(client, project["id"], "خانم احمدی کارفرمای پروژه است")
+    assert role_pi["extracted_entities"][0]["name"] == "خانم احمدی"
+    response = client.post(
+        f"/pending-interpretations/{role_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    worker_id = workers[0]["id"]
+    assert workers[0]["name"] == "خانم احمدی"
+
+    phone_pi = create_interpretation(client, project["id"], "شماره تماس خانم احمدی 09123334444")
+    entities = phone_pi["extracted_entities"]
+    assert entities[0]["name"] == "خانم احمدی"
+    assert entities[0]["field_updates"]["phone"] == "09123334444"
+    response = client.post(
+        f"/pending-interpretations/{phone_pi['id']}/confirm",
+        json={"entity_id": worker_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["name"] == "خانم احمدی"
+    assert workers[0]["phone"] == "09123334444"
+    assert all("akhmadi" not in worker["name"].lower() for worker in workers)
+
+
+def test_role_qualified_family_name_payment_links_to_worker_not_client(client: TestClient) -> None:
+    project = create_project(client)
+
+    client_pi = create_interpretation(client, project["id"], "آقای کریمی کارفرمای پروژه است")
+    response = client.post(
+        f"/pending-interpretations/{client_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert response.status_code == 200
+
+    worker_pi = create_interpretation(client, project["id"], "کریمی تاسیساتی پروژه است")
+    assert worker_pi["semantic_action"] == "SET_ROLE"
+    assert worker_pi["extracted_entities"][0]["name"] == "کریمی تاسیساتی"
+    assert worker_pi["extracted_entities"][0]["project_role"] == "SKILLED_WORKER"
+    response = client.post(
+        f"/pending-interpretations/{worker_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    client_worker = next(worker for worker in workers if worker["name"] == "آقای کریمی")
+    skilled_worker = next(worker for worker in workers if worker["name"] == "کریمی تاسیساتی")
+
+    payment_pi = create_interpretation(client, project["id"], "به کریمی تاسیساتی 8 میلیون تومان پرداخت شد")
+    assert payment_pi["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert payment_pi["financial_direction"] == "OUTGOING"
+    assert payment_pi["suggested_entity_id"] == skilled_worker["id"]
+    response = client.post(
+        f"/pending-interpretations/{payment_pi['id']}/confirm",
+        json={"entity_id": skilled_worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    assert len(payments) == 1
+    assert payments[0]["entity_id"] == skilled_worker["id"]
+    assert payments[0]["entity_id"] != client_worker["id"]
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert sorted(worker["name"] for worker in workers) == ["آقای کریمی", "کریمی تاسیساتی"]
+
+
+def test_client_request_sentence_is_note_not_setup(client: TestClient) -> None:
+    project = create_project(client)
+
+    note_pi = create_interpretation(client, project["id"], "کارفرما گفت تابلو باید بزرگ‌تر شود")
+    assert note_pi["canonical_event_type"] == "NOTE_EVENT"
+    assert note_pi["semantic_action"] == "NOTE"
+    assert not note_pi["extracted_entities"]
+
+    response = client.post(
+        f"/pending-interpretations/{note_pi['id']}/confirm",
+        json={"confirmed": True},
+    )
+    assert response.status_code == 200
+
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    project_detail = client.get(f"/projects/{project['id']}").json()
+    assert project_detail["summary"]["total_received"] == "0.00"
+    assert project_detail["summary"]["total_paid_out"] == "0.00"
+    history = client.get(f"/projects/{project['id']}/history").json()
+    assert len(history) == 1
+    assert history[0]["change_type"] == "NOTE"
+
+
 def test_llm_v2_resolve_candidates_ranks_without_premature_partial_binding() -> None:
     workers = [
         Worker(id=1, project_id=1, name="میثم کبیری", type=WorkerType.CLIENT),

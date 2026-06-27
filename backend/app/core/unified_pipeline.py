@@ -36,10 +36,12 @@ from app.models.core import (
     PendingInterpretationStatus,
     Project,
     Worker,
+    WorkerType,
 )
 from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2PaymentMethod
 from app.services.llm_v2_interpreter import LLMv2Interpreter
 from app.services.llm_v2_validator import LLMv2Validator, LLMv2ValidationError, resolve_candidates
+from app.services.entity_normalizer import match_score, normalize_name
 from app.services.persian_money_engine import normalize_text
 from app.services.persian_money_engine import parse_persian_money
 from app.services.persian_project_payment import detect_incoming_project_payment
@@ -645,6 +647,7 @@ def _resolve_same_input_entities_in_pending_interpretations(
                         si_entity["name"] = full_name
                         if si_entity.get("project_role") in ("", "OTHER", None):
                             si_entity["project_role"] = full_role
+        _repair_client_paid_direction(interpretations=[pi])
 
 
 def _get_pi_entities(pi: PendingInterpretation) -> list[dict] | None:
@@ -717,6 +720,10 @@ def _resolve_financial_counterparty(
 
     clients = [w for w in entity_context if w.type.value == "CLIENT"]
 
+    normalized_name_match = _unique_normalized_entity_match(entity_name, entity_context)
+    if normalized_name_match is not None and _is_role_compatible(normalized_name_match.type.value, expected_role):
+        return normalized_name_match.id
+
     # 1. exact match + role compatible
     for c in candidates:
         if (
@@ -765,6 +772,19 @@ def _resolve_financial_counterparty(
             return name_match.id
 
     return None
+
+
+def _unique_normalized_entity_match(name: str, entity_context: list[Worker]) -> Worker | None:
+    normalized = normalize_name(name)
+    if not normalized:
+        return None
+    matches = [
+        worker
+        for worker in entity_context
+        if normalize_name(worker.name) == normalized
+        or (len(normalized.split()) == 1 and normalized in normalize_name(worker.name).split())
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _build_llm_v2_interpretations(
@@ -961,6 +981,12 @@ def _build_one_llm_v2_interpretation(
     if amount is not None:
         amount = Decimal(str(amount))
 
+    if _should_repair_client_paid_direction(event_text, entities_json, canonical_type, semantic_action, financial_direction):
+        financial_direction = FinancialDirection.INCOMING
+        interpretation.financial.direction = LLMv2FinancialDirection.IN
+        if action_str == "PAYMENT_OUT":
+            interpretation.action = LLMv2Action.PAYMENT_IN
+
     suggested_entity_id = _resolve_financial_counterparty(
         entities_json, entity_context, canonical_type, semantic_action, financial_direction
     )
@@ -1016,6 +1042,49 @@ def _repair_outgoing_unknown_counterparty_role(
         return
     first["project_role"] = "OTHER"
     first["type"] = "OTHER"
+
+
+def _repair_client_paid_direction(interpretations: list[PendingInterpretation]) -> None:
+    for interpretation in interpretations:
+        entities = interpretation.extracted_entities or []
+        if not _should_repair_client_paid_direction(
+            interpretation.matched_input_text or interpretation.description or interpretation.raw_input_text,
+            entities,
+            interpretation.canonical_event_type,
+            interpretation.semantic_action,
+            interpretation.financial_direction,
+        ):
+            continue
+        interpretation.financial_direction = FinancialDirection.INCOMING
+        structured = interpretation.structured_interpretation
+        if isinstance(structured, dict):
+            structured["action"] = "PAYMENT_IN"
+            financial = structured.get("financial")
+            if isinstance(financial, dict):
+                financial["direction"] = "IN"
+            interpretation.structured_interpretation = structured
+
+
+def _should_repair_client_paid_direction(
+    raw_text: str | None,
+    entities_json: list[dict[str, Any]] | None,
+    canonical_type: str | None,
+    semantic_action: str | None,
+    financial_direction: Any,
+) -> bool:
+    if (
+        canonical_type != "FINANCIAL_EVENT"
+        or semantic_action != "PAYMENT"
+        or financial_direction != FinancialDirection.OUTGOING
+        or not entities_json
+    ):
+        return False
+    first = entities_json[0]
+    role = first.get("project_role") or first.get("type")
+    if role != "CLIENT":
+        return False
+    normalized = normalize_text(raw_text or "")
+    return _looks_like_ambiguous_client_payment(normalized)
 
 
 def _has_explicit_client_role_evidence(raw_text: str) -> bool:
@@ -1249,29 +1318,48 @@ def _build_financial_payment_fast_path_interpretation(
         return None
     if any(separator in normalized for separator in [".", "۔", "؟", "!", "؛"]):
         return None
-    if any(term in normalized for term in ["پروژه", "حساب پروژه"]):
+    incoming_project_payment = detect_incoming_project_payment(raw_text)
+    if any(term in normalized for term in ["پروژه", "حساب پروژه"]) and incoming_project_payment is None:
         return None
     if detect_purchase_payment(raw_text) is not None or any(term in normalized for term in ["خرید", "خریدم", "خرید کردم"]):
         return None
 
     direction = _financial_payment_fast_path_direction(normalized)
+    if direction is None and _looks_like_ambiguous_client_payment(normalized):
+        possible_name = _financial_payment_fast_path_name(normalized, "IN")
+        matched_worker = _unique_normalized_entity_match(possible_name or "", entity_context)
+        if matched_worker is not None and matched_worker.type == WorkerType.CLIENT:
+            direction = "IN"
     if direction is None:
         return None
     name = _financial_payment_fast_path_name(normalized, direction)
     if name is None:
         return None
 
-    role = _financial_payment_fast_path_role(normalized, direction)
+    matched_worker = _unique_normalized_entity_match(name, entity_context)
+    role = (
+        "CLIENT"
+        if direction == "IN" and matched_worker is not None and matched_worker.type == WorkerType.CLIENT
+        else _financial_payment_fast_path_role(normalized, direction)
+    )
     payment_method = _financial_payment_fast_path_payment_method(normalized)
+    if incoming_project_payment is not None:
+        payment_method = PaymentType.BANK_TRANSFER.value
+    preserve_raw_project_deposit_name = incoming_project_payment is not None and "واریز" in normalized
+    display_name = (
+        matched_worker.name
+        if matched_worker is not None and not preserve_raw_project_deposit_name
+        else name
+    )
     entity: dict[str, Any] = {
-        "name": name,
+        "name": display_name,
         "kind": "PERSON",
         "project_role": role,
         "role_detail": None,
         "type": role,
     }
     resolution = resolve_candidates(name, entity_context)
-    if resolution["candidates"]:
+    if (matched_worker is None or preserve_raw_project_deposit_name) and resolution["candidates"]:
         entity["requires_confirmation"] = True
         entity["candidate_matches"] = resolution["candidates"]
 
@@ -1312,8 +1400,8 @@ def _build_financial_payment_fast_path_interpretation(
         raw_input_text=raw_text,
         canonical_event_type="FINANCIAL_EVENT",
         semantic_action="PAYMENT",
-        suggested_entity_id=None,
-        matched_input_text=None,
+        suggested_entity_id=matched_worker.id if matched_worker is not None else None,
+        matched_input_text=name if matched_worker is not None and name != matched_worker.name else None,
         extracted_entities=[entity],
         extracted_amount=Decimal(str(amount)),
         extracted_quantity=None,
@@ -1330,7 +1418,7 @@ def _build_financial_payment_fast_path_interpretation(
 def _financial_payment_fast_path_direction(normalized: str) -> str | None:
     if "به " in normalized and any(
         phrase in normalized
-        for phrase in [" دادم", " پول دادم", " پرداخت کردم", " پرداختم", " کارت زدم", " واریز کردم"]
+        for phrase in [" دادم", " پول دادم", " پرداخت کردم", " پرداخت شد", " پرداختم", " کارت زدم", " واریز کردم"]
     ):
         return "OUT"
     if "از " in normalized and " گرفتم" in normalized:
@@ -1339,6 +1427,14 @@ def _financial_payment_fast_path_direction(normalized: str) -> str | None:
         if not normalized.strip().startswith("به "):
             return "IN"
     return None
+
+
+def _looks_like_ambiguous_client_payment(normalized: str) -> bool:
+    if re.search(r"(?:^|\s)به\s+", normalized):
+        return False
+    if any(term in normalized for term in ["خرید", "خریدم", "بابت خرید"]):
+        return False
+    return any(phrase in normalized for phrase in [" پرداخت کرد", " پول داد", " دیگر پرداخت کرد"])
 
 
 def _financial_payment_fast_path_name(normalized: str, direction: str) -> str | None:
@@ -1428,7 +1524,7 @@ def _build_role_assignment_interpretation(
     if extracted is None or extracted.confidence < 0.6:
         return None
     role = extracted.worker_type.value
-    extracted_name = _dedupe_repeated_name(extracted.name)
+    extracted_name = _role_assignment_display_name(raw_text, extracted, entity_context)
     resolution = resolve_candidates(extracted_name, entity_context)
     entity: dict[str, Any] = {
         "name": extracted_name,
@@ -1542,6 +1638,32 @@ def _dedupe_repeated_name(name: str) -> str:
     return name
 
 
+_ROLE_QUALIFIERS_PRESERVED_IN_NAMES = {
+    "تاسیساتی",
+}
+
+
+def _role_assignment_display_name(
+    raw_text: str,
+    extracted: Any,
+    entity_context: list[Worker],
+) -> str:
+    base_name = _dedupe_repeated_name(extracted.name)
+    role_phrase = getattr(extracted, "role_phrase", "")
+    if role_phrase not in _ROLE_QUALIFIERS_PRESERVED_IN_NAMES:
+        return base_name
+    if len(base_name.split()) != 1:
+        return base_name
+    normalized_text = normalize_text(raw_text).replace("\u200c", " ")
+    qualified_name = f"{base_name} {role_phrase}"
+    if qualified_name not in normalized_text:
+        return base_name
+    if not entity_context:
+        return qualified_name
+    existing_base_match = _unique_normalized_entity_match(base_name, entity_context)
+    return qualified_name if existing_base_match is not None else base_name
+
+
 def _is_role_assignment_text(raw_text: str) -> bool:
     normalized = normalize_text(raw_text)
     if any(term in normalized for term in ["امروز", "کار کرد", "کارکرد", "اومد", "آمد", "زد"]):
@@ -1646,6 +1768,8 @@ def _has_note_or_unsupported_work_text(normalized_text: str) -> bool:
         term in normalized_text
         for term in (
             "درخواست",
+            "گفت",
+            "خواست",
             "تایید",
             "تأیید",
             "به پایان رسید",
@@ -1660,6 +1784,8 @@ def _has_note_or_unsupported_work_text(normalized_text: str) -> bool:
 
 
 def _has_plain_note_text(normalized_text: str) -> bool:
+    if _is_client_request_note_text(normalized_text):
+        return True
     return any(
         term in normalized_text
         for term in (
@@ -1668,6 +1794,45 @@ def _has_plain_note_text(normalized_text: str) -> bool:
             "تأیید",
             "به پایان رسید",
             "شروع شد",
+        )
+    )
+
+
+def _is_client_request_note_text(normalized_text: str) -> bool:
+    if _has_explicit_payment_or_profile_text(normalized_text):
+        return False
+    return any(
+        phrase in normalized_text
+        for phrase in (
+            "کارفرما گفت",
+            "کارفرما درخواست کرد",
+            "کارفرما خواست",
+            "مشتری گفت",
+            "مشتری درخواست کرد",
+            "مشتری خواست",
+        )
+    )
+
+
+def _has_explicit_payment_or_profile_text(normalized_text: str) -> bool:
+    return any(
+        term in normalized_text
+        for term in (
+            "پرداخت",
+            "واریز",
+            "پول داد",
+            "خرید",
+            "میلیون",
+            "تومان",
+            "شماره تماس",
+            "شماره موبایل",
+            "شماره حساب",
+            "شماره کارت",
+            "دستمزد روزانه",
+            "کارفرمای پروژه است",
+            "کارگر پروژه است",
+            "به پروژه اضافه",
+            "اضافه شد",
         )
     )
 

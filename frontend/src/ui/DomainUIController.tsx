@@ -6,7 +6,7 @@ import { SetupModal } from "./setup/SetupModal";
 import { FinancialModal } from "./financial/FinancialModal";
 import { EntityUpdateModal } from "./entity/EntityUpdateModal";
 import { SplitFlowModal } from "./split/SplitFlowModal";
-import { exactEntityIdByName } from "./confirmPayload";
+import { exactEntityIdByName, normalizeEntityName } from "./confirmPayload";
 
 type UnknownEntityForm = { workerId: string; name: string; type: string; roleDetail: string };
 type EntityOverride = { name: string; type: string; roleDetail?: string | null };
@@ -104,6 +104,12 @@ function candidateMatches(interpretation: PendingInterpretation, workers: Worker
   return ids.map((id) => workers.find((worker) => worker.id === id)).filter((worker): worker is Worker => Boolean(worker));
 }
 
+function shouldPreferQualifiedRoleCreateNew(name: string, candidates: Worker[]): boolean {
+  const normalized = normalizeEntityName(name);
+  if (!normalized.includes("تاسیساتی")) return false;
+  return !candidates.some((worker) => normalizeEntityName(worker.name) === normalized);
+}
+
 function allowsVendorAutoCreate(_interpretation: PendingInterpretation): boolean {
   return false;
 }
@@ -164,6 +170,7 @@ function hasActualFinancialData(interpretation: PendingInterpretation): boolean 
 
 function getModalKind(interpretation: PendingInterpretation): ModalKind {
   if (interpretation.domain_route?.domain === "MIXED") return "MIXED";
+  if (interpretation.semantic_action === "NOTE") return "NOTE";
   if (hasActualFinancialData(interpretation)) return "FINANCIAL";
   if (hasProfileUpdateFields(interpretation)) return "PROFILE";
   if (
@@ -174,7 +181,6 @@ function getModalKind(interpretation: PendingInterpretation): ModalKind {
     interpretation.canonical_event_type === "SETUP_EVENT" ||
     interpretation.canonical_event_type === "FINANCIAL_EVENT"
   ) return "ROLE_OR_SETUP";
-  if (interpretation.semantic_action === "NOTE") return "NOTE";
   return "UNKNOWN";
 }
 
@@ -706,7 +712,10 @@ export function DomainUIController({
 
               // Candidates exist
               if (candidates.length > 0) {
-                const selectionValue = candidateSelections[interpretation.id] ?? String(candidates[0].id);
+                const selectionValue = candidateSelections[interpretation.id]
+                  ?? (isRole && shouldPreferQualifiedRoleCreateNew(entityName(interpretation), candidates)
+                    ? "create-new"
+                    : String(candidates[0].id));
                 const isCreatingNewCandidate = selectionValue === "create-new";
                 const selectedCandidate = isCreatingNewCandidate
                   ? undefined
