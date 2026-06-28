@@ -35,6 +35,36 @@ def test_payment_routes_to_financial_schema() -> None:
     assert route["ui_mode"] == "FinancialModal"
 
 
+def test_project_account_deposit_with_client_word_routes_to_financial_schema() -> None:
+    route = DomainRouterService().route(
+        "خانم احمدی 80 میلیون تومان به حساب پروژه واریز کرد.",
+        {
+            "intent": "FINANCIAL",
+            "action": "PAYMENT_IN",
+            "financial": {"amount": 80_000_000, "direction": "IN"},
+        },
+    )
+
+    assert route["domain"] == DomainType.FINANCIAL.value
+    assert route["ui_mode"] == "FinancialModal"
+
+
+def test_work_log_routes_to_work_schema_even_with_daily_rate_snapshot() -> None:
+    route = DomainRouterService().route(
+        "اکبر امروز کار کرد",
+        {
+            "intent": "WORK",
+            "action": "WORK_LOG",
+            "entities": [{"name": "اکبر", "project_role": "DAILY_WORKER", "daily_rate": "1000000.00"}],
+            "work": {"quantity": 1, "unit": "day"},
+        },
+    )
+
+    assert route["domain"] == DomainType.WORK.value
+    assert route["required_schema"] == "work_log_confirmation"
+    assert route["ui_mode"] == "WorkLogModal"
+
+
 def test_profile_update_fields_route_to_entity_update_schema_even_if_action_is_set_role() -> None:
     route = DomainRouterService().route(
         "شماره تماس میثم 09123456789",
@@ -105,7 +135,7 @@ def test_mixed_pending_interpretation_blocks_confirmation(client: TestClient, mo
     project = client.post("/projects", json={"name": "domain router"}).json()
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, text, project_id: {
+        lambda self, text, project_id, db=None: {
             "intent": "FINANCIAL",
             "action": "PAYMENT",
             "entities": [{"name": "علی", "kind": "PERSON", "project_role": "CLIENT", "role_detail": None}],

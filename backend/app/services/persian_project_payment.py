@@ -46,9 +46,13 @@ def detect_purchase_payment(text: str) -> PurchasePayment | None:
 
 
 def _is_incoming_project_payment(normalized: str) -> bool:
+    if any(term in normalized for term in ["شماره حساب", "شماره کارت", "شماره تماس", "موبایل", "تلفن", "دستمزد"]):
+        return False
     direct_phrases = [
         "به حساب پروژه واریز کرد",
         "به حساب پروژه ریخت",
+        "ریخت به حساب",
+        "زد به حساب",
         "پول داد به پروژه",
         "برای پروژه واریز کرد",
         "gereftam baraye proje",
@@ -56,9 +60,11 @@ def _is_incoming_project_payment(normalized: str) -> bool:
     ]
     if any(phrase in normalized for phrase in direct_phrases):
         return True
+    if "به حساب" in normalized and any(term in normalized for term in ["ریخت", "واریز", "زد"]):
+        return True
     if "واریز کرد" in normalized and "پروژه" in normalized and "حساب" in normalized:
         return True
-    if "گرفتم" in normalized and "پروژه" in normalized:
+    if "گرفتم" in normalized and ("پروژه" in normalized or normalized.startswith("از ")):
         return True
     if "gereftam" in normalized and ("proje" in normalized or "project" in normalized):
         return True
@@ -83,6 +89,8 @@ def _has_purchase_meaning(normalized: str) -> bool:
     phrases = [
         "خریدم",
         "خرید کردم",
+        "خریداری شد",
+        "خریداری",
         "فاکتور گرفتم",
         "خرید نسیه",
         "فاکتور",
@@ -93,6 +101,8 @@ def _has_purchase_meaning(normalized: str) -> bool:
         return True
     return (
         "پرداخت کردم" in normalized and "خرید" in normalized
+    ) or (
+        "پرداخت شد" in normalized and "خرید" in normalized
     ) or (
         "pardakht kardam" in normalized and "kharid" in normalized
     )

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.trace_events import TraceEvent, trace_error, trace_event
+from app.core.observability_service import track_event, track_timed_event
 from app.models.core import (
     FinancialDirection,
     Invoice,
@@ -53,16 +53,28 @@ class ExecutionEngine:
         - NOT use semantic rules
         - ONLY execute confirmed structured data
         """
+        return track_timed_event(
+            db=db,
+            event_name="execution_engine.execute",
+            fn=lambda: self._execute_impl(confirmed_interpretation, db, state),
+        )
 
+    def _execute_impl(
+        self,
+        confirmed_interpretation: ConfirmedFinancialInterpretation,
+        db: Session,
+        state: WorkerState | None,
+    ) -> dict[str, Any]:
         start = perf_counter()
         action = confirmed_interpretation.semantic_action
         direction = self._direction(confirmed_interpretation.financial_direction)
         payment_method = self._payment_method(confirmed_interpretation.payment_method, action)
         amount = self._amount(confirmed_interpretation.amount)
         entity_id = confirmed_interpretation.entity_id
-        trace_event(
-            TraceEvent.EXECUTION_STARTED,
-            {
+        track_event(
+            db=db,
+            event_name="EXECUTION_STARTED",
+            payload={
                 "project_id": confirmed_interpretation.project_id,
                 "entity_id": entity_id,
                 "action": action,
@@ -150,18 +162,21 @@ class ExecutionEngine:
 
             result = self._result(payments, invoices)
             duration_ms = round((perf_counter() - start) * 1000, 3)
-            trace_event(
-                TraceEvent.DB_WRITE_SUCCESS,
-                {
+            track_event(
+                db=db,
+                event_name="DB_WRITE_SUCCESS",
+                duration_ms=duration_ms,
+                payload={
                     "project_id": confirmed_interpretation.project_id,
                     "payment_ids": [payment.id for payment in payments],
                     "invoice_ids": [invoice.id for invoice in invoices],
                 },
-                start_time=start,
             )
-            trace_event(
-                TraceEvent.EXECUTION_COMPLETED,
-                {
+            track_event(
+                db=db,
+                event_name="EXECUTION_COMPLETED",
+                duration_ms=duration_ms,
+                payload={
                     "project_id": confirmed_interpretation.project_id,
                     "payment_ids": [payment.id for payment in payments],
                     "invoice_ids": [invoice.id for invoice in invoices],
@@ -170,7 +185,6 @@ class ExecutionEngine:
                     "status": "SUCCESS",
                     "duration_ms": duration_ms,
                 },
-                start_time=start,
             )
             logger.info(
                 "execution_engine_result",
@@ -185,12 +199,14 @@ class ExecutionEngine:
             )
             return result
         except Exception as exc:
-            trace_error(
-                exc,
-                {
+            track_event(
+                db=db,
+                event_name="ERROR_OCCURRED",
+                payload={
                     "project_id": confirmed_interpretation.project_id,
                     "action": action,
                     "entity_id": entity_id,
+                    "error_message": str(exc),
                     "duration_ms": round((perf_counter() - start) * 1000, 3),
                 },
             )
@@ -227,6 +243,7 @@ class ExecutionEngine:
             type=payment_method,
             due_date=confirmed_interpretation.due_date,
             direction=direction,
+            description=confirmed_interpretation.description,
         )
         db.add(payment)
         db.flush()

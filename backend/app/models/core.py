@@ -1,9 +1,10 @@
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+import uuid
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, Uuid
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -105,6 +106,7 @@ class HistoryChangeType(StrEnum):
 class Project(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     raw_entries: Mapped[list["RawEntry"]] = relationship(back_populates="project")
     extracted_events: Mapped[list["ExtractedEvent"]] = relationship(back_populates="project")
@@ -223,7 +225,14 @@ class WorkLog(TimestampMixin, Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     rate_per_unit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     total_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    period_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_pending_interpretation_id: Mapped[int | None] = mapped_column(ForeignKey("pendinginterpretation.id"), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="work_logs")
     worker: Mapped[Worker] = relationship(back_populates="work_logs")
@@ -240,6 +249,11 @@ class Invoice(TimestampMixin, Base):
         default=InvoiceStatus.OPEN,
         nullable=False,
     )
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="invoices")
     vendor: Mapped[Worker] = relationship(back_populates="invoices")
@@ -266,6 +280,12 @@ class Payment(TimestampMixin, Base):
         default=FinancialDirection.OUTGOING,
         nullable=False,
     )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="payments")
     entity: Mapped[Worker] = relationship(back_populates="payments")
@@ -308,6 +328,11 @@ class HistoryEntry(TimestampMixin, Base):
     rule_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     conflict_warnings: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="history_entries")
     worker_state: Mapped[WorkerState | None] = relationship(back_populates="history_entries")
@@ -398,3 +423,26 @@ class FinancialMigrationLog(TimestampMixin, Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="financial_migration_logs")
+
+
+class TraceEvent(TimestampMixin, Base):
+    __tablename__ = "trace_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    trace_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_name: Mapped[str] = mapped_column(String, nullable=False)
+    event_group: Mapped[str] = mapped_column(String, nullable=False)
+    event_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (
+        Index("ix_trace_events_trace_id_idx", "trace_id", "event_index"),
+    )
+
+
+class TraceEventCounter(Base):
+    __tablename__ = "trace_event_counter"
+
+    trace_id: Mapped[str] = mapped_column(String, primary_key=True)
+    counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

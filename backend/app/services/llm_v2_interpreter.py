@@ -1,31 +1,53 @@
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from time import perf_counter
 from typing import Any, cast
 
-from app.core.observability.emitter import emit_event
-from app.core.trace_context import get_job_id, get_trace_id
-from app.services.persian_money_engine import normalize_text, parse_persian_money
-from app.services.prompts.llm_v2_prompt import LLM_V2_PROMPT
+from sqlalchemy.orm import Session
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+from app.core.observability_service import track_event, track_timed_event
+from app.core.trace_context import get_trace_id
+from app.services.persian_money_engine import normalize_text, parse_persian_money
+from app.services.prompts.llm_v2_prompt import build_llm_v2_prompt
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
-OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "15"))
-OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "200"))
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "120"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
 
 
-def _emit_event(event_name, payload=None, duration_ms=None, dedupe_key=None):
+def _emit_event(db: Session | None, event_name, payload=None, duration_ms=None):
+    if db is None:
+        return
     try:
         trace_id = get_trace_id()
-        job_id = get_job_id()
-        if trace_id and job_id:
-            emit_event(trace_id, job_id, event_name, payload, duration_ms, dedupe_key)
+        if trace_id:
+            track_event(db=db, trace_id=trace_id, event_name=event_name, payload=payload, duration_ms=duration_ms)
     except Exception:
         pass
+
+
+def _ollama_stats(body: dict[str, Any]) -> dict[str, int | float | None]:
+    stats: dict[str, int | float | None] = {}
+    for key in [
+        "total_duration",
+        "load_duration",
+        "prompt_eval_count",
+        "prompt_eval_duration",
+        "eval_count",
+        "eval_duration",
+    ]:
+        value = body.get(key)
+        stats[key] = value if isinstance(value, int | float) else None
+        if key.endswith("_duration") and isinstance(value, int | float):
+            stats[f"{key}_ms"] = round(value / 1_000_000, 1)
+    return stats
 
 VALID_INTENTS = {"SET_ROLE", "SETUP", "WORK", "FINANCIAL", "NOTE", "DOCUMENT"}
 VALID_ACTIONS = {
@@ -72,7 +94,11 @@ def _has_profile_fields(value: dict) -> bool:
 _FINANCIAL_AMOUNT_UNITS = {"تومان", "تومن", "ریال", "هزار", "میلیون", "میلیارد"}
 
 _FINANCIAL_PURCHASE_VERBS = {"خریدم", "خرید کردم", "فاکتور"}
-_FINANCIAL_IN_VERBS = {"گرفتم", "گرفت", "دریافت", "دریافت کردم", "واریز", "واریز کرد", "واریز شده"}
+_FINANCIAL_IN_VERBS = {
+    "گرفتم", "گرفت", "دریافت", "دریافت کردم",
+    "واریز", "واریز کرد", "واریز شده",
+    "ریخت", "ریخت به حساب", "زد به حساب", "به حساب",
+}
 _FINANCIAL_OUT_VERBS = {"دادم", "داد", "پرداخت", "پرداخت کردم", "پول داد"}
 _FINANCIAL_VERBS = _FINANCIAL_PURCHASE_VERBS | _FINANCIAL_IN_VERBS | _FINANCIAL_OUT_VERBS | {"چک", "بدهکار", "طلبکار"}
 
@@ -161,9 +187,18 @@ class LLMOutputParseError(ValueError):
 
 
 class LLMv2Interpreter:
-    def interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def interpret(self, raw_text: str, project_id: int, db: Session | None = None) -> dict[str, Any]:
+        if db is None:
+            return self._interpret_impl(raw_text, project_id, db=None)
+        return track_timed_event(
+            db=db,
+            event_name="llm_v2_interpreter.interpret",
+            fn=lambda: self._interpret_impl(raw_text, project_id, db=db),
+        )
+
+    def _interpret_impl(self, raw_text: str, project_id: int, db: Session | None = None) -> dict[str, Any]:
         try:
-            parsed = self._generate(raw_text, project_id)
+            parsed = self._generate(raw_text, project_id, db=db)
             if not isinstance(parsed, dict):
                 return self._fallback(raw_text, "model returned non-object JSON")
 
@@ -171,7 +206,7 @@ class LLMv2Interpreter:
             result = self._coerce(parsed, raw_text)
             normalize_ms = (perf_counter() - normalize_start) * 1000
 
-            _emit_event("INTERPRETATION_NORMALIZED", {
+            _emit_event(db, "INTERPRETATION_NORMALIZED", {
                 "semantic_action": result.get("action"),
                 "domain": result.get("intent"),
             }, duration_ms=normalize_ms)
@@ -185,21 +220,25 @@ class LLMv2Interpreter:
         except (OSError, TimeoutError, urllib.error.URLError, TypeError):
             return self._fallback(raw_text, "shadow interpreter failed")
 
-    def _generate(self, raw_text: str, project_id: int) -> Any:
-        _emit_event("LLM_REQUEST_STARTED", {
+    def _generate(self, raw_text: str, project_id: int, db: Session | None = None) -> Any:
+        prompt, prompt_domain = build_llm_v2_prompt(raw_text, project_id)
+        _emit_event(db, "LLM_REQUEST_STARTED", {
             "model": OLLAMA_MODEL,
             "timeout": OLLAMA_TIMEOUT_SECONDS,
             "num_predict": OLLAMA_NUM_PREDICT,
-            "prompt_length": len(raw_text),
+            "prompt_length": len(prompt),
+            "raw_text_length": len(raw_text),
+            "prompt_domain": prompt_domain,
         })
         ollama_start = perf_counter()
 
         payload = json.dumps(
             {
                 "model": OLLAMA_MODEL,
-                "prompt": f"/no_think\n{LLM_V2_PROMPT}\n\nProject ID: {project_id}\nNote:\n{raw_text}",
+                "prompt": prompt,
                 "stream": False,
                 "format": "json",
+                "think": False,
                 "options": {
                     "temperature": OLLAMA_TEMPERATURE,
                     "num_predict": OLLAMA_NUM_PREDICT,
@@ -212,15 +251,36 @@ class LLMv2Interpreter:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
-            ollama_body = json.loads(response.read().decode("utf-8"))
+        attempt = 0
+        max_attempts = 3
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+                    ollama_body = json.loads(response.read().decode("utf-8"))
+                break
+            except (OSError, TimeoutError, urllib.error.URLError) as e:
+                attempt += 1
+                if attempt >= max_attempts:
+                    raise
+                delay = min(0.5 * (2 ** attempt), 5.0)
+                _emit_event(db, "LLM_RETRY", {
+                    "attempt": attempt,
+                    "error": str(e),
+                    "max_attempts": max_attempts,
+                })
+                time.sleep(delay)
         ollama_ms = (perf_counter() - ollama_start) * 1000
 
-        _emit_event("OLLAMA_RESPONSE_RECEIVED", {
+        response_text = str(ollama_body.get("response", ""))
+        thinking_text = str(ollama_body.get("thinking", ""))
+        ollama_stats = _ollama_stats(ollama_body)
+        _emit_event(db, "OLLAMA_RESPONSE_RECEIVED", {
             "model": OLLAMA_MODEL,
-            "response_length": len(str(ollama_body.get("response", ""))),
-            "thinking_length": len(str(ollama_body.get("thinking", ""))),
-            "total_duration": ollama_body.get("total_duration"),
+            "prompt_domain": prompt_domain,
+            "prompt_length": len(prompt),
+            "response_length": len(response_text),
+            "thinking_length": len(thinking_text),
+            **ollama_stats,
         }, duration_ms=ollama_ms)
 
         parse_start = perf_counter()
@@ -228,15 +288,20 @@ class LLMv2Interpreter:
         parse_ms = (perf_counter() - parse_start) * 1000
 
         used_field = "response" if ollama_body.get("response") and str(ollama_body.get("response", "")).strip() else "thinking"
-        _emit_event("LLM_JSON_PARSED", {
+        _emit_event(db, "LLM_JSON_PARSED", {
             "keys_parsed": list(parsed.keys()) if isinstance(parsed, dict) else [],
             "used_response_field": used_field,
         }, duration_ms=parse_ms)
 
         self._last_timings = {
-            "prompt_length": len(raw_text),
+            "prompt_length": len(prompt),
+            "raw_text_length": len(raw_text),
+            "response_length": len(response_text),
+            "thinking_length": len(thinking_text),
+            "prompt_domain": prompt_domain,
             "ollama_http_duration_ms": round(ollama_ms, 1),
             "json_parse_duration_ms": round(parse_ms, 1),
+            **ollama_stats,
         }
         return parsed
 
@@ -268,6 +333,21 @@ class LLMv2Interpreter:
         raise LLMOutputParseError("Ollama output did not contain a valid JSON object")
 
     def _coerce(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
+        events = value.get("events")
+        if isinstance(events, list):
+            coerced_events = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                event_text = event.get("matched_text") or raw_text
+                coerced = self._coerce_single(event, event_text)
+                if event.get("matched_text"):
+                    coerced["matched_text"] = event["matched_text"]
+                coerced_events.append(coerced)
+            return {"events": coerced_events}
+        return self._coerce_single(value, raw_text)
+
+    def _coerce_single(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
         if _is_bare_entity(value):
             value = _wrap_bare_entity(value, raw_text)
         intent = value.get("intent")
@@ -289,8 +369,28 @@ class LLMv2Interpreter:
         if self._has_profile_update_fields(entities):
             intent = "SETUP"
             action = "UPDATE_ENTITY"
+        elif raw_text and intent in {"SETUP", "SET_ROLE"} and _has_financial_signal(raw_text):
+            amount = parse_persian_money(raw_text)
+            if amount is not None:
+                inferred_action = _infer_financial_action(raw_text)
+                intent = "FINANCIAL"
+                action = inferred_action
+                financial["amount"] = amount
+                direction = "IN" if inferred_action == "PAYMENT_IN" else "OUT"
+                financial["direction"] = direction
+                if financial.get("payment_method") not in VALID_PAYMENT_METHODS:
+                    financial["payment_method"] = (
+                        "BANK_TRANSFER"
+                        if any(signal in normalize_text(raw_text) for signal in ["حساب", "کارت", "واریز", "انتقال", "بانکی", "ریخت"])
+                        else None
+                    )
+                if entities:
+                    if inferred_action == "PAYMENT_IN":
+                        entities[0]["project_role"] = "CLIENT"
+                    elif inferred_action == "PURCHASE_PAID":
+                        entities[0]["project_role"] = "VENDOR"
 
-        return {
+        result = {
             "intent": intent if intent in VALID_INTENTS else "NOTE",
             "action": action if action in VALID_ACTIONS else self._action_for_intent(intent),
             "entities": entities,
@@ -331,6 +431,9 @@ class LLMv2Interpreter:
                 value.get("reasoning_summary") or value.get("reasoning") or ""
             ),
         }
+        if value.get("matched_text"):
+            result["matched_text"] = value["matched_text"]
+        return result
 
     def _action_for_intent(self, intent: Any) -> str:
         if intent == "SET_ROLE":

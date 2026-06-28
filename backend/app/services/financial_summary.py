@@ -4,13 +4,22 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.core import FinancialDirection, Invoice, Payment, Worker, WorkerState, WorkerStateRole, WorkLog
+from app.models.core import (
+    FinancialDirection,
+    Invoice,
+    Payment,
+    PaymentType,
+    Worker,
+    WorkerType,
+    WorkLog,
+)
 
 
 def invoice_paid_amount(db: Session, invoice_id: int) -> Decimal:
     return db.scalar(
         select(func.coalesce(func.sum(Payment.amount), 0)).where(
-            Payment.related_invoice_id == invoice_id
+            Payment.related_invoice_id == invoice_id,
+            Payment.is_voided == False,
         )
     )
 
@@ -18,27 +27,48 @@ def invoice_paid_amount(db: Session, invoice_id: int) -> Decimal:
 def project_operating_summary(db: Session, project_id: int) -> dict[str, Any]:
     total_work_amount = db.scalar(
         select(func.coalesce(func.sum(WorkLog.total_amount), 0)).where(
-            WorkLog.project_id == project_id
+            WorkLog.project_id == project_id,
+            WorkLog.is_voided == False,
         )
     )
     total_invoice_amount = db.scalar(
         select(func.coalesce(func.sum(Invoice.total_amount), 0)).where(
-            Invoice.project_id == project_id
+            Invoice.project_id == project_id,
+            Invoice.is_voided == False,
         )
     )
     total_payments = db.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.project_id == project_id)
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.is_voided == False,
+        )
     )
     total_paid_out = db.scalar(
         select(func.coalesce(func.sum(Payment.amount), 0)).where(
             Payment.project_id == project_id,
-            Payment.direction.in_([FinancialDirection.OUTGOING, FinancialDirection.DEFERRED]),
+            Payment.direction == FinancialDirection.OUTGOING,
+            Payment.is_voided == False,
         )
     )
     total_received = db.scalar(
         select(func.coalesce(func.sum(Payment.amount), 0)).where(
             Payment.project_id == project_id,
             Payment.direction == FinancialDirection.INCOMING,
+            Payment.is_voided == False,
+        )
+    )
+    deferred_amount = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.direction == FinancialDirection.DEFERRED,
+            Payment.is_voided == False,
+        )
+    )
+    check_amount = db.scalar(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.project_id == project_id,
+            Payment.type == PaymentType.CHECK,
+            Payment.is_voided == False,
         )
     )
 
@@ -63,43 +93,81 @@ def project_operating_summary(db: Session, project_id: int) -> dict[str, Any]:
         "project_balance": str(project_balance),
         "client_receivable": str(client_receivable),
         "available_balance": str(available_balance),
+        "deferred_amount": str(deferred_amount),
+        "check_amount": str(check_amount),
         "vendor_debts": vendor_debts,
         "worker_payables": worker_payables,
     }
 
 
 def _worker_payables(db: Session, project_id: int) -> list[dict[str, str | int]]:
-    states = list(
-        db.scalars(
-            select(WorkerState).where(
-                WorkerState.project_id == project_id,
-                WorkerState.role == WorkerStateRole.DAILY,
-                WorkerState.financial_balance > 0,
+    workers = {
+        worker.id: worker
+        for worker in db.scalars(
+            select(Worker).where(
+                Worker.project_id == project_id,
+                Worker.type.in_([WorkerType.DAILY_WORKER, WorkerType.SKILLED_WORKER]),
             )
         )
-    )
-    worker_ids = {state.worker_id for state in states}
-    workers_by_id = {
-        worker.id: worker
-        for worker in db.scalars(select(Worker).where(Worker.id.in_(worker_ids)))
-    } if worker_ids else {}
-    return [
-        {
-            "worker_id": state.worker_id,
-            "worker_name": workers_by_id[state.worker_id].name if state.worker_id in workers_by_id else state.name,
-            "debt": str(state.financial_balance),
-        }
-        for state in states
-    ]
+    }
+    if not workers:
+        return []
+
+    work_totals: dict[int, Decimal] = {worker_id: Decimal("0") for worker_id in workers}
+    paid_totals: dict[int, Decimal] = {worker_id: Decimal("0") for worker_id in workers}
+
+    for log in db.scalars(
+        select(WorkLog).where(
+            WorkLog.project_id == project_id,
+            WorkLog.is_voided == False,
+        )
+    ):
+        if log.worker_id in work_totals:
+            work_totals[log.worker_id] += Decimal(log.total_amount or 0)
+
+    for payment in db.scalars(
+        select(Payment).where(
+            Payment.project_id == project_id,
+            Payment.direction == FinancialDirection.OUTGOING,
+            Payment.is_voided == False,
+        )
+    ):
+        if payment.entity_id in paid_totals:
+            paid_totals[payment.entity_id] += Decimal(payment.amount or 0)
+
+    rows = []
+    for worker_id, worker in workers.items():
+        debt = work_totals[worker_id] - paid_totals[worker_id]
+        if debt <= 0:
+            continue
+        rows.append(
+            {
+                "worker_id": worker_id,
+                "worker_name": worker.name,
+                "debt": str(debt),
+            }
+        )
+    return rows
 
 
 def _vendor_debts(db: Session, project_id: int) -> list[dict[str, str | int]]:
-    invoices = list(db.scalars(select(Invoice).where(Invoice.project_id == project_id)))
+    invoices = list(
+        db.scalars(
+            select(Invoice).where(
+                Invoice.project_id == project_id,
+                Invoice.is_voided == False,
+            )
+        )
+    )
     vendor_ids = {invoice.vendor_id for invoice in invoices}
-    vendors_by_id = {
-        vendor.id: vendor
-        for vendor in db.scalars(select(Worker).where(Worker.id.in_(vendor_ids)))
-    } if vendor_ids else {}
+    vendors_by_id = (
+        {
+            vendor.id: vendor
+            for vendor in db.scalars(select(Worker).where(Worker.id.in_(vendor_ids)))
+        }
+        if vendor_ids
+        else {}
+    )
     grouped: dict[int, dict[str, Decimal]] = {}
     for invoice in invoices:
         paid_amount = invoice_paid_amount(db, invoice.id)

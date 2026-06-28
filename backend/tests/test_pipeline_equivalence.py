@@ -3,6 +3,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app.core import unified_pipeline
+from app.core.financial_role_repair import normalize_outgoing_payment_role
 from tests.natural_input_helpers import natural_input_interpretation
 
 
@@ -35,6 +36,7 @@ def _shadow_result() -> dict[str, Any]:
 
 
 def _normalize_interpretation(value: dict[str, Any]) -> dict[str, Any]:
+    value = normalize_outgoing_payment_role(value)
     return {
         "canonical_event_type": value["canonical_event_type"],
         "semantic_action": value["semantic_action"],
@@ -52,7 +54,7 @@ def _normalize_interpretation(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _model_to_read_shape(item: Any) -> dict[str, Any]:
-    return {
+    return normalize_outgoing_payment_role({
         "canonical_event_type": item.canonical_event_type,
         "semantic_action": item.semantic_action,
         "matched_input_text": item.matched_input_text,
@@ -71,7 +73,7 @@ def _model_to_read_shape(item: Any) -> dict[str, Any]:
         "description": item.description,
         "confidence": item.confidence,
         "status": item.status.value,
-    }
+    })
 
 
 def test_natural_input_route_matches_unified_pipeline_output(
@@ -81,7 +83,7 @@ def test_natural_input_route_matches_unified_pipeline_output(
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _financial_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
     route_project = _create_project(client, "Route")
     direct_project = _create_project(client, "Direct")
@@ -103,7 +105,7 @@ def test_natural_input_route_matches_unified_pipeline_output(
     assert route_item["canonical_event_type"] == "FINANCIAL_EVENT"
     assert route_item["extracted_amount"] == "200000000.00"
     assert route_item["extracted_entities"][0]["name"] == "میثم"
-    assert route_item["extracted_entities"][0]["type"] == "CLIENT"
+    assert route_item["extracted_entities"][0]["type"] == "OTHER"
 
 
 def test_unified_pipeline_preserves_setup_confirmation_data(

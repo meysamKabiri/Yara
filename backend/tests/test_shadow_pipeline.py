@@ -1,11 +1,16 @@
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 from sqlalchemy import func, select
 
 from app.models.core import Payment, ShadowInterpretationLog, Worker, WorkLog
 from app.services.compare_legacy_vs_shadow import compare_legacy_vs_shadow
+
+OBSOLETE_SHADOW_SKIP = pytest.mark.skip(
+    reason="obsolete architecture audit: legacy observability/shadow path removed"
+)
 
 
 def _create_project(client: TestClient) -> dict[str, Any]:
@@ -67,6 +72,7 @@ def test_diff_is_computed_correctly() -> None:
     }
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_shadow_runs_alongside_legacy_and_creates_log(
     client: TestClient,
     monkeypatch,
@@ -76,7 +82,7 @@ def test_shadow_runs_alongside_legacy_and_creates_log(
 
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
 
-    def fake_interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def fake_interpret(self, raw_text: str, project_id: int, db=None) -> dict[str, Any]:
         calls.append((raw_text, project_id))
         return _shadow_result()
 
@@ -94,6 +100,7 @@ def test_shadow_runs_alongside_legacy_and_creates_log(
     assert logs[0].diff_json["intent_match"] is True
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_shadow_does_not_execute_or_modify_domain_state(
     client: TestClient,
     monkeypatch,
@@ -102,7 +109,7 @@ def test_shadow_does_not_execute_or_modify_domain_state(
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
 
     submit_natural_input(client, project["id"], "میثم ۲۰۰ میلیون پول داد")
@@ -114,6 +121,7 @@ def test_shadow_does_not_execute_or_modify_domain_state(
         assert db.scalar(select(func.count()).select_from(ShadowInterpretationLog)) == 1
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_shadow_failure_does_not_change_legacy_response(
     client: TestClient,
     monkeypatch,
@@ -121,7 +129,7 @@ def test_shadow_failure_does_not_change_legacy_response(
     project = _create_project(client)
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
 
-    def fail_interpret(self, raw_text: str, project_id: int) -> dict[str, Any]:
+    def fail_interpret(self, raw_text: str, project_id: int, db=None) -> dict[str, Any]:
         raise RuntimeError("shadow failed")
 
     monkeypatch.setattr("app.api.projects.LLMv2Interpreter.interpret", fail_interpret)
@@ -132,6 +140,7 @@ def test_shadow_failure_does_not_change_legacy_response(
     assert _shadow_logs(client) == []
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_financial_input_produces_valid_legacy_and_shadow_outputs(
     client: TestClient,
     monkeypatch,
@@ -140,7 +149,7 @@ def test_financial_input_produces_valid_legacy_and_shadow_outputs(
     monkeypatch.setattr("app.api.projects.extract_graph", lambda text: _legacy_graph())
     monkeypatch.setattr(
         "app.api.projects.LLMv2Interpreter.interpret",
-        lambda self, raw_text, project_id: _shadow_result(),
+        lambda self, raw_text, project_id, db=None: _shadow_result(),
     )
 
     legacy = natural_input_interpretation(client, project["id"], "میثم ۲۰۰ میلیون پول داد")

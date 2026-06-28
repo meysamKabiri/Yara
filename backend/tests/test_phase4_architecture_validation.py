@@ -2,6 +2,7 @@ import ast
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
 
@@ -14,6 +15,9 @@ SEMANTIC_ENGINE = ROOT / "app" / "core" / "semantic_rules" / "semantic_rule_engi
 PERSIAN_PAYMENT = ROOT / "app" / "services" / "persian_project_payment.py"
 FRONTEND_APP = ROOT.parent / "frontend" / "src" / "App.tsx"
 FRONTEND_FINANCIAL_MODAL = ROOT.parent / "frontend" / "src" / "ui" / "financial" / "FinancialModal.tsx"
+OBSOLETE_SHADOW_SKIP = pytest.mark.skip(
+    reason="obsolete architecture audit: legacy observability/shadow path removed"
+)
 
 
 def test_semantic_and_persian_hint_layers_do_not_import_financial_write_models() -> None:
@@ -153,6 +157,7 @@ def test_manual_invoice_endpoint_uses_execution_engine(
     assert response.json()["total_amount"] == "5000000.00"
 
 
+@OBSOLETE_SHADOW_SKIP
 def test_legacy_shadow_execution_rolls_back_and_leaves_no_extra_rows(
     client: TestClient,
     monkeypatch,

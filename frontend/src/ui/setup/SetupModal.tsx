@@ -85,9 +85,14 @@ export function SetupModal({
   const canConfirm = name.trim().length > 0;
 
   return (
-    <article className="interpretation-card">
-      <section className="approval-section">
-        <span className="eyebrow">افزودن فرد به پروژه</span>
+    <article className="interpretation-card modal-shell">
+      <header className="modal-header">
+        <div>
+          <h3 className="modal-title">افزودن فرد به پروژه</h3>
+          <p>اطلاعات فرد را بررسی کنید.</p>
+        </div>
+      </header>
+      <section className="approval-section modal-body">
         <div className="setup-edit-list">
           <div className="setup-edit-row">
             <label>
@@ -123,18 +128,20 @@ export function SetupModal({
           </div>
         </div>
       </section>
-      <div className="modal-actions">
-        <button
-          className="primary-action"
-          type="button"
-          onClick={handleConfirm}
-          disabled={isLoading || !canConfirm}
-        >
-          تایید
-        </button>
-        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          حذف
-        </button>
+      <div className="modal-footer">
+        <div className="modal-actions">
+          <button
+            className="primary-action"
+            type="button"
+            onClick={handleConfirm}
+            disabled={isLoading || !canConfirm}
+          >
+            تایید
+          </button>
+          <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+            حذف
+          </button>
+        </div>
       </div>
     </article>
   );

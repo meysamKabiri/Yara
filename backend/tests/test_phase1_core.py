@@ -49,6 +49,18 @@ def confirm_interpretation(client: TestClient, interpretation: dict) -> dict:
         candidates = entities[0].get("candidate_matches") if entities else None
         if candidates:
             payload["selected_person_id"] = candidates[0]["person_id"]
+    if interpretation["semantic_action"] == "WORK_LOG":
+        if interpretation.get("suggested_entity_id") is not None:
+            payload["entity_id"] = interpretation["suggested_entity_id"]
+            payload["confirmed"] = True
+        else:
+            entities = interpretation.get("extracted_entities") or []
+            name = entities[0].get("name") if entities else None
+            payload["create_new"] = True
+            payload["confirmed"] = True
+            if name:
+                payload["name"] = name
+            payload["role"] = "DAILY_WORKER"
     response = client.post(f"/pending-interpretations/{interpretation['id']}/confirm", json=payload)
     assert response.status_code == 200
     body = response.json()
@@ -440,11 +452,163 @@ def test_generate_identity_key_normalizes_name_and_optional_phone() -> None:
 
 def test_entity_normalizer_name_compaction_and_scoring() -> None:
     assert normalize_name("  آقای  میثم\u200c کبیری  ") == "میثم کبیری"
+    assert normalize_name("به ریاحی") == "ریاحی"
+    assert normalize_name("از هادی پور") == "هادی پور"
     assert compact_name("هادی پور سیم") == "هادیپورسیم"
     assert match_score("میثم کبیری", "میثم کبیری") == 1.0
     assert match_score("هادیپور سیم", "هادی پور سیم") == 0.95
+    assert match_score("به ریاحی", "ریاحی") == 1.0
     assert match_score("میثم", "میثم کبیری") == 0.7
     assert match_score("میثم", "رحیم") == 0.0
+
+
+def test_followup_client_payment_uses_existing_client_and_stays_incoming(client: TestClient) -> None:
+    project = create_project(client)
+
+    role_pi = create_interpretation(client, project["id"], "میثم کبیری کارفرمای پروژه است")
+    confirm = client.post(
+        f"/pending-interpretations/{role_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert confirm.status_code == 200
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    client_id = workers[0]["id"]
+    assert workers[0]["name"] == "میثم کبیری"
+    assert workers[0]["type"] == "CLIENT"
+
+    first_payment = create_interpretation(
+        client,
+        project["id"],
+        "میثم کبیری 300 میلیون تومان به حساب پروژه واریز کرد",
+    )
+    assert first_payment["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert first_payment["financial_direction"] == "INCOMING"
+    response = client.post(
+        f"/pending-interpretations/{first_payment['id']}/confirm",
+        json={"entity_id": client_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    followup = create_interpretation(
+        client,
+        project["id"],
+        "میثم 150 میلیون تومان دیگر پرداخت کرد",
+    )
+    assert followup["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert followup["semantic_action"] == "PAYMENT"
+    assert followup["financial_direction"] == "INCOMING"
+    assert followup["suggested_entity_id"] == client_id
+    response = client.post(
+        f"/pending-interpretations/{followup['id']}/confirm",
+        json={"entity_id": client_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    project_detail = client.get(f"/projects/{project['id']}").json()
+    assert project_detail["summary"]["total_received"] == "450000000.00"
+    assert project_detail["summary"]["total_paid_out"] == "0.00"
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert [worker["name"] for worker in workers] == ["میثم کبیری"]
+
+
+def test_persian_honorific_profile_update_does_not_create_latin_duplicate(client: TestClient) -> None:
+    project = create_project(client)
+
+    role_pi = create_interpretation(client, project["id"], "خانم احمدی کارفرمای پروژه است")
+    assert role_pi["extracted_entities"][0]["name"] == "خانم احمدی"
+    response = client.post(
+        f"/pending-interpretations/{role_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    worker_id = workers[0]["id"]
+    assert workers[0]["name"] == "خانم احمدی"
+
+    phone_pi = create_interpretation(client, project["id"], "شماره تماس خانم احمدی 09123334444")
+    entities = phone_pi["extracted_entities"]
+    assert entities[0]["name"] == "خانم احمدی"
+    assert entities[0]["field_updates"]["phone"] == "09123334444"
+    response = client.post(
+        f"/pending-interpretations/{phone_pi['id']}/confirm",
+        json={"entity_id": worker_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["name"] == "خانم احمدی"
+    assert workers[0]["phone"] == "09123334444"
+    assert all("akhmadi" not in worker["name"].lower() for worker in workers)
+
+
+def test_role_qualified_family_name_payment_links_to_worker_not_client(client: TestClient) -> None:
+    project = create_project(client)
+
+    client_pi = create_interpretation(client, project["id"], "آقای کریمی کارفرمای پروژه است")
+    response = client.post(
+        f"/pending-interpretations/{client_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert response.status_code == 200
+
+    worker_pi = create_interpretation(client, project["id"], "کریمی تاسیساتی پروژه است")
+    assert worker_pi["semantic_action"] == "SET_ROLE"
+    assert worker_pi["extracted_entities"][0]["name"] == "کریمی تاسیساتی"
+    assert worker_pi["extracted_entities"][0]["project_role"] == "SKILLED_WORKER"
+    response = client.post(
+        f"/pending-interpretations/{worker_pi['id']}/confirm",
+        json={"create_new": True},
+    )
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    client_worker = next(worker for worker in workers if worker["name"] == "آقای کریمی")
+    skilled_worker = next(worker for worker in workers if worker["name"] == "کریمی تاسیساتی")
+
+    payment_pi = create_interpretation(client, project["id"], "به کریمی تاسیساتی 8 میلیون تومان پرداخت شد")
+    assert payment_pi["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert payment_pi["financial_direction"] == "OUTGOING"
+    assert payment_pi["suggested_entity_id"] == skilled_worker["id"]
+    response = client.post(
+        f"/pending-interpretations/{payment_pi['id']}/confirm",
+        json={"entity_id": skilled_worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    assert len(payments) == 1
+    assert payments[0]["entity_id"] == skilled_worker["id"]
+    assert payments[0]["entity_id"] != client_worker["id"]
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert sorted(worker["name"] for worker in workers) == ["آقای کریمی", "کریمی تاسیساتی"]
+
+
+def test_client_request_sentence_is_note_not_setup(client: TestClient) -> None:
+    project = create_project(client)
+
+    note_pi = create_interpretation(client, project["id"], "کارفرما گفت تابلو باید بزرگ‌تر شود")
+    assert note_pi["canonical_event_type"] == "NOTE_EVENT"
+    assert note_pi["semantic_action"] == "NOTE"
+    assert not note_pi["extracted_entities"]
+
+    response = client.post(
+        f"/pending-interpretations/{note_pi['id']}/confirm",
+        json={"confirmed": True},
+    )
+    assert response.status_code == 200
+
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    project_detail = client.get(f"/projects/{project['id']}").json()
+    assert project_detail["summary"]["total_received"] == "0.00"
+    assert project_detail["summary"]["total_paid_out"] == "0.00"
+    history = client.get(f"/projects/{project['id']}/history").json()
+    assert len(history) == 1
+    assert history[0]["change_type"] == "NOTE"
 
 
 def test_llm_v2_resolve_candidates_ranks_without_premature_partial_binding() -> None:
@@ -1926,6 +2090,99 @@ def test_edit_pending_interpretation_executes_edited_values(
     assert response["payments"][0]["amount"] != "100000000.00"
 
 
+def test_phase2b_pending_financial_does_not_update_totals_until_confirmed(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "علی احمدی", "OTHER")
+
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    assert interpretation["status"] == "PENDING"
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    summary_before = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary_before["total_paid_out"] == "0.00"
+
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+
+    assert response.status_code == 200
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    summary_after = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert payments[0]["amount"] == "5000000.00"
+    assert summary_after["total_paid_out"] == "5000000.00"
+
+
+def test_phase2b_discarded_financial_does_not_update_totals(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "علی احمدی", "OTHER")
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/discard")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "DISCARDED"
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_paid_out"] == "0.00"
+
+
+def test_phase2b_confirm_payload_amount_edit_changes_saved_amount(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "علی احمدی", "OTHER")
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={
+            "entity_id": worker["id"],
+            "confirmed": True,
+            "amount": "7000000",
+            "direction": "OUTGOING",
+            "payment_method": "CASH",
+            "description": "edited amount on confirm",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["payments"][0]["amount"] == "7000000.00"
+    assert body["payments"][0]["amount"] != "5000000.00"
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_paid_out"] == "7000000.00"
+
+
+def test_phase2b_confirm_payload_entity_edit_saves_against_selected_entity(
+    client: TestClient,
+) -> None:
+    project = create_project(client)
+    ali = create_worker(client, project["id"], "علی احمدی", "OTHER")
+    hadi = create_worker(client, project["id"], "هادی پور", "VENDOR")
+    interpretation = natural_input_interpretation(client, project["id"], "به علی احمدی 5 میلیون دادم")
+
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={
+            "entity_id": hadi["id"],
+            "confirmed": True,
+            "amount": "5000000",
+            "direction": "OUTGOING",
+            "payment_method": "CASH",
+        },
+    )
+
+    assert response.status_code == 200
+    payment = response.json()["payments"][0]
+    assert payment["entity_id"] == hadi["id"]
+    assert payment["entity_id"] != ali["id"]
+
+
 def test_multiple_extracted_actions_create_independent_interpretations(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2052,7 +2309,7 @@ def test_firewall_reclassifies_illegal_note_financial_input() -> None:
     assert decision.event.type == CanonicalEventType.FINANCIAL
 
 
-def test_firewall_blocks_known_entity_note_without_action() -> None:
+def test_firewall_allows_known_entity_note_without_side_effect_action() -> None:
     worker = Worker(id=1, project_id=1, name="مش رحیم", type=WorkerType.DAILY_WORKER)
     event = CanonicalEvent(
         type=CanonicalEventType.NOTE,
@@ -2062,8 +2319,10 @@ def test_firewall_blocks_known_entity_note_without_action() -> None:
         metadata={"confidence": 0.3, "source_text": "رحیم"},
     )
 
-    with pytest.raises(SemanticFirewallError):
-        SemanticFirewallService().validate(event, "رحیم", [worker], {})
+    decision = SemanticFirewallService().validate(event, "رحیم", [worker], {})
+
+    assert decision.status == "FIXED"
+    assert decision.event.type == CanonicalEventType.NOTE
 
 
 def test_semantic_rule_engine_defines_all_canonical_events() -> None:
@@ -2362,3 +2621,169 @@ def test_create_new_daily_worker_with_daily_rate(client: TestClient) -> None:
     assert worker is not None
     assert worker["type"] == "DAILY_WORKER"
     assert worker["daily_rate"] == "1200000.00"
+
+
+def test_daily_worker_today_work_creates_work_log_without_payment(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "مش رحیم", "DAILY_WORKER", daily_rate="1200000")
+
+    interpretation = create_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
+
+    assert interpretation["canonical_event_type"] == "WORK_EVENT"
+    assert interpretation["semantic_action"] == "WORK_LOG"
+    assert interpretation["suggested_entity_id"] == worker["id"]
+    assert interpretation["extracted_quantity"] == "1.00"
+
+    before_summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    work_logs = client.get(f"/projects/{project['id']}/work-logs").json()
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    after_summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert len(work_logs) == 1
+    assert work_logs[0]["worker_id"] == worker["id"]
+    assert work_logs[0]["quantity"] == "1.00"
+    assert work_logs[0]["rate_per_unit"] == "1200000.00"
+    assert work_logs[0]["total_amount"] == "1200000.00"
+    assert work_logs[0]["period_label"] == "امروز"
+    assert payments == []
+    assert Decimal(before_summary["total_paid_out"]) == Decimal("0")
+    assert Decimal(after_summary["total_paid_out"]) == Decimal("0")
+    assert after_summary["total_work_amount"] == "1200000.00"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_quantity", "expected_period"),
+    [
+        ("مش رحیم هفته قبل ۴ روز و نصفی کار کرد", "4.50", "هفته قبل"),
+        ("جواد ماه اردیبهشت ۱۵ روز و نیم کار کرده", "15.50", "ماه اردیبهشت"),
+        (
+            "مجید در هفته گذشته روز های شنبه یک شنبه دوشنبه و چهارشنبه نصفه روز و پنج شنبه کار کرد",
+            "4.50",
+            "هفته گذشته",
+        ),
+    ],
+)
+def test_daily_worker_attendance_quantity_patterns(
+    client: TestClient,
+    text: str,
+    expected_quantity: str,
+    expected_period: str,
+) -> None:
+    project = create_project(client)
+    name = text.split()[0] if not text.startswith("مش رحیم") else "مش رحیم"
+    worker = create_worker(client, project["id"], name, "DAILY_WORKER", daily_rate="1000000")
+
+    interpretation = create_interpretation(client, project["id"], text)
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    work_logs = client.get(f"/projects/{project['id']}/work-logs").json()
+    assert len(work_logs) == 1
+    assert work_logs[0]["worker_id"] == worker["id"]
+    assert work_logs[0]["quantity"] == expected_quantity
+    assert work_logs[0]["period_label"] == expected_period
+
+
+def test_multiple_daily_worker_lines_create_separate_work_logs(client: TestClient) -> None:
+    project = create_project(client)
+    akbar = create_worker(client, project["id"], "اکبر", "DAILY_WORKER", daily_rate="1000000")
+    javad = create_worker(client, project["id"], "جواد", "DAILY_WORKER", daily_rate="900000")
+
+    interpretations = natural_input_interpretations(
+        client,
+        project["id"],
+        "اکبر امروز کار کرد\nجواد امروز کار کرد\nجواد دیروز کار کرد",
+    )
+
+    assert len(interpretations) == 3
+    for interpretation in interpretations:
+        entity_id = akbar["id"] if interpretation["extracted_entities"][0]["name"] == "اکبر" else javad["id"]
+        response = client.post(
+            f"/pending-interpretations/{interpretation['id']}/confirm",
+            json={"entity_id": entity_id, "confirmed": True},
+        )
+        assert response.status_code == 200
+
+    work_logs = client.get(f"/projects/{project['id']}/work-logs").json()
+    assert len(work_logs) == 3
+    assert sum(Decimal(log["quantity"]) for log in work_logs if log["worker_id"] == javad["id"]) == Decimal("2.00")
+    assert sum(Decimal(log["quantity"]) for log in work_logs if log["worker_id"] == akbar["id"]) == Decimal("1.00")
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+
+
+def test_daily_worker_work_log_with_missing_rate_has_no_labor_cost(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "اکبر", "DAILY_WORKER")
+
+    interpretation = create_interpretation(client, project["id"], "اکبر امروز کار کرد")
+    response = client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    work_log = client.get(f"/projects/{project['id']}/work-logs").json()[0]
+    assert work_log["quantity"] == "1.00"
+    assert work_log["rate_per_unit"] is None
+    assert work_log["total_amount"] is None
+
+
+def test_discard_daily_worker_work_log_creates_no_work_log(client: TestClient) -> None:
+    project = create_project(client)
+    create_worker(client, project["id"], "اکبر", "DAILY_WORKER")
+
+    interpretation = create_interpretation(client, project["id"], "اکبر امروز کار کرد")
+    response = client.post(f"/pending-interpretations/{interpretation['id']}/discard")
+
+    assert response.status_code == 200
+    assert client.get(f"/projects/{project['id']}/work-logs").json() == []
+
+
+def test_worker_payment_is_separate_from_daily_work_log(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "مش رحیم", "DAILY_WORKER", daily_rate="1200000")
+
+    work = create_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
+    assert client.post(
+        f"/pending-interpretations/{work['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    ).status_code == 200
+    after_work = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    payment = create_interpretation(client, project["id"], "به مش رحیم ۲ میلیون تومان پرداخت شد")
+    assert client.post(
+        f"/pending-interpretations/{payment['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    ).status_code == 200
+    after_payment = client.get(f"/projects/{project['id']}/operating-summary").json()
+
+    assert Decimal(after_work["total_paid_out"]) == Decimal("0")
+    assert after_work["total_work_amount"] == "1200000.00"
+    assert after_payment["total_paid_out"] == "2000000.00"
+    assert after_payment["total_work_amount"] == "1200000.00"
+    assert len(client.get(f"/projects/{project['id']}/work-logs").json()) == 1
+    assert len(client.get(f"/projects/{project['id']}/payments").json()) == 1
+
+
+def test_daily_worker_work_log_exact_match_does_not_duplicate_worker(client: TestClient) -> None:
+    project = create_project(client)
+    worker = create_worker(client, project["id"], "جواد", "DAILY_WORKER", daily_rate="900000")
+
+    interpretation = create_interpretation(client, project["id"], "جواد دیروز کار کرد")
+    assert interpretation["suggested_entity_id"] == worker["id"]
+    assert client.post(
+        f"/pending-interpretations/{interpretation['id']}/confirm",
+        json={"entity_id": worker["id"], "confirmed": True},
+    ).status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert [item["name"] for item in workers] == ["جواد"]

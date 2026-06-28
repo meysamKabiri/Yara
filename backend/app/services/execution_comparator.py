@@ -2,7 +2,6 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.core.trace_events import TraceEvent, trace_event
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +21,6 @@ class ExecutionComparator:
         self._compare_invoice(differences, old["invoices"], new["invoices"])
 
         result = {"matches": not differences, "differences": differences}
-        trace_event(
-            TraceEvent.SHADOW_COMPARISON_DONE,
-            {
-                "matches": result["matches"],
-                "differences": differences,
-            },
-        )
         if differences:
             logger.info("execution_engine_shadow_mismatch", extra={"comparison": result})
         else:

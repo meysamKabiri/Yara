@@ -47,6 +47,13 @@ ROLE_PHRASES: list[RolePhrase] = [
     # Skilled worker roles (trade-specific)
     RolePhrase("جوشکار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("برقکار", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("برق کار", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("لوله کش", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("تاسیساتی", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("نقاش", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("کابینت کار", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("کناف کار", WorkerType.SKILLED_WORKER, priority=7),
+    RolePhrase("نما کار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("گچ کار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("رنگ کار", WorkerType.SKILLED_WORKER, priority=7),
     RolePhrase("سرامیک کار", WorkerType.SKILLED_WORKER, priority=7),
@@ -61,17 +68,22 @@ ROLE_PHRASES: list[RolePhrase] = [
 
 # Filler words to remove from extracted names
 FILLER_WORDS: list[str] = [
+    "شماره تماس",
+    "شماره موبایل",
     "است",
     "هست",
     "می باشد",
     "می‌باشد",
     "در پروژه",
+    "به پروژه اضافه شد",
+    "اضافه شد",
     "به عنوان",
     "پروژه",
     "ما",
     "این",
     "شماره",
-    "شماره تماس",
+    "تماس",
+    "موبایل",
 ]
 
 
@@ -138,7 +150,8 @@ class PersianRoleExtractor:
                 text_without_role = re.sub(pattern, " ", text_without_role)
 
         # Clean up whitespace
-        name = re.sub(r"\s+", " ", text_without_role).strip()
+        name = re.sub(r"[.،,؛:]+", " ", text_without_role)
+        name = re.sub(r"\s+", " ", name).strip()
 
         # Filter out empty or too-short names
         if not name or len(name) < 2:

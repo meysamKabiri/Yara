@@ -154,14 +154,22 @@ class EntityRegistryService:
                 worker.type = entity_type
             return worker
 
-        duplicate_match = self.find_by_partial_match(name)
-        if duplicate_match is not None:
-            return duplicate_match
+        if not self._has_disambiguating_role_qualifier(name):
+            duplicate_match = self.find_by_partial_match(name)
+            if duplicate_match is not None:
+                return duplicate_match
 
         worker = Worker(project_id=self.project_id, name=name, type=entity_type)
         self.db.add(worker)
         self.db.flush()
         return worker
+
+    def _has_disambiguating_role_qualifier(self, name: str) -> bool:
+        normalized = self._normalize_name(name)
+        qualifiers = {
+            "تاسیساتی",
+        }
+        return any(qualifier in normalized for qualifier in qualifiers)
 
     def _entity_type(self, value: Any) -> WorkerType:
         if value == "CLIENT":

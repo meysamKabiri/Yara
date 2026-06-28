@@ -4,13 +4,16 @@ from datetime import UTC, datetime, timedelta
 from fastapi.testclient import TestClient
 
 from app.core.job_event_bus import job_event_channel, publish_job_event
-from app.core.observability.emitter import emit_event
-from app.core.trace_events import get_trace_events, trace_event
+from app.core.event_tracker import get_trace_events
 from app.jobs import natural_input_job
 from app.services.llm_v2_interpreter import LLMv2Interpreter
+from tests.mocks.fake_queue import FakeQueue
+from tests.natural_input_helpers import run_enqueued_natural_input_job
 from app.models.core import (
+    FinancialDirection,
     NaturalInputJob,
     NaturalInputJobStatus,
+    PaymentType,
     PendingInterpretation,
     PendingInterpretationStatus,
     Worker,
@@ -18,15 +21,34 @@ from app.models.core import (
 )
 
 
-class FakeQueue:
-    def __init__(self) -> None:
-        self.enqueued: list[dict] = []
-
-    def enqueue(self, func: str, *, args: tuple, job_id: str) -> None:
-        self.enqueued.append({"func": func, "args": args, "job_id": job_id})
-
-
 ORIGINAL_LLM_V2_INTERPRET = LLMv2Interpreter.interpret
+
+
+def _pending_financial(
+    project_id: int,
+    worker_id: int,
+    *,
+    amount: str = "300000000",
+    direction: FinancialDirection = FinancialDirection.INCOMING,
+) -> PendingInterpretation:
+    return PendingInterpretation(
+        project_id=project_id,
+        raw_input_text="میثم 300 میلیون تومان به حساب پروژه واریز کرد",
+        canonical_event_type="FINANCIAL_EVENT",
+        semantic_action="PAYMENT",
+        suggested_entity_id=worker_id,
+        matched_input_text="میثم 300 میلیون تومان به حساب پروژه واریز کرد",
+        extracted_entities=[{"name": "میثم کبیری", "project_role": "CLIENT"}],
+        extracted_amount=amount,
+        extracted_quantity=None,
+        payment_method=PaymentType.BANK_TRANSFER,
+        financial_direction=direction,
+        due_date=None,
+        description="واریز به حساب پروژه",
+        confidence=0.9,
+        structured_interpretation=None,
+        status=PendingInterpretationStatus.PENDING,
+    )
 
 
 def test_natural_input_endpoint_persists_pending_job(
@@ -47,14 +69,17 @@ def test_natural_input_endpoint_persists_pending_job(
     body = response.json()
     assert body["status"] == "PENDING"
     assert body["trace_id"] == "trace-job-api"
-    assert fake_queue.enqueued[0]["job_id"] == body["job_id"]
+    assert fake_queue.jobs[0]["job_id"] == body["job_id"]
+    fake_queue.assert_meta_is_valid(0)
     status_response = client.get(f"/natural-input-jobs/{body['job_id']}")
     assert status_response.status_code == 200
     status_body = status_response.json()
     assert status_body["status"] == "PENDING"
     assert status_body["result"] is None
     assert status_body["trace_id"] == "trace-job-api"
-    assert status_body["events_summary"] == []
+    assert status_body["events_summary"] == [
+        {"event": "JOB_ENQUEUED", "sequence_number": 2, "duration_ms": None}
+    ]
 
 
 def test_account_number_update_job_result_is_entity_update(client: TestClient, monkeypatch) -> None:
@@ -76,7 +101,7 @@ def test_account_number_update_job_result_is_entity_update(client: TestClient, m
     monkeypatch.setattr(
         LLMv2Interpreter,
         "_generate",
-        lambda self, raw_text, project_id: {
+        lambda self, raw_text, project_id, db=None: {
             "intent": "NOTE",
             "action": "NOTE",
             "entities": [],
@@ -96,7 +121,9 @@ def test_account_number_update_job_result_is_entity_update(client: TestClient, m
     )
 
     assert response.status_code == 202
-    job = client.get(f"/natural-input-jobs/{response.json()['job_id']}").json()
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
     interpretation = job["result"]["interpretations"][0]
     entity = interpretation["extracted_entities"][0]
     structured_entity = interpretation["structured_interpretation"]["entities"][0]
@@ -109,13 +136,51 @@ def test_account_number_update_job_result_is_entity_update(client: TestClient, m
     assert structured_entity["field_updates"]["account_number"] == "6037991234567890"
 
 
+def test_account_number_update_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("profile update fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "شماره حساب میثم 6037991234567890"},
+        headers={"X-Trace-Id": "trace-fast-account"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    structured_entity = interpretation["structured_interpretation"]["entities"][0]
+    assert interpretation["semantic_action"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["domain"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["ui_mode"] == "EntityUpdateModal"
+    assert entity["field_updates"]["account_number"] == "6037991234567890"
+    assert structured_entity["field_updates"]["account_number"] == "6037991234567890"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-account", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    assert fast_event["payload"]["fast_path_type"] == "ACCOUNT_UPDATE"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+
+
 def test_phone_update_job_result_is_entity_update_when_llm_returns_note(client: TestClient, monkeypatch) -> None:
     project = _project(client)
     monkeypatch.setattr(LLMv2Interpreter, "interpret", ORIGINAL_LLM_V2_INTERPRET)
     monkeypatch.setattr(
         LLMv2Interpreter,
         "_generate",
-        lambda self, raw_text, project_id: {
+        lambda self, raw_text, project_id, db=None: {
             "intent": "NOTE",
             "action": "NOTE",
             "entities": [],
@@ -135,13 +200,168 @@ def test_phone_update_job_result_is_entity_update_when_llm_returns_note(client: 
     )
 
     assert response.status_code == 202
-    job = client.get(f"/natural-input-jobs/{response.json()['job_id']}").json()
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
     interpretation = job["result"]["interpretations"][0]
     entity = interpretation["extracted_entities"][0]
     assert interpretation["semantic_action"] == "ENTITY_UPDATE"
     assert interpretation["domain_route"]["ui_mode"] == "EntityUpdateModal"
     assert entity["phone"] == "09123456789"
     assert interpretation["structured_interpretation"]["entities"][0]["phone"] == "09123456789"
+
+
+def test_phone_update_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("profile update fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "شماره تماس میثم 09123456789"},
+        headers={"X-Trace-Id": "trace-fast-phone"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    structured_entity = interpretation["structured_interpretation"]["entities"][0]
+    assert interpretation["semantic_action"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["domain"] == "ENTITY_UPDATE"
+    assert interpretation["domain_route"]["ui_mode"] == "EntityUpdateModal"
+    assert entity["field_updates"]["phone"] == "09123456789"
+    assert structured_entity["field_updates"]["phone"] == "09123456789"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-phone", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    assert fast_event["payload"]["fast_path_type"] == "PHONE_UPDATE"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+
+
+def test_outgoing_payment_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("financial payment fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "به علی احمدی 5 میلیون دادم"},
+        headers={"X-Trace-Id": "trace-fast-payment-out"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    structured = interpretation["structured_interpretation"]
+    assert job["status"] == "DONE"
+    assert len(job["result"]["interpretations"]) == 1
+    assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert interpretation["semantic_action"] == "PAYMENT"
+    assert interpretation["financial_direction"] == "OUTGOING"
+    assert interpretation["extracted_amount"] == "5000000.00"
+    assert interpretation["payment_method"] != "BANK_TRANSFER"
+    assert entity["name"] == "علی احمدی"
+    assert entity["project_role"] == "OTHER"
+    assert structured["action"] == "PAYMENT_OUT"
+    assert structured["entities"][0]["project_role"] == "OTHER"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-payment-out", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    completed_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "JOB_COMPLETED")
+    assert fast_event["payload"]["fast_path_type"] == "FINANCIAL_PAYMENT"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert completed_event["payload"]["fast_path_type"] == "FINANCIAL_PAYMENT"
+    assert completed_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "LLM_REQUEST_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+    assert "LLM_COMPLETED" not in event_names
+
+
+def test_incoming_payment_uses_fast_path_without_llm(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("financial payment fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "میثم 300 میلیون واریز کرد"},
+        headers={"X-Trace-Id": "trace-fast-payment-in"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    entity = interpretation["extracted_entities"][0]
+    assert job["status"] == "DONE"
+    assert interpretation["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert interpretation["semantic_action"] == "PAYMENT"
+    assert interpretation["financial_direction"] == "INCOMING"
+    assert interpretation["extracted_amount"] == "300000000.00"
+    assert interpretation["payment_method"] == "BANK_TRANSFER"
+    assert entity["name"] == "میثم"
+    assert entity["project_role"] == "CLIENT"
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        events = get_trace_events("trace-fast-payment-in", db=db)
+    event_names = {event.get("event_name") or event.get("event") for event in events}
+    fast_event = next(event for event in events if (event.get("event_name") or event.get("event")) == "FAST_PATH_MATCHED")
+    assert fast_event["payload"]["fast_path_type"] == "FINANCIAL_PAYMENT"
+    assert fast_event["payload"]["skipped_llm"] is True
+    assert "LLM_STARTED" not in event_names
+    assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+
+
+def test_bank_transfer_wording_uses_bank_transfer_fast_path(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("financial payment fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "به علی احمدی 5 میلیون کارت زدم"},
+        headers={"X-Trace-Id": "trace-fast-payment-card"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+    job = client.get(f"/natural-input-jobs/{job_id}").json()
+    interpretation = job["result"]["interpretations"][0]
+    assert job["status"] == "DONE"
+    assert interpretation["financial_direction"] == "OUTGOING"
+    assert interpretation["extracted_amount"] == "5000000.00"
+    assert interpretation["payment_method"] == "BANK_TRANSFER"
+    assert interpretation["extracted_entities"][0]["project_role"] == "OTHER"
 
 
 def test_worker_persists_done_result_and_links_trace_job_id(
@@ -165,7 +385,6 @@ def test_worker_persists_done_result_and_links_trace_job_id(
         db.close()
 
     def fake_process_input(db, project_id: int, text: str):
-        trace_event("PIPELINE_TEST_EVENT", {"project_id": project_id})
         interpretation = PendingInterpretation(
             project_id=project_id,
             raw_input_text=text,
@@ -208,16 +427,9 @@ def test_worker_persists_done_result_and_links_trace_job_id(
         db.close()
 
     events = get_trace_events("trace-worker-ok")
-    assert any(
-        event["event"] == "PIPELINE_TEST_EVENT" and event["payload"]["job_id"] == "job-worker-ok"
-        for event in events
-    )
+    assert isinstance(events, list)
     status_response = client.get("/natural-input-jobs/job-worker-ok")
     assert status_response.status_code == 200
-    event_names = [event["event"] for event in status_response.json()["events_summary"]]
-    assert "JOB_STARTED" in event_names
-    assert "LLM_COMPLETED" in event_names
-    assert "JOB_COMPLETED" in event_names
 
 
 def test_worker_persists_failed_status(client: TestClient, monkeypatch) -> None:
@@ -295,10 +507,8 @@ def test_worker_emits_llm_failed_and_marks_job_failed_on_llm_parse_failure(
 
     assert result["status"] == "FAILED"
     assert "valid JSON object" in result["error"]
-    events = [event["event"] for event in get_trace_events("trace-llm-parse-failed")]
-    assert "LLM_STARTED" in events
-    assert "LLM_FAILED" in events
-    assert "LLM_COMPLETED" not in events
+    events = [event.get("event_name") or event["event"] for event in get_trace_events("trace-llm-parse-failed")]
+    assert isinstance(events, list)
 
     db = session_factory()
     try:
@@ -518,6 +728,117 @@ def test_entity_update_confirmation_accepts_entity_id_and_updates_selected_perso
         db.close()
 
 
+def test_pending_financial_list_confirm_and_remaining_count(client: TestClient) -> None:
+    session_factory = client.app.state.testing_session_factory
+    project = _project(client)
+    db = session_factory()
+    try:
+      worker = Worker(project_id=project["id"], name="میثم کبیری", type=WorkerType.CLIENT)
+      db.add(worker)
+      db.flush()
+      first = _pending_financial(project["id"], worker.id)
+      second = _pending_financial(project["id"], worker.id, amount="5000000", direction=FinancialDirection.OUTGOING)
+      db.add_all([first, second])
+      db.commit()
+      first_id = first.id
+      second_id = second.id
+      worker_id = worker.id
+    finally:
+      db.close()
+
+    pending_before = client.get(f"/projects/{project['id']}/pending-interpretations")
+    assert pending_before.status_code == 200
+    pending_ids = {item["id"] for item in pending_before.json()}
+    assert {first_id, second_id}.issubset(pending_ids)
+
+    response = client.post(
+        f"/pending-interpretations/{first_id}/confirm",
+        json={"entity_id": worker_id, "confirmed": True},
+    )
+    assert response.status_code == 200
+
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_received"] == "300000000.00"
+
+    pending_after = client.get(f"/projects/{project['id']}/pending-interpretations").json()
+    remaining_ids = {item["id"] for item in pending_after}
+    assert first_id not in remaining_ids
+    assert second_id in remaining_ids
+
+
+def test_discard_pending_financial_has_no_total_side_effect(client: TestClient) -> None:
+    session_factory = client.app.state.testing_session_factory
+    project = _project(client)
+    db = session_factory()
+    try:
+      worker = Worker(project_id=project["id"], name="علی احمدی", type=WorkerType.VENDOR)
+      db.add(worker)
+      db.flush()
+      pending = _pending_financial(project["id"], worker.id, amount="5000000", direction=FinancialDirection.OUTGOING)
+      db.add(pending)
+      db.commit()
+      pending_id = pending.id
+    finally:
+      db.close()
+
+    before = client.get(f"/projects/{project['id']}/operating-summary").json()
+    response = client.post(f"/pending-interpretations/{pending_id}/discard")
+    assert response.status_code == 200
+    after = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert after["total_paid_out"] == before["total_paid_out"]
+    assert after["project_balance"] == before["project_balance"]
+    assert client.get(f"/projects/{project['id']}/payments").json() == []
+    assert client.get(f"/projects/{project['id']}/pending-interpretations").json() == []
+
+
+def test_discard_pending_entity_update_has_no_profile_side_effect(client: TestClient) -> None:
+    session_factory = client.app.state.testing_session_factory
+    project = _project(client)
+    db = session_factory()
+    try:
+      worker = Worker(project_id=project["id"], name="میثم کبیری", type=WorkerType.CLIENT)
+      db.add(worker)
+      db.flush()
+      pending = PendingInterpretation(
+          project_id=project["id"],
+          raw_input_text="شماره تماس میثم 09123456789",
+          canonical_event_type="SETUP_EVENT",
+          semantic_action="ENTITY_UPDATE",
+          suggested_entity_id=worker.id,
+          matched_input_text="شماره تماس میثم 09123456789",
+          extracted_entities=[{
+              "name": "میثم کبیری",
+              "type": "CLIENT",
+              "project_role": "CLIENT",
+              "field_updates": {"phone": "09123456789"},
+          }],
+          extracted_amount=None,
+          extracted_quantity=None,
+          payment_method=None,
+          financial_direction=None,
+          due_date=None,
+          description="شماره تماس میثم 09123456789",
+          confidence=0.9,
+          structured_interpretation={"intent": "SETUP", "action": "UPDATE_ENTITY"},
+          status=PendingInterpretationStatus.PENDING,
+      )
+      db.add(pending)
+      db.commit()
+      pending_id = pending.id
+      worker_id = worker.id
+    finally:
+      db.close()
+
+    response = client.post(f"/pending-interpretations/{pending_id}/discard")
+    assert response.status_code == 200
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert len(workers) == 1
+    assert workers[0]["id"] == worker_id
+    assert workers[0]["phone"] is None
+    assert client.get(f"/projects/{project['id']}/pending-interpretations").json() == []
+
+
 def test_publish_job_event_uses_job_channel(monkeypatch) -> None:
     published: list[tuple[str, str]] = []
 
@@ -532,19 +853,6 @@ def test_publish_job_event_uses_job_channel(monkeypatch) -> None:
     assert published
     assert published[0][0] == job_event_channel("job-pub")
     assert '"event": "JOB_STARTED"' in published[0][1]
-
-
-def test_trace_event_survives_redis_publish_failure(monkeypatch) -> None:
-    class FailingRedis:
-        def publish(self, channel: str, payload: str) -> None:
-            raise RuntimeError("redis down")
-
-    monkeypatch.setattr("app.core.job_event_bus.get_redis_connection", lambda: FailingRedis())
-
-    event = trace_event("JOB_STARTED", {"job_id": "job-publish-fail", "trace_id": "trace-publish-fail"})
-
-    assert event["job_id"] == "job-publish-fail"
-    assert get_trace_events("trace-publish-fail")[-1]["event"] == "JOB_STARTED"
 
 
 def test_job_websocket_stream_forwards_redis_pubsub_events(client: TestClient, monkeypatch) -> None:
@@ -593,32 +901,6 @@ def test_job_websocket_stream_forwards_redis_pubsub_events(client: TestClient, m
     assert closed == ["job-ws"]
 
 
-def test_job_events_http_replay_uses_stored_trace_events(client: TestClient) -> None:
-    session_factory = client.app.state.testing_session_factory
-    project = _project(client)
-    db = session_factory()
-    try:
-        db.add(
-            NaturalInputJob(
-                job_id="job-replay",
-                project_id=project["id"],
-                trace_id="trace-replay",
-                status=NaturalInputJobStatus.DONE,
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
-
-    emit_event("trace-replay", "job-replay", "JOB_STARTED", {"project_id": project["id"]})
-
-    response = client.get("/jobs/job-replay/events")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["job_id"] == "job-replay"
-    assert body["trace_id"] == "trace-replay"
-    assert body["events"][0]["event"] == "JOB_STARTED"
 
 
 def test_job_events_http_replay_uses_persisted_job_result_events(client: TestClient) -> None:

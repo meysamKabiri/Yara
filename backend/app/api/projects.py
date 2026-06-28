@@ -1,20 +1,23 @@
 import logging
 import os
 import re
+import csv
+from io import StringIO
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Response, status
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
+from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
+from app.core.observability_service import track_event, track_timed_event
 from app.core.queue import get_queue
-from app.core.observability.emitter import persist_job_event
 from app.core.trace_context import get_trace_id
-from app.core.trace_events import TraceEvent, get_trace_events, trace_error, trace_event
 from app.dependencies.database import DbSession
 from app.models.core import (
     CounterpartyType,
@@ -51,19 +54,26 @@ from app.schemas.projects import (
     HistoryEntryRead,
     InvoiceCreate,
     InvoiceRead,
+    InvoiceUpdate,
     NaturalInputCreate,
     NaturalInputResult,
     PaymentCreate,
     PaymentRead,
+    PaymentUpdate,
     PendingInterpretationConfirm,
     PendingInterpretationRead,
     PendingInterpretationUpdate,
     ProjectCreate,
     ProjectDetail,
+    ProjectDetailWithSummary,
     ProjectRead,
+    ProjectSummary,
     ProjectTotals,
+    ProjectUpdate,
     RawEntryCreate,
     RawEntryRead,
+    NoteUpdate,
+    VoidPayload,
     WorkerCreate,
     WorkerRead,
     WorkerStateRead,
@@ -96,6 +106,7 @@ from app.services.persian_project_payment import (
     detect_purchase_payment,
 )
 from app.services.persian_role_extractor import PersianRoleExtractor
+from app.services.reporting_service import project_report_summary
 from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
@@ -124,6 +135,82 @@ def _get_project(db: DbSession, project_id: int) -> Project:
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
         )
     return project
+
+
+ROLE_LABELS = {
+    WorkerType.CLIENT: "کارفرما",
+    WorkerType.DAILY_WORKER: "کارگر روزمزد",
+    WorkerType.SKILLED_WORKER: "نیروی متخصص",
+    WorkerType.VENDOR: "فروشنده / تامین‌کننده",
+    WorkerType.OTHER: "سایر",
+}
+
+DIRECTION_LABELS = {
+    FinancialDirection.INCOMING: "دریافتی",
+    FinancialDirection.OUTGOING: "پرداختی",
+    FinancialDirection.DEFERRED: "پرداخت مدت‌دار",
+    FinancialDirection.DEBT: "بدهی پرداخت‌نشده",
+}
+
+PAYMENT_TYPE_LABELS = {
+    PaymentType.CASH: "نقدی",
+    PaymentType.BANK_TRANSFER: "انتقال بانکی",
+    PaymentType.CHECK: "چک",
+    PaymentType.OTHER: "سایر",
+}
+
+PAYABLE_KIND_LABELS = {
+    "vendor_payable": "بدهی فروشنده",
+    "deferred_check": "چک / مدت‌دار",
+    "worker_labor": "مانده کارگر",
+}
+
+
+def _csv_response(filename: str, headers: list[str], rows: list[list[Any]]) -> Response:
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    content = "\ufeff" + buffer.getvalue()
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _decimal_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(Decimal(str(value)))
+
+
+def _datetime_text(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def _date_range_bounds(
+    from_date: date | None,
+    to_date: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="from_date must be before or equal to to_date",
+        )
+    return (
+        datetime.combine(from_date, time.min) if from_date else None,
+        datetime.combine(to_date, time.max) if to_date else None,
+    )
+
+
+def _apply_datetime_range(statement, column, from_date: date | None, to_date: date | None):
+    start_at, end_at = _date_range_bounds(from_date, to_date)
+    if start_at is not None:
+        statement = statement.where(column >= start_at)
+    if end_at is not None:
+        statement = statement.where(column <= end_at)
+    return statement
 
 
 def _get_raw_entry(db: DbSession, project_id: int, raw_entry_id: int) -> RawEntry:
@@ -163,6 +250,15 @@ def _get_work_log(db: DbSession, work_log_id: int) -> WorkLog:
     return work_log
 
 
+def _get_project_work_log(db: DbSession, project_id: int, work_log_id: int) -> WorkLog:
+    work_log = _get_work_log(db, work_log_id)
+    if work_log.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Work log not found"
+        )
+    return work_log
+
+
 def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.project_id != project_id:
@@ -170,6 +266,43 @@ def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
             status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found"
         )
     return invoice
+
+
+def _get_payment(db: DbSession, project_id: int, payment_id: int) -> Payment:
+    payment = db.get(Payment, payment_id)
+    if payment is None or payment.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found"
+        )
+    return payment
+
+
+def _get_note(db: DbSession, project_id: int, note_id: int) -> HistoryEntry:
+    note = db.get(HistoryEntry, note_id)
+    if note is None or note.project_id != project_id or note.change_type != HistoryChangeType.NOTE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Note not found"
+        )
+    return note
+
+
+def _ensure_not_voided(record: Any) -> None:
+    if getattr(record, "is_voided", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Voided records cannot be corrected",
+        )
+
+
+def _void_record(record: Any, reason: str | None) -> None:
+    if getattr(record, "is_voided", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Record is already voided",
+        )
+    record.is_voided = True
+    record.void_reason = reason
+    record.voided_at = datetime.now(UTC)
 
 
 def _require_pending(event: ExtractedEvent) -> None:
@@ -196,8 +329,35 @@ def _project_totals(db: DbSession, project_id: int) -> ProjectTotals:
             money_in += event.amount
         elif event.type in {ExtractedEventType.MONEY_OUT, ExtractedEventType.PURCHASE}:
             money_out += event.amount
+    payments = db.scalars(
+        select(Payment).where(Payment.project_id == project_id, Payment.is_voided == False)
+    ).all()
+    for payment in payments:
+        if payment.direction == FinancialDirection.INCOMING:
+            money_in += payment.amount
+        elif payment.direction == FinancialDirection.OUTGOING:
+            money_out += payment.amount
     return ProjectTotals(
         money_in=money_in, money_out=money_out, net=money_in - money_out
+    )
+
+
+def _project_summary(db: DbSession, project_id: int) -> ProjectSummary:
+    from app.services.financial_summary import project_operating_summary
+    raw = project_operating_summary(db, project_id)
+    return ProjectSummary(
+        total_received=Decimal(str(raw["total_received"])),
+        total_paid_out=Decimal(str(raw["total_paid_out"])),
+        open_payables=Decimal(str(raw["open_payables"])),
+        deferred_amount=Decimal(str(raw.get("deferred_amount", "0"))),
+        check_amount=Decimal(str(raw.get("check_amount", "0"))),
+        project_balance=Decimal(str(raw["project_balance"])),
+        available_balance=Decimal(str(raw["available_balance"])),
+        total_work_amount=Decimal(str(raw["total_work_amount"])),
+        total_invoice_amount=Decimal(str(raw["total_invoice_amount"])),
+        client_receivable=Decimal(str(raw["client_receivable"])),
+        vendor_debts=raw.get("vendor_debts", []),
+        worker_payables=raw.get("worker_payables", []),
     )
 
 
@@ -540,7 +700,7 @@ def _build_pending_interpretations(
         elif effective_action == "PURCHASE_PAID":
             payment_method = PaymentType.CASH.value
         elif effective_type == CanonicalEventType.FINANCIAL:
-            payment_method = PaymentType.BANK_TRANSFER.value
+            payment_method = _financial_payment_method_from_text(raw_text)
         incoming_project_payment = (
             detect_incoming_project_payment(raw_text)
             if effective_type == CanonicalEventType.FINANCIAL
@@ -648,12 +808,41 @@ def _draft_entities(
         if parsed_setup_entities:
             return parsed_setup_entities
     entity_name = canonical_event.entity_name or _graph_entity_name(graph)
+    if entity_name is None and canonical_event.type == CanonicalEventType.FINANCIAL:
+        entity_name = _plain_outgoing_payment_counterparty_name(raw_text)
     if entity_name is None:
         return []
     role_guess = _graph_role_guess(graph)
     if role_guess is None and canonical_event.type == CanonicalEventType.FINANCIAL:
         role_guess = _pending_financial_role_guess(raw_text, canonical_event.action)
     return [_pending_entity_dict(entity_name, role_guess or "OTHER")]
+
+
+def _financial_payment_method_from_text(raw_text: str) -> str:
+    normalized = normalize_text(raw_text)
+    bank_signals = ["حساب", "کارت", "واریز", "انتقال", "بانکی"]
+    if any(signal in normalized for signal in bank_signals):
+        return PaymentType.BANK_TRANSFER.value
+    if any(signal in normalized for signal in ["چک", "سفته"]):
+        return PaymentType.CHECK.value
+    return PaymentType.CASH.value
+
+
+def _plain_outgoing_payment_counterparty_name(raw_text: str) -> str | None:
+    normalized = normalize_text(raw_text)
+    if not any(verb in normalized for verb in ["دادم", "پرداخت کردم", "پرداختم"]):
+        return None
+    if any(signal in normalized for signal in ["خرید", "خریدم", "واریز", "حساب پروژه"]):
+        return None
+
+    match = re.search(
+        r"\bبه\s+(?P<name>.+?)\s+(?:\d|[۰-۹]|[٠-٩]|یک|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|صد|هزار|میلیون|میلیارد)",
+        normalized,
+    )
+    if match is None:
+        return None
+    name = re.sub(r"\s+", " ", match.group("name")).strip(" ،,")
+    return name or None
 
 
 def _pending_financial_role_guess(raw_text: str, action: str) -> str | None:
@@ -669,7 +858,17 @@ def _purchase_has_debt_or_check_terms(raw_text: str) -> bool:
     normalized = normalize_text(raw_text)
     return any(
         phrase in normalized
-        for phrase in ["نسیه", "ندادم", "هنوز ندادم", "چک", "فاکتور", "بدهی"]
+        for phrase in [
+            "نسیه",
+            "ندادم",
+            "هنوز ندادم",
+            "پرداخت نشده",
+            "هنوز پرداخت نشده",
+            "تسویه نشده",
+            "چک",
+            "فاکتور",
+            "بدهی",
+        ]
     )
 
 
@@ -982,10 +1181,11 @@ def _correction_value(value: Any) -> str | int | float | None:
     "/projects", response_model=ProjectRead, status_code=status.HTTP_201_CREATED
 )
 def create_project(payload: ProjectCreate, db: DbSession) -> Project:
-    project = Project(name=payload.name)
+    project = Project(name=payload.name, description=payload.description)
     db.add(project)
     db.commit()
     db.refresh(project)
+    track_event(db=db, event_name="db.project_created", payload={"project_id": project.id, "name": project.name})
     return project
 
 
@@ -998,12 +1198,28 @@ def list_projects(db: DbSession) -> list[Project]:
     )
 
 
-@router.get("/projects/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: int, db: DbSession) -> ProjectDetail:
+@router.patch("/projects/{project_id}", response_model=ProjectRead)
+def update_project(project_id: int, payload: ProjectUpdate, db: DbSession) -> Project:
     project = _get_project(db, project_id)
-    return ProjectDetail(
+    project.name = payload.name
+    project.description = payload.description
+    db.commit()
+    db.refresh(project)
+    track_event(
+        db=db,
+        event_name="db.project_updated",
+        payload={"project_id": project.id, "name": project.name},
+    )
+    return project
+
+
+@router.get("/projects/{project_id}", response_model=ProjectDetailWithSummary)
+def get_project(project_id: int, db: DbSession) -> ProjectDetailWithSummary:
+    project = _get_project(db, project_id)
+    return ProjectDetailWithSummary(
         **ProjectRead.model_validate(project).model_dump(),
         totals=_project_totals(db, project_id),
+        summary=_project_summary(db, project_id),
     )
 
 
@@ -1056,11 +1272,7 @@ def process_natural_input(
     )
     db.add(job)
     db.commit()
-    created_event = trace_event(
-        "JOB_CREATED",
-        {"job_id": job_id, "trace_id": trace_id, "project_id": project_id, "dedupe_key": "job-created"},
-    )
-    persist_job_event(job_id, created_event)
+    track_event(db=db, event_name="db.job_created", payload={"job_id": job_id, "project_id": project_id})
 
     queue = get_queue()
     try:
@@ -1068,16 +1280,19 @@ def process_natural_input(
             "app.jobs.natural_input_job.process_natural_input_job",
             args=(job_id, project_id, payload.text),
             job_id=job_id,
+            meta={"trace_id": trace_id},
         )
     except Exception as exc:
         job.status = NaturalInputJobStatus.FAILED
         job.error = str(exc)
         db.commit()
+        track_event(db=db, event_name="db.job_enqueue_failed", payload={"job_id": job_id, "error": str(exc)})
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to enqueue natural input job",
         ) from exc
 
+    track_event(db=db, event_name="db.job_enqueued", payload={"job_id": job_id, "project_id": project_id})
     return {"job_id": job_id, "status": "PENDING", "trace_id": trace_id}
 
 
@@ -1093,7 +1308,7 @@ def get_natural_input_job(job_id: str, db: DbSession) -> dict[str, Any]:
     response: dict[str, Any] = {
         "job_id": job.job_id,
         "status": job.status.value if hasattr(job.status, "value") else job.status,
-        "result": job.result,
+        "result": normalize_outgoing_payment_roles_in_result(job.result),
         "trace_id": job.trace_id,
         "events_summary": _job_events_summary(job),
     }
@@ -1125,16 +1340,14 @@ def get_natural_input_job_events(job_id: str, db: DbSession) -> dict[str, Any]:
             detail="Job not found",
         )
     events = _job_persisted_events(job)
-    if not events:
-        events = [
-            event
-            for event in get_trace_events(job.trace_id)
-            if event.get("job_id") == job.job_id or event.get("payload", {}).get("job_id") == job.job_id
-        ]
+    if not events and job.trace_id is not None:
+        from app.core.event_tracker import get_trace_events
+
+        events = get_trace_events(job.trace_id, db=db)
     return {
         "job_id": job.job_id,
         "trace_id": job.trace_id,
-        "events": sorted(events, key=lambda event: event.get("sequence_number", 0)),
+        "events": sorted(events, key=lambda event: event.get("event_index", event.get("sequence_number", 0))),
     }
 
 
@@ -1160,14 +1373,14 @@ def mark_stale_natural_input_jobs_failed(
         previous_status = job.status.value if hasattr(job.status, "value") else job.status
         job.status = NaturalInputJobStatus.FAILED
         job.error = job.error or "Job expired or worker stopped before completion"
-        trace_event(
-            "JOB_EXPIRED",
-            {
+        track_event(
+            db=db,
+            trace_id=job.trace_id,
+            event_name="JOB_EXPIRED",
+            payload={
                 "job_id": job.job_id,
-                "trace_id": job.trace_id,
                 "project_id": job.project_id,
                 "previous_status": previous_status,
-                "dedupe_key": "job-expired",
             },
         )
     if stale_jobs:
@@ -1229,19 +1442,17 @@ def _job_persisted_events(job: NaturalInputJob) -> list[dict[str, Any]]:
 def _job_events_summary(job: NaturalInputJob) -> list[dict[str, Any]]:
     source_events = _job_persisted_events(job)
     if not source_events and job.trace_id is not None:
-        source_events = [
-            event
-            for event in get_trace_events(job.trace_id)
-            if event.get("job_id") == job.job_id or event.get("payload", {}).get("job_id") == job.job_id
-        ]
+        from app.core.event_tracker import get_trace_events
+
+        source_events = get_trace_events(job.trace_id)
     return [
         {
-            "event": event["event"],
-            "sequence_number": event.get("sequence_number"),
+            "event": event.get("event_name") or event["event"],
+            "sequence_number": event.get("event_index") or event.get("sequence_number"),
             "duration_ms": event.get("duration_ms"),
         }
         for event in source_events
-        if event.get("event") != "JOB_CREATED"
+        if event.get("event_name", event.get("event")) != "JOB_CREATED"
     ]
 
 
@@ -1340,8 +1551,12 @@ def confirm_pending_interpretation(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
             )
-        route = _domain_route(interpretation)
-        if route["domain"] == DomainType.MIXED.value:
+        route = _domain_route(interpretation, db=db)
+        is_true_mixed_event = interpretation.canonical_event_type not in {
+            CanonicalEventType.WORK.value,
+            CanonicalEventType.NOTE.value,
+        }
+        if route["domain"] == DomainType.MIXED.value and is_true_mixed_event:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Mixed setup and financial input must be split before confirmation",
@@ -1349,13 +1564,19 @@ def confirm_pending_interpretation(
         resolution_result = _resolve_entity_phase_if_needed(db, interpretation, payload)
         if resolution_result is not None:
             db.commit()
-            trace_event(
-                TraceEvent.DB_WRITE_SUCCESS,
-                {
+            track_event(
+                db=db,
+                event_name="DB_WRITE_SUCCESS",
+                duration_ms=round((perf_counter() - db_write_start) * 1000, 3),
+                payload={
                     "pending_interpretation_id": interpretation.id,
                     "stage": "entity_resolution",
                 },
-                start_time=db_write_start,
+            )
+            track_event(
+                db=db,
+                event_name="db.entity_resolved",
+                payload={"interpretation_id": interpretation.id, "entity_id": resolution_result["entity_id"]},
             )
             return EntityResolutionResult(
                 status="ENTITY_RESOLVED",
@@ -1368,17 +1589,24 @@ def confirm_pending_interpretation(
         result = _execute_pending_interpretation(db, interpretation, payload)
         interpretation.status = PendingInterpretationStatus.CONFIRMED
         db.commit()
-        trace_event(
-            TraceEvent.DB_WRITE_SUCCESS,
-            {"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
-            start_time=db_write_start,
+        track_event(
+            db=db,
+            event_name="DB_WRITE_SUCCESS",
+            duration_ms=round((perf_counter() - db_write_start) * 1000, 3),
+            payload={"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
         )
         db.refresh(interpretation)
+        track_event(
+            db=db,
+            event_name="db.interpretation_confirmed",
+            payload={"interpretation_id": interpretation.id, "project_id": interpretation.project_id},
+        )
         if not _execution_engine_primary_enabled(interpretation):
             _run_execution_engine_shadow(db, interpretation, payload, result)
         return result
     except Exception as exc:
-        trace_error(exc, {"pending_interpretation_id": interpretation_id})
+        track_event(db=db, event_name="db.confirmation_failed", payload={"interpretation_id": interpretation_id, "error": str(exc)})
+        track_event(db=db, event_name="ERROR_OCCURRED", payload={"pending_interpretation_id": interpretation_id, "error_message": str(exc)})
         raise
 
 
@@ -1400,7 +1628,8 @@ def _execute_pending_interpretation(
     payload: PendingInterpretationConfirm,
 ) -> NaturalInputResult:
     _apply_create_new_confirmation_payload(interpretation, payload)
-    route = _domain_route(interpretation)
+    _apply_confirmation_edit_payload(interpretation, payload)
+    route = _domain_route(interpretation, db=db)
     if route["domain"] == DomainType.SETUP.value and _execution_engine_primary_enabled(
         interpretation
     ):
@@ -1418,6 +1647,136 @@ def _execute_pending_interpretation(
     if _execution_engine_primary_enabled(interpretation):
         return _execute_with_execution_engine_primary(db, interpretation, payload)
     return _execute_legacy_interpretation(db, interpretation, payload)
+
+
+def _apply_confirmation_edit_payload(
+    interpretation: PendingInterpretation,
+    payload: PendingInterpretationConfirm,
+) -> None:
+    if payload.amount is not None:
+        interpretation.extracted_amount = payload.amount
+        _set_structured_financial_value(interpretation, "amount", str(payload.amount))
+    if payload.direction is not None:
+        interpretation.financial_direction = payload.direction
+        _set_structured_financial_value(interpretation, "direction", _structured_direction_value(payload.direction))
+    if payload.payment_method is not None:
+        interpretation.payment_method = payload.payment_method.value
+        _set_structured_financial_value(interpretation, "payment_method", payload.payment_method.value)
+    if payload.description is not None:
+        interpretation.description = payload.description.strip() or None
+    if payload.due_date is not None:
+        interpretation.due_date = payload.due_date.strip() or None
+        _set_structured_financial_value(interpretation, "due_date_text", interpretation.due_date)
+    if isinstance(payload.field_updates, dict) and payload.field_updates:
+        _apply_work_updates_to_pending_interpretation(interpretation, payload.field_updates)
+        _apply_field_updates_to_pending_entity(interpretation, payload.field_updates)
+
+
+def _set_structured_financial_value(
+    interpretation: PendingInterpretation,
+    key: str,
+    value: Any,
+) -> None:
+    structured = interpretation.structured_interpretation
+    if not isinstance(structured, dict):
+        return
+    financial = structured.get("financial")
+    if not isinstance(financial, dict):
+        financial = {}
+    financial[key] = value
+    structured["financial"] = financial
+    interpretation.structured_interpretation = structured
+
+
+def _structured_direction_value(direction: FinancialDirection) -> str:
+    if direction == FinancialDirection.INCOMING:
+        return "IN"
+    if direction in {
+        FinancialDirection.OUTGOING,
+        FinancialDirection.DEBT,
+        FinancialDirection.DEFERRED,
+    }:
+        return "OUT"
+    return "NONE"
+
+
+def _apply_work_updates_to_pending_interpretation(
+    interpretation: PendingInterpretation,
+    updates: dict[str, Any],
+) -> None:
+    if interpretation.canonical_event_type != CanonicalEventType.WORK.value:
+        return
+    if "quantity_days" in updates:
+        interpretation.extracted_quantity = Decimal(str(updates["quantity_days"]))
+        _set_structured_work_value(interpretation, "quantity", float(interpretation.extracted_quantity))
+    if "period_label" in updates:
+        _set_structured_work_value(interpretation, "period_label", updates["period_label"])
+    if "description" in updates and isinstance(updates["description"], str):
+        interpretation.description = updates["description"].strip() or interpretation.description
+        _set_structured_work_value(interpretation, "description", interpretation.description)
+
+
+def _set_structured_work_value(
+    interpretation: PendingInterpretation,
+    key: str,
+    value: Any,
+) -> None:
+    structured = interpretation.structured_interpretation
+    if not isinstance(structured, dict):
+        return
+    work = structured.get("work")
+    if not isinstance(work, dict):
+        work = {}
+    work[key] = value
+    structured["work"] = work
+    interpretation.structured_interpretation = structured
+
+
+def _work_period_label(interpretation: PendingInterpretation) -> str | None:
+    structured = interpretation.structured_interpretation
+    if isinstance(structured, dict):
+        work = structured.get("work")
+        if isinstance(work, dict):
+            period = work.get("period_label")
+            if isinstance(period, str) and period.strip():
+                return period.strip()
+    description = interpretation.description or interpretation.raw_input_text
+    for label in ("ماه اردیبهشت", "هفته گذشته", "هفته قبل", "دیروز", "امروز"):
+        if label in description:
+            return label
+    return None
+
+
+def _apply_field_updates_to_pending_entity(
+    interpretation: PendingInterpretation,
+    updates: dict[str, Any],
+) -> None:
+    allowed = {
+        "phone",
+        "account_number",
+        "daily_rate",
+        "notes",
+        "role_detail",
+        "project_role",
+        "type",
+    }
+    clean = {key: value for key, value in updates.items() if key in allowed}
+    if not clean:
+        return
+    entities = list(interpretation.extracted_entities or [{}])
+    entity = dict(entities[0] if entities else {})
+    field_updates = entity.get("field_updates")
+    if not isinstance(field_updates, dict):
+        field_updates = {}
+    field_updates.update(clean)
+    entity.update(clean)
+    if "project_role" in clean:
+        entity["type"] = clean["project_role"]
+    if "type" in clean:
+        entity["project_role"] = clean["type"]
+    entity["field_updates"] = field_updates
+    entities[0] = entity
+    interpretation.extracted_entities = entities
 
 
 def _normalize_confirm_identity_payload(payload: PendingInterpretationConfirm) -> int | None:
@@ -1480,7 +1839,7 @@ def _resolve_entity_phase_if_needed(
     )
 
 
-def _domain_route(interpretation: PendingInterpretation) -> dict[str, Any]:
+def _domain_route(interpretation: PendingInterpretation, db: Session | None = None) -> dict[str, Any]:
     route_input: dict[str, Any] = {
         "semantic_action": interpretation.semantic_action,
         "action": interpretation.semantic_action,
@@ -1502,6 +1861,7 @@ def _domain_route(interpretation: PendingInterpretation) -> dict[str, Any]:
     return DomainRouterService().route(
         interpretation.raw_input_text,
         route_input,
+        db=db,
     )
 
 
@@ -1580,7 +1940,6 @@ def _run_execution_engine_shadow(
     )
     if confirmed is None:
         return
-    transaction = db.begin_nested()
     try:
         state = _shadow_state_for_confirmed_person(db, confirmed)
         shadow_result = ExecutionEngine().execute_confirmed_interpretation(
@@ -1605,8 +1964,6 @@ def _run_execution_engine_shadow(
                 "project_id": interpretation.project_id,
             },
         )
-    finally:
-        transaction.rollback()
 
 
 def _execute_with_execution_engine_primary(
@@ -1944,10 +2301,12 @@ def _allows_create_new_confirmation(interpretation: PendingInterpretation) -> bo
     if interpretation.canonical_event_type not in {
         CanonicalEventType.SETUP.value,
         CanonicalEventType.FINANCIAL.value,
+        CanonicalEventType.WORK.value,
         "SETUP_EVENT",
+        "WORK_EVENT",
     }:
         return False
-    if interpretation.semantic_action in {"SETUP", "SET_ROLE", "ADD_ENTITY", "ENTITY_UPDATE"}:
+    if interpretation.semantic_action in {"SETUP", "SET_ROLE", "ADD_ENTITY", "ENTITY_UPDATE", "WORK_LOG"}:
         return True
     structured = interpretation.structured_interpretation
     return bool(
@@ -1994,7 +2353,7 @@ def _require_explicit_entity_selection(
 ) -> None:
     import logging as _logging
     _log = _logging.getLogger(__name__)
-    _log.error("DEBUG _require_explicit_entity_selection: canonical_event_type=%s semantic_action=%s create_new=%s entity_id=%s selected_person_id=%s _requires_ui=%s _is_update=%s",
+    _log.debug("confirm entity selection check: canonical_event_type=%s semantic_action=%s create_new=%s entity_id=%s selected_person_id=%s requires_ui=%s is_update=%s",
                interpretation.canonical_event_type, interpretation.semantic_action,
                payload.create_new, payload.entity_id, payload.selected_person_id,
                _requires_ui_identity_decision(interpretation),
@@ -2163,10 +2522,17 @@ def _validate_llm_v2_confirmation_safety(
         db, interpretation
     )
     expected_role = si.entities[0].project_role if si.entities else None
+    confirmed_action = _confirmed_llm_v2_action(interpretation, si.action)
+    requires_vendor_payee = confirmed_action in {
+        LLMv2Action.PURCHASE_PAID,
+        LLMv2Action.DEBT_CREATED,
+        LLMv2Action.CHECK_PAYMENT,
+    }
     if (
         worker is not None
         and expected_role == LLMv2ProjectRole.VENDOR
         and worker.type != WorkerType.VENDOR
+        and requires_vendor_payee
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -2297,11 +2663,17 @@ def _execute_llm_v2_interpretation(
         registry = EntityRegistryService(db, interpretation.project_id)
         entities = interpretation.extracted_entities or []
         selected = _get_selected_worker(db, interpretation, payload)
-        updated = (
-            registry.update_entity_by_id(selected.id, entities[0])
-            if selected is not None and entities and _has_entity_field_updates(entities)
-            else []
-        )
+        if selected is not None and entities and _has_entity_field_updates(entities):
+            updated = registry.update_entity_by_id(selected.id, entities[0])
+        elif payload.create_new and entities and _has_entity_field_updates(entities):
+            created = registry.apply_setup(entities)
+            updated = (
+                registry.update_entity_by_id(created[0].id, entities[0])
+                if created
+                else []
+            )
+        else:
+            updated = []
         workers.extend(updated)
         history = HistoryEntry(
             project_id=interpretation.project_id,
@@ -2450,7 +2822,9 @@ def _execute_llm_v2_interpretation(
                 else None
             ),
             total_amount=_daily_worker_wage(db.get(Worker, state.worker_id), quantity),
-            description=si.work.description,
+            period_label=_work_period_label(interpretation),
+            source_pending_interpretation_id=interpretation.id,
+            description=si.work.description or interpretation.description,
         )
         db.add(work_log)
         db.flush()
@@ -2932,6 +3306,8 @@ def _execute_legacy_interpretation(
                 else None
             ),
             total_amount=_daily_worker_wage(db.get(Worker, state.worker_id), quantity),
+            period_label=_work_period_label(interpretation),
+            source_pending_interpretation_id=interpretation.id,
             description=interpretation.description,
         )
         db.add(work_log)
@@ -3581,14 +3957,58 @@ def list_work_logs(project_id: int, db: DbSession) -> list[WorkLog]:
     )
 
 
+@router.patch("/projects/{project_id}/work-logs/{work_log_id}", response_model=WorkLogRead)
+def correct_project_work_log(
+    project_id: int,
+    work_log_id: int,
+    payload: WorkLogUpdate,
+    db: DbSession,
+) -> WorkLog:
+    _get_project(db, project_id)
+    work_log = _get_project_work_log(db, project_id, work_log_id)
+    _ensure_not_voided(work_log)
+    updates = payload.model_dump(exclude_unset=True)
+    correction_note = updates.pop("correction_note", None)
+    if "worker_id" in updates and updates["worker_id"] is not None:
+        _get_worker(db, project_id, updates["worker_id"])
+    for field, value in updates.items():
+        setattr(work_log, field, value)
+    work_log.total_amount = _work_log_total(work_log.quantity, work_log.rate_per_unit)
+    work_log.corrected_at = datetime.now(UTC)
+    work_log.correction_note = correction_note
+    db.commit()
+    db.refresh(work_log)
+    return work_log
+
+
+@router.post("/projects/{project_id}/work-logs/{work_log_id}/void", response_model=WorkLogRead)
+def void_project_work_log(
+    project_id: int,
+    work_log_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> WorkLog:
+    _get_project(db, project_id)
+    work_log = _get_project_work_log(db, project_id, work_log_id)
+    _void_record(work_log, payload.reason)
+    db.commit()
+    db.refresh(work_log)
+    return work_log
+
+
 @router.patch("/work-logs/{work_log_id}", response_model=WorkLogRead)
 def update_work_log(work_log_id: int, payload: WorkLogUpdate, db: DbSession) -> WorkLog:
     # LEGACY_RISK: updates WorkLog.total_amount without ExecutionEngine.
     # Same note as create_work_log.
     work_log = _get_work_log(db, work_log_id)
+    _ensure_not_voided(work_log)
     for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "correction_note":
+            work_log.correction_note = value
+            continue
         setattr(work_log, field, value)
     work_log.total_amount = _work_log_total(work_log.quantity, work_log.rate_per_unit)
+    work_log.corrected_at = datetime.now(UTC)
     db.commit()
     db.refresh(work_log)
     return work_log
@@ -3653,6 +4073,50 @@ def list_invoices(project_id: int, db: DbSession) -> list[Invoice]:
     )
 
 
+@router.patch("/projects/{project_id}/payables/{payable_id}", response_model=InvoiceRead)
+def correct_project_payable(
+    project_id: int,
+    payable_id: int,
+    payload: InvoiceUpdate,
+    db: DbSession,
+) -> Invoice:
+    _get_project(db, project_id)
+    invoice = _get_invoice(db, project_id, payable_id)
+    _ensure_not_voided(invoice)
+    updates = payload.model_dump(exclude_unset=True)
+    correction_note = updates.pop("correction_note", None)
+    if "vendor_id" in updates and updates["vendor_id"] is not None:
+        vendor = _get_worker(db, project_id, updates["vendor_id"])
+        if vendor.type != WorkerType.VENDOR:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Worker is not a vendor",
+            )
+    for field, value in updates.items():
+        setattr(invoice, field, value)
+    _refresh_invoice_status(db, invoice)
+    invoice.corrected_at = datetime.now(UTC)
+    invoice.correction_note = correction_note
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+@router.post("/projects/{project_id}/payables/{payable_id}/void", response_model=InvoiceRead)
+def void_project_payable(
+    project_id: int,
+    payable_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> Invoice:
+    _get_project(db, project_id)
+    invoice = _get_invoice(db, project_id, payable_id)
+    _void_record(invoice, payload.reason)
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
 @router.post(
     "/projects/{project_id}/payments",
     response_model=PaymentRead,
@@ -3691,6 +4155,7 @@ def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Pa
             payment_method=payload.type,
             due_date=payload.due_date,
             related_invoice_id=payload.related_invoice_id,
+            description=payload.description,
         ),
         db,
         state,
@@ -3733,10 +4198,354 @@ def list_payments(project_id: int, db: DbSession) -> list[Payment]:
     )
 
 
+@router.patch("/projects/{project_id}/payments/{payment_id}", response_model=PaymentRead)
+def correct_project_payment(
+    project_id: int,
+    payment_id: int,
+    payload: PaymentUpdate,
+    db: DbSession,
+) -> Payment:
+    _get_project(db, project_id)
+    payment = _get_payment(db, project_id, payment_id)
+    _ensure_not_voided(payment)
+    updates = payload.model_dump(exclude_unset=True)
+    correction_note = updates.pop("correction_note", None)
+    old_invoice_id = payment.related_invoice_id
+    next_entity_id = updates.get("entity_id", payment.entity_id)
+    if "entity_id" in updates and updates["entity_id"] is not None:
+        _get_worker(db, project_id, updates["entity_id"])
+    if "related_invoice_id" in updates and updates["related_invoice_id"] is not None:
+        invoice = _get_invoice(db, project_id, updates["related_invoice_id"])
+        if invoice.vendor_id != next_entity_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment entity must match invoice vendor",
+            )
+    for field, value in updates.items():
+        setattr(payment, field, value)
+    payment.corrected_at = datetime.now(UTC)
+    payment.correction_note = correction_note
+    db.flush()
+    if old_invoice_id is not None:
+        old_invoice = db.get(Invoice, old_invoice_id)
+        if old_invoice is not None:
+            _refresh_invoice_status(db, old_invoice)
+    if payment.related_invoice_id is not None:
+        invoice = db.get(Invoice, payment.related_invoice_id)
+        if invoice is not None:
+            _refresh_invoice_status(db, invoice)
+    db.commit()
+    db.refresh(payment)
+    return payment
+
+
+@router.post("/projects/{project_id}/payments/{payment_id}/void", response_model=PaymentRead)
+def void_project_payment(
+    project_id: int,
+    payment_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> Payment:
+    _get_project(db, project_id)
+    payment = _get_payment(db, project_id, payment_id)
+    _void_record(payment, payload.reason)
+    db.flush()
+    if payment.related_invoice_id is not None:
+        invoice = db.get(Invoice, payment.related_invoice_id)
+        if invoice is not None:
+            _refresh_invoice_status(db, invoice)
+    db.commit()
+    db.refresh(payment)
+    return payment
+
+
+@router.patch("/projects/{project_id}/notes/{note_id}", response_model=HistoryEntryRead)
+def correct_project_note(
+    project_id: int,
+    note_id: int,
+    payload: NoteUpdate,
+    db: DbSession,
+) -> HistoryEntry:
+    _get_project(db, project_id)
+    note = _get_note(db, project_id, note_id)
+    _ensure_not_voided(note)
+    note.input_text = payload.text
+    note.corrected_at = datetime.now(UTC)
+    note.correction_note = payload.correction_note
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+@router.post("/projects/{project_id}/notes/{note_id}/void", response_model=HistoryEntryRead)
+def void_project_note(
+    project_id: int,
+    note_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> HistoryEntry:
+    _get_project(db, project_id)
+    note = _get_note(db, project_id, note_id)
+    _void_record(note, payload.reason)
+    db.commit()
+    db.refresh(note)
+    return note
+
+
 @router.get("/projects/{project_id}/operating-summary")
 def get_operating_summary(project_id: int, db: DbSession) -> dict[str, Any]:
     _get_project(db, project_id)
     return project_operating_summary(db, project_id)
+
+
+@router.get("/projects/{project_id}/reports/summary")
+def get_project_report_summary(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> dict[str, Any]:
+    _get_project(db, project_id)
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="from_date must be before or equal to to_date",
+        )
+    return project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
+
+
+@router.get("/projects/{project_id}/exports/payments.csv")
+def export_project_payments_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    workers = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.project_id == project_id))
+    }
+    statement = _apply_datetime_range(
+        select(Payment).where(Payment.project_id == project_id, Payment.is_voided == False),
+        Payment.created_at,
+        from_date,
+        to_date,
+    ).order_by(Payment.created_at.asc(), Payment.id.asc())
+    rows = []
+    for payment in db.scalars(statement):
+        worker = workers.get(payment.entity_id)
+        rows.append([
+            _datetime_text(payment.created_at),
+            worker.name if worker else "نامشخص",
+            ROLE_LABELS.get(worker.type, "نامشخص") if worker else "نامشخص",
+            DIRECTION_LABELS.get(payment.direction, payment.direction.value),
+            PAYMENT_TYPE_LABELS.get(payment.type, payment.type.value),
+            _decimal_text(payment.amount),
+            payment.description or payment.due_date or "",
+        ])
+    return _csv_response(
+        f"project-{project_id}-payments.csv",
+        ["تاریخ ثبت", "شخص", "نقش", "جهت", "روش پرداخت", "مبلغ", "توضیح"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/people.csv")
+def export_project_people_csv(project_id: int, db: DbSession) -> Response:
+    _get_project(db, project_id)
+    report = project_report_summary(db, project_id)
+    worker_rows = {row["entity_id"]: row for row in report["workers"]}
+    workers = db.scalars(
+        select(Worker)
+        .where(Worker.project_id == project_id)
+        .order_by(Worker.created_at.asc(), Worker.id.asc())
+    )
+    rows = []
+    for worker in workers:
+        stats = worker_rows.get(worker.id, {})
+        rows.append([
+            worker.name,
+            ROLE_LABELS.get(worker.type, worker.type.value),
+            worker.role_detail or "",
+            worker.phone or "",
+            worker.account_number or "",
+            _decimal_text(worker.daily_rate),
+            _decimal_text(stats.get("total_days", "0")),
+            _decimal_text(stats.get("total_labor_cost", "0")),
+            _decimal_text(stats.get("total_paid", "0")),
+            _decimal_text(stats.get("remaining_balance", "0")),
+        ])
+    return _csv_response(
+        f"project-{project_id}-people.csv",
+        ["نام", "نقش", "جزئیات نقش", "شماره تماس", "شماره حساب", "نرخ روزانه", "مجموع روز کارکرد", "مبلغ کارکرد", "پرداخت‌شده", "مانده"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/work-logs.csv")
+def export_project_work_logs_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    statement = _apply_datetime_range(
+        select(WorkLog).where(WorkLog.project_id == project_id, WorkLog.is_voided == False),
+        WorkLog.created_at,
+        from_date,
+        to_date,
+    ).order_by(WorkLog.created_at.asc(), WorkLog.id.asc())
+    rows = []
+    for log in db.scalars(statement):
+        rows.append([
+            _datetime_text(log.created_at),
+            log.worker.name if log.worker else "نامشخص",
+            log.period_label or "",
+            _decimal_text(log.quantity),
+            _decimal_text(log.rate_per_unit),
+            _decimal_text(log.total_amount),
+            log.description or log.task_name or "",
+        ])
+    return _csv_response(
+        f"project-{project_id}-work-logs.csv",
+        ["تاریخ ثبت", "کارگر", "بازه", "تعداد روز", "نرخ روزانه", "مبلغ کارکرد", "توضیح"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/payables.csv")
+def export_project_payables_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    workers = {
+        worker.id: worker
+        for worker in db.scalars(select(Worker).where(Worker.project_id == project_id))
+    }
+    rows: list[list[Any]] = []
+
+    invoice_statement = _apply_datetime_range(
+        select(Invoice).where(Invoice.project_id == project_id),
+        Invoice.created_at,
+        from_date,
+        to_date,
+    ).order_by(Invoice.created_at.asc(), Invoice.id.asc())
+    for invoice in db.scalars(invoice_statement.where(Invoice.is_voided == False)):
+        debt = max(invoice.total_amount - invoice_paid_amount(db, invoice.id), Decimal("0"))
+        if debt <= 0:
+            continue
+        vendor = workers.get(invoice.vendor_id)
+        rows.append([
+            _datetime_text(invoice.created_at),
+            vendor.name if vendor else "نامشخص",
+            PAYABLE_KIND_LABELS["vendor_payable"],
+            _decimal_text(debt),
+            "",
+            "باز",
+            invoice.description or "",
+        ])
+
+    payment_statement = _apply_datetime_range(
+        select(Payment).where(
+            Payment.project_id == project_id,
+            (Payment.direction == FinancialDirection.DEFERRED) | (Payment.type == PaymentType.CHECK),
+            Payment.is_voided == False,
+        ),
+        Payment.created_at,
+        from_date,
+        to_date,
+    ).order_by(Payment.created_at.asc(), Payment.id.asc())
+    for payment in db.scalars(payment_statement):
+        worker = workers.get(payment.entity_id)
+        rows.append([
+            _datetime_text(payment.created_at),
+            worker.name if worker else "نامشخص",
+            PAYABLE_KIND_LABELS["deferred_check"],
+            _decimal_text(payment.amount),
+            payment.due_date or "",
+            "پرداخت مدت‌دار",
+            "",
+        ])
+
+    report = project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
+    for payable in report["payables"]:
+        if payable["kind"] != "worker_labor":
+            continue
+        rows.append([
+            "",
+            payable["name"],
+            PAYABLE_KIND_LABELS["worker_labor"],
+            _decimal_text(payable["amount"]),
+            payable.get("due_date") or "",
+            "باز",
+            payable.get("description") or "",
+        ])
+
+    return _csv_response(
+        f"project-{project_id}-payables.csv",
+        ["تاریخ ثبت", "شخص / فروشنده", "نوع", "مبلغ", "سررسید", "وضعیت", "توضیح"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/notes.csv")
+def export_project_notes_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    statement = _apply_datetime_range(
+        select(HistoryEntry).where(
+            HistoryEntry.project_id == project_id,
+            HistoryEntry.change_type == HistoryChangeType.NOTE,
+            HistoryEntry.is_voided == False,
+        ),
+        HistoryEntry.created_at,
+        from_date,
+        to_date,
+    ).order_by(HistoryEntry.created_at.asc(), HistoryEntry.id.asc())
+    rows = [
+        [_datetime_text(note.created_at), note.input_text]
+        for note in db.scalars(statement)
+    ]
+    return _csv_response(
+        f"project-{project_id}-notes.csv",
+        ["تاریخ ثبت", "متن یادداشت"],
+        rows,
+    )
+
+
+@router.get("/projects/{project_id}/exports/summary.csv")
+def export_project_summary_csv(
+    project_id: int,
+    db: DbSession,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> Response:
+    _get_project(db, project_id)
+    report = project_report_summary(db, project_id, from_date=from_date, to_date=to_date)
+    summary = report["summary"]
+    rows = [
+        ["دریافتی", summary["money_in"]],
+        ["پرداخت‌شده واقعی", summary["paid_out"]],
+        ["کارکرد ثبت‌شده", summary["labor_cost"]],
+        ["بدهی باز", summary["open_payables"]],
+        ["چک / پرداخت مدت‌دار", summary["deferred_checks"]],
+        ["مانده تقریبی", summary["approximate_balance"]],
+        ["موارد در انتظار تایید", summary["pending_count"]],
+    ]
+    return _csv_response(
+        f"project-{project_id}-summary.csv",
+        ["عنوان", "مقدار"],
+        rows,
+    )
 
 
 @router.post(

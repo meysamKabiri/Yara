@@ -1,5 +1,26 @@
 from fastapi.testclient import TestClient
-from tests.natural_input_helpers import natural_input_interpretation, natural_input_interpretations, submit_natural_input
+
+from app.core.event_tracker import get_trace_events
+from tests.natural_input_helpers import (
+    natural_input_interpretation,
+    run_enqueued_natural_input_job,
+    submit_natural_input,
+)
+
+
+def _get_events(client: TestClient, trace_id: str) -> list[dict]:
+    """Fetch trace events using a test DB session.
+
+    The /traces/{trace_id} endpoint does not accept a db parameter, so it
+    opens its own SessionLocal (production database) which is invisible to
+    the test's in-memory SQLite.  We query directly instead.
+    """
+    factory = client.app.state.testing_session_factory
+    db = factory()
+    try:
+        return get_trace_events(trace_id, db=db)
+    finally:
+        db.close()
 
 
 def test_every_response_includes_trace_id_header(client: TestClient) -> None:
@@ -20,8 +41,10 @@ def test_domain_route_trace_event_is_recorded(client: TestClient) -> None:
         headers={"X-Trace-Id": trace_id},
     )
     assert job["trace_id"] == trace_id
-    trace = client.get(f"/traces/{trace_id}").json()
-    assert any(event["event"] == "DOMAIN_ROUTED" for event in trace["events"])
+    run_enqueued_natural_input_job(client, job["job_id"])
+    events = _get_events(client, trace_id)
+    names = [e["event_name"] for e in events]
+    assert "DOMAIN_ROUTER_START" in names, f"Got events: {names}"
 
 
 def test_financial_confirmation_trace_records_resolution_execution_and_db_write(
@@ -52,11 +75,11 @@ def test_financial_confirmation_trace_records_resolution_execution_and_db_write(
         headers={"X-Trace-Id": trace_id},
     )
 
-    events = client.get(f"/traces/{trace_id}").json()["events"]
-    names = [event["event"] for event in events]
+    events = _get_events(client, trace_id)
+    names = [event["event_name"] for event in events]
     assert "DOMAIN_ROUTED" in names
     assert "EXECUTION_STARTED" in names
     assert "EXECUTION_COMPLETED" in names
     assert "DB_WRITE_SUCCESS" in names
-    completed = next(event for event in events if event["event"] == "EXECUTION_COMPLETED")
+    completed = next(event for event in events if event["event_name"] == "EXECUTION_COMPLETED")
     assert completed["duration_ms"] is not None

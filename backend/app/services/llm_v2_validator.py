@@ -103,6 +103,58 @@ class LLMv2Validator:
 
         return interpretation
 
+    def _resolve_same_input_entities(
+        self,
+        interpretations: list[LLMv2Interpretation],
+    ) -> list[LLMv2Interpretation]:
+        token_map: dict[str, list[tuple[str, LLMv2ProjectRole]]] = {}
+        for interp in interpretations:
+            for entity in interp.entities:
+                name = entity.name.strip()
+                if not name:
+                    continue
+                tokens = name.split()
+                is_full = len(tokens) >= 2 or entity.project_role != LLMv2ProjectRole.OTHER
+                if is_full:
+                    for token in tokens:
+                        token_map.setdefault(token, [])
+                        entry = (name, entity.project_role)
+                        if entry not in token_map[token]:
+                            token_map[token].append(entry)
+        unambiguous: dict[str, tuple[str, LLMv2ProjectRole]] = {}
+        for token, candidates in token_map.items():
+            if len(candidates) == 1:
+                unambiguous[token] = candidates[0]
+        for interp in interpretations:
+            for entity in interp.entities:
+                name = entity.name.strip()
+                if not name:
+                    continue
+                tokens = name.split()
+                if len(tokens) == 1 and name in unambiguous:
+                    full_name, full_role = unambiguous[name]
+                    entity.name = full_name
+                    if entity.project_role == LLMv2ProjectRole.OTHER:
+                        entity.project_role = full_role
+        return interpretations
+
+    def validate_multi(
+        self,
+        raw: dict[str, Any],
+        entity_context: list[Worker],
+    ) -> list[LLMv2Interpretation]:
+        events = raw.get("events")
+        if not isinstance(events, list) or not events:
+            return [self.validate(raw, entity_context)]
+        results: list[LLMv2Interpretation] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            validated = self.validate(event, entity_context)
+            results.append(validated)
+        self._resolve_same_input_entities(results)
+        return results
+
     def resolve_entities(
         self,
         interpretation: LLMv2Interpretation,

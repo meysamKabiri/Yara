@@ -93,9 +93,14 @@ export function SplitFlowModal({
 
   if (step === 1) {
     return (
-      <article className="interpretation-card">
-        <section className="approval-section">
-          <span className="eyebrow">مرحله ۱ از ۲ — اطلاعات فرد</span>
+      <article className="interpretation-card modal-shell">
+        <header className="modal-header">
+          <div>
+            <h3 className="modal-title">اطلاعات فرد</h3>
+            <p>مرحله ۱ از ۲</p>
+          </div>
+        </header>
+        <section className="approval-section modal-body">
           <div className="setup-edit-list">
             <div className="setup-edit-row">
               <label>
@@ -131,27 +136,34 @@ export function SplitFlowModal({
             </div>
           </div>
         </section>
-        <div className="modal-actions">
-          <button
-            className="primary-action"
-            type="button"
-            onClick={() => setStep(2)}
-            disabled={isLoading || !step1Valid}
-          >
-            مرحله بعد
-          </button>
-          <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-            حذف
-          </button>
+        <div className="modal-footer">
+          <div className="modal-actions">
+            <button
+              className="primary-action"
+              type="button"
+              onClick={() => setStep(2)}
+              disabled={isLoading || !step1Valid}
+            >
+              مرحله بعد
+            </button>
+            <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+              حذف
+            </button>
+          </div>
         </div>
       </article>
     );
   }
 
   return (
-    <article className="interpretation-card">
-      <section className="approval-section">
-        <span className="eyebrow">مرحله ۲ از ۲ — ثبت مالی</span>
+    <article className="interpretation-card modal-shell">
+      <header className="modal-header">
+        <div>
+          <h3 className="modal-title">ثبت مالی</h3>
+          <p>مرحله ۲ از ۲</p>
+        </div>
+      </header>
+      <section className="approval-section modal-body">
         <div className="edit-grid">
           <label>
             طرف حساب
@@ -188,24 +200,26 @@ export function SplitFlowModal({
           <label>
             پروژه
             <input value={activeProjectId ? `پروژه ${activeProjectId}` : "ثبت نشده"} readOnly />
-          </label>
+        </label>
+      </div>
+    </section>
+      <div className="modal-footer">
+        <div className="modal-actions">
+          <button
+            className="primary-action"
+            type="button"
+            onClick={handleFinalConfirm}
+            disabled={isLoading || !step2Valid}
+          >
+            تایید نهایی
+          </button>
+          <button type="button" onClick={() => setStep(1)} disabled={isLoading}>
+            مرحله قبل
+          </button>
+          <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+            حذف
+          </button>
         </div>
-      </section>
-      <div className="modal-actions">
-        <button
-          className="primary-action"
-          type="button"
-          onClick={handleFinalConfirm}
-          disabled={isLoading || !step2Valid}
-        >
-          تایید نهایی
-        </button>
-        <button type="button" onClick={() => setStep(1)} disabled={isLoading}>
-          مرحله قبل
-        </button>
-        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          حذف
-        </button>
       </div>
     </article>
   );

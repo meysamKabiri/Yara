@@ -16,8 +16,9 @@ export function EventDetailPanel({ event }: { event: JobEvent | null }) {
     );
   }
 
+  const eventName = event.event || "UNKNOWN_EVENT";
   const payload = {
-    event: event.event,
+    event: eventName,
     trace_id: event.trace_id,
     job_id: event.job_id ?? event.payload?.job_id,
     duration_ms: event.duration_ms,
@@ -30,7 +31,7 @@ export function EventDetailPanel({ event }: { event: JobEvent | null }) {
       <div className="observability-panel-header">
         <div>
           <span className="observability-kicker">Debug Inspector</span>
-          <h2>{event.event}</h2>
+          <h2>{eventName}</h2>
         </div>
       </div>
       <dl className="event-detail-meta">

@@ -178,9 +178,11 @@ def test_deferred_check_counts_as_paid_out_and_preserves_due_date(client: TestCl
     assert payment["type"] == "CHECK"
     assert payment["direction"] == "DEFERRED"
     assert payment["due_date"] == "۱۴ مهر ۱۴۰۵"
-    assert summary["total_paid_out"] == "50000000.00"
+    assert summary["total_paid_out"] == "0.00"
     assert summary["open_payables"] == "0"
-    assert summary["client_receivable"] == "50000000.00"
+    assert summary["deferred_amount"] == "50000000.00"
+    assert summary["check_amount"] == "50000000.00"
+    assert summary["client_receivable"] == "0"
 
 
 def test_negative_worker_payment_balance_is_not_project_payable(client: TestClient) -> None:

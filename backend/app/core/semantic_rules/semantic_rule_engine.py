@@ -492,10 +492,17 @@ class SemanticRuleEngine:
         explanation: dict[str, Any],
         conflict_warnings: list[dict[str, Any]],
     ) -> None:
-        print("[SEMANTICS] rule matches:", [trace.__dict__ for trace in rule_traces])
-        print("[SEMANTICS] decision path:", explanation["decision_path"])
-        print("[SEMANTICS] conflicts detected:", conflict_warnings)
-        print("[SEMANTICS] explainability output:", explanation)
+        from app.core.logger import log_event
+
+        log_event(
+            event="semantics.rule_evaluation",
+            payload={
+                "rule_matches": [t.__dict__ for t in rule_traces],
+                "decision_path": explanation["decision_path"],
+                "conflicts": conflict_warnings,
+                "explainability": explanation,
+            },
+        )
 
     def _has_setup_meaning(self, normalized_text: str) -> bool:
         rule = EVENT_RULES[CanonicalEventType.SETUP.value]

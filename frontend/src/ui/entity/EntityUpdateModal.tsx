@@ -1,8 +1,14 @@
-import { useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
+import { api } from "../../api";
 import { ROLE_OPTIONS } from "../../constants";
+import { buildConfirmPayload, exactEntityIdByName, getCandidateEntityId, normalizeNeedsSelection, type NeedsSelectionCandidate } from "../confirmPayload";
 
 const CREATE_NEW_SENTINEL = -1;
+
+function firstEntity(interpretation: PendingInterpretation): Record<string, unknown> {
+  return interpretation.extracted_entities?.[0] ?? {};
+}
 
 function roleLabelFromType(type: string | undefined): string {
   if (type === "CLIENT") return "کارفرما";
@@ -165,6 +171,7 @@ interface EntityUpdateModalProps {
     entity_name?: string;
     project_role?: string;
     field_updates?: Record<string, unknown>;
+    _skipApiConfirm?: boolean;
   }) => void;
   onDiscard: () => void;
 }
@@ -187,15 +194,26 @@ export function EntityUpdateModal({
     .map((id) => workers.find((worker) => worker.id === id))
     .filter((worker): worker is Worker => Boolean(worker));
   const personOptions = candidates.length ? candidates : workers;
-  const initialEntityId = interpretation.suggested_entity_id
-    ?? candidates[0]?.id
-    ?? null;
-
   const extractedName = textValue(entity.name) ?? "";
   const extractedRole = textValue(entity.project_role ?? entity.type) ?? "DAILY_WORKER";
 
+  const nameMatchWorkerId = exactEntityIdByName(extractedName, workers);
+  const nameMatchWorker = nameMatchWorkerId
+    ? workers.find((worker) => worker.id === nameMatchWorkerId) ?? null
+    : null;
+
+  const initialEntityId = interpretation.suggested_entity_id
+    ?? candidates[0]?.id
+    ?? nameMatchWorker?.id
+    ?? null;
+
   const hasExisting = initialEntityId !== null;
   const showCreateNew = !hasExisting && extractedName.length > 0;
+
+  // Selection mode state (NEEDS_SELECTION handler)
+  const [selectionCandidates, setSelectionCandidates] = useState<NeedsSelectionCandidate[] | null>(null);
+  const [localLoading, setLocalLoading] = useState(false);
+  const isLoadingActive = isLoading || localLoading;
 
   const selectedPerson = initialEntityId
     ? workers.find((w) => w.id === initialEntityId)
@@ -246,6 +264,12 @@ export function EntityUpdateModal({
 
   const isCreatingNew = entityId === CREATE_NEW_SENTINEL;
 
+  useEffect(() => {
+    if (initialEntityId && entityId !== initialEntityId) {
+      setEntityId(initialEntityId);
+    }
+  }, [entityId, initialEntityId]);
+
   const showPhone = variant === "PHONE_UPDATE" || (variant === "GENERAL_PROFILE_UPDATE" && hasPhoneUpdate);
   const showAccount = variant === "ACCOUNT_UPDATE" || (variant === "GENERAL_PROFILE_UPDATE" && hasAccountUpdate);
   const showDailyRate = variant === "DAILY_RATE_UPDATE" || (variant === "GENERAL_PROFILE_UPDATE" && hasDailyRateUpdate);
@@ -253,37 +277,118 @@ export function EntityUpdateModal({
   const showRoleDetail = variant === "GENERAL_PROFILE_UPDATE" && hasRoleDetailUpdate;
   const isRoleReadOnly = variant !== "GENERAL_PROFILE_UPDATE" && !isCreatingNew;
 
-  function handleConfirm() {
-    if (isCreatingNew) {
-      const updates: Record<string, unknown> = {};
-      if (phone.trim()) updates.phone = phone.trim();
-      if (accountNumber.trim()) updates.account_number = accountNumber.trim();
-      if (dailyRate.trim()) updates.daily_rate = dailyRate.trim();
-      if (roleDetail.trim()) updates.role_detail = roleDetail.trim();
+  const isFieldUpdate = hasPhoneUpdate || hasAccountUpdate || hasDailyRateUpdate || hasNotesUpdate;
+
+  function buildFieldUpdatesFromForm(): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    if (showPhone && phone.trim()) result.phone = phone.trim();
+    if (showAccount && accountNumber.trim()) result.account_number = accountNumber.trim();
+    if (showDailyRate && dailyRate.trim()) result.daily_rate = dailyRate.trim();
+    if (roleDetail.trim()) result.role_detail = roleDetail.trim();
+    return result;
+  }
+
+  function buildConfirmData(entityIdParam?: number | null, overrideName?: string, overrideRole?: string) {
+    return {
+      entityId: entityIdParam ?? null,
+      name: (overrideName || name).trim(),
+      phone: showPhone ? (phone.trim() || null) : null,
+      accountNumber: showAccount ? (accountNumber.trim() || null) : null,
+      dailyRate: showDailyRate ? (dailyRate.trim() || null) : null,
+      role: overrideRole || role,
+      roleDetail: showRoleDetail ? (shouldShowRoleDetail(overrideRole || role) ? roleDetail.trim() || null : null) : null,
+    };
+  }
+
+  /** Try to confirm directly, or let the backend return NEEDS_SELECTION for explicit selection.
+   *  Returns candidates if NEEDS_SELECTION, true if confirm succeeded, null on other errors. */
+  async function tryNeedsSelection(): Promise<NeedsSelectionCandidate[] | "confirmed" | null> {
+    const updates = buildFieldUpdatesFromForm();
+    await api.updatePendingInterpretation(interpretation.id, {
+      extracted_entities: [
+        {
+          ...firstEntity(interpretation),
+          name: name.trim(),
+          field_updates: updates,
+        },
+      ],
+    });
+    try {
+      await api.confirmPendingInterpretation(interpretation.id, buildConfirmPayload(initialEntityId));
+      return "confirmed";
+    } catch (err: unknown) {
+      const candidates = normalizeNeedsSelection(err);
+      if (candidates) return candidates;
+      return null;
+    }
+  }
+
+  async function handleConfirm() {
+    const effectiveEntityId = entityId && !isCreatingNew ? entityId : null;
+    const matchId = effectiveEntityId ?? (nameMatchWorker?.id ?? null);
+
+    if (matchId) {
+      onConfirm(buildConfirmData(matchId));
+      return;
+    }
+
+    if (!isFieldUpdate) {
+      // SET_ROLE or non-field-update: safe to create new
+      const updates = buildFieldUpdatesFromForm();
       onConfirm({
-        entityId: null,
-        name: name.trim(),
-        phone: showPhone ? (phone.trim() || null) : null,
-        accountNumber: showAccount ? (accountNumber.trim() || null) : null,
-        dailyRate: showDailyRate ? (dailyRate.trim() || null) : null,
-        role,
-        roleDetail: showRoleDetail ? (shouldShowRoleDetail(role) ? roleDetail.trim() || null : null) : null,
+        ...buildConfirmData(null),
         create_new_entity: true,
         entity_name: name.trim(),
         project_role: role,
         field_updates: Object.keys(updates).length > 0 ? updates : undefined,
       });
-    } else if (entityId) {
-      onConfirm({
-        entityId,
-        name: name.trim(),
-        phone: showPhone ? (phone.trim() || null) : null,
-        accountNumber: showAccount ? (accountNumber.trim() || null) : null,
-        dailyRate: showDailyRate ? (dailyRate.trim() || null) : null,
-        role,
-        roleDetail: showRoleDetail ? (shouldShowRoleDetail(role) ? roleDetail.trim() || null : null) : null,
-      });
+      return;
     }
+
+    // Entity update (phone/account etc.) with no known entity → try NEEDS_SELECTION
+    setLocalLoading(true);
+    try {
+      const result = await tryNeedsSelection();
+      if (result === "confirmed") {
+        // Modal already confirmed via NEEDS_SELECTION path; parent should skip API call
+        onConfirm({ ...buildConfirmData(null), _skipApiConfirm: true });
+        return;
+      }
+      if (result && result.length > 0) {
+        setSelectionCandidates(result);
+        return;
+      }
+      // No candidates found — safe to create new
+      const updates = buildFieldUpdatesFromForm();
+      onConfirm({
+        ...buildConfirmData(null),
+        create_new_entity: true,
+        entity_name: name.trim(),
+        project_role: role,
+        field_updates: Object.keys(updates).length > 0 ? updates : undefined,
+      });
+    } catch {
+    } finally {
+      setLocalLoading(false);
+    }
+  }
+
+  function handleSelectCandidate(candidateId: number) {
+    const candidate = selectionCandidates?.find((c) => getCandidateEntityId(c) === candidateId);
+    setSelectionCandidates(null);
+    onConfirm(buildConfirmData(getCandidateEntityId(candidate ?? {}) ?? candidateId, candidate?.name, candidate?.type));
+  }
+
+  function handleCreateNewFromSelection() {
+    setSelectionCandidates(null);
+    const updates = buildFieldUpdatesFromForm();
+    onConfirm({
+      ...buildConfirmData(null),
+      create_new_entity: true,
+      entity_name: name.trim(),
+      project_role: role,
+      field_updates: Object.keys(updates).length > 0 ? updates : undefined,
+    });
   }
 
   const canConfirm = isCreatingNew
@@ -291,129 +396,182 @@ export function EntityUpdateModal({
     : Boolean(entityId && name.trim());
 
   return (
-    <article className="interpretation-card">
-      <section className="approval-section">
-        <span className="eyebrow">به‌روزرسانی اطلاعات فرد</span>
-        <div className="setup-edit-list">
-          <div className="setup-edit-row">
-            <label>
-              فرد
-              <select
-                value={isCreatingNew ? CREATE_NEW_SENTINEL : (entityId ?? "")}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === String(CREATE_NEW_SENTINEL)) {
-                    setEntityId(CREATE_NEW_SENTINEL);
-                    setName(extractedName);
-                    setRole(extractedRole);
-                    setRoleDetail("");
-                    setPhone(textValue(updates.phone ?? entity.phone) ?? "");
-                    setAccountNumber(textValue(updates.account_number ?? updates.accountNumber ?? entity.account_number ?? entity.accountNumber) ?? "");
-                    setDailyRate(textValue(updates.daily_rate ?? updates.dailyRate ?? entity.daily_rate ?? entity.dailyRate) ?? "");
-                    setNotes(textValue(updates.notes ?? entity.notes) ?? "");
-                  } else {
-                    const nextId = val ? Number(val) : null;
-                    setEntityId(nextId);
-                    const selected = workers.find((worker) => worker.id === nextId);
-                    if (selected) {
-                      setName(selected.name);
-                      setRole(selected.type);
-                      setRoleDetail(selected.role_detail ?? "");
-                      setPhone(
-                        textValue(updates.phone ?? entity.phone) ?? selected.phone ?? ""
-                      );
-                      setAccountNumber(
-                        textValue(updates.account_number ?? updates.accountNumber ?? entity.account_number ?? entity.accountNumber) ?? selected.account_number ?? ""
-                      );
-                      setDailyRate(
-                        textValue(updates.daily_rate ?? updates.dailyRate ?? entity.daily_rate ?? entity.dailyRate) ?? selected.daily_rate ?? ""
-                      );
-                      setNotes(
-                        textValue(updates.notes ?? entity.notes) ?? selected.notes ?? ""
-                      );
-                    }
-                  }
-                }}
+    <article className="interpretation-card modal-shell">
+      {selectionCandidates ? (
+        <>
+          <header className="modal-header">
+            <div>
+              <h3 className="modal-title">انتخاب فرد</h3>
+              <p>فرد مرتبط را انتخاب کنید.</p>
+            </div>
+          </header>
+          <section className="approval-section modal-body">
+            <div className="candidate-list">
+              {selectionCandidates.map((candidate, index) => (
+                <button
+                  key={getCandidateEntityId(candidate) ?? candidate.name ?? index}
+                  className="candidate-button primary-action"
+                  type="button"
+                  onClick={() => {
+                    const candidateId = getCandidateEntityId(candidate);
+                    if (candidateId !== null) handleSelectCandidate(candidateId);
+                  }}
+                  disabled={localLoading}
+                >
+                  {candidate.name} - {roleLabelFromType(candidate.type)}
+                </button>
+              ))}
+              <button
+                className="candidate-button"
+                type="button"
+                onClick={handleCreateNewFromSelection}
+                disabled={localLoading}
               >
-                <option value="">انتخاب کنید...</option>
-                {personOptions.map((worker) => (
-                  <option key={worker.id} value={worker.id}>
-                    {workerLabel(worker)}
-                  </option>
-                ))}
-                {showCreateNew && (
-                  <option value={CREATE_NEW_SENTINEL}>
-                    {createNewLabel(extractedName, extractedRole)}
-                  </option>
-                )}
-              </select>
-            </label>
-            <label>
-              نام
-              <input value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label>
-              نقش
-              {isRoleReadOnly ? (
-                <input value={roleLabelFromType(role)} readOnly />
-              ) : (
-                <select value={role} onChange={(e) => setRole(e.target.value)}>
-                  {ROLE_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              )}
-            </label>
-            {showRoleDetail && (
-              <label>
-                تخصص / توضیح نقش
-                <input value={roleDetail} onChange={(e) => setRoleDetail(e.target.value)} />
-              </label>
-            )}
-            {showPhone && (
-              <label>
-                شماره موبایل
-                <input value={phone} onChange={(e) => setPhone(e.target.value)} />
-              </label>
-            )}
-            {showAccount && (
-              <label>
-                شماره حساب
-                <input value={accountNumber} onChange={(e) => setAccountNumber(e.target.value)} />
-              </label>
-            )}
-            {showDailyRate && (
-              <label>
-                دستمزد روزانه
-                <input value={dailyRate} onChange={(e) => setDailyRate(e.target.value)} />
-              </label>
-            )}
-            {showNotes && (
-              <label>
-                توضیحات
-                <input value={notes} onChange={(e) => setNotes(e.target.value)} />
-              </label>
-            )}
-            <label>
-              پروژه
-              <input value={projectName || (activeProjectId ? `پروژه ${activeProjectId}` : "ثبت نشده")} readOnly />
-            </label>
+                شخص جدید بساز
+              </button>
+            </div>
+          </section>
+          <div className="modal-footer">
+            <div className="modal-actions">
+              <button className="danger-action" type="button" onClick={onDiscard} disabled={localLoading}>
+                انصراف
+              </button>
+            </div>
           </div>
-        </div>
-      </section>
-      <div className="modal-actions">
-        <button
-          className="primary-action"
-          type="button"
-          onClick={handleConfirm}
-          disabled={isLoading || !canConfirm}
-        >
-          تایید
-        </button>
-        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          حذف
-        </button>
-      </div>
+        </>
+      ) : (
+        <>
+          <header className="modal-header">
+            <div>
+              <h3 className="modal-title">به‌روزرسانی اطلاعات فرد</h3>
+              <p>تغییرات فرد را بررسی کنید.</p>
+            </div>
+          </header>
+          <section className="approval-section modal-body">
+            <div className="setup-edit-list">
+              <div className="setup-edit-row">
+                <label>
+                  فرد
+                  <select
+                    value={isCreatingNew ? CREATE_NEW_SENTINEL : (entityId ?? "")}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === String(CREATE_NEW_SENTINEL)) {
+                        setEntityId(CREATE_NEW_SENTINEL);
+                        setName(extractedName);
+                        setRole(extractedRole);
+                        setRoleDetail("");
+                        setPhone(textValue(updates.phone ?? entity.phone) ?? "");
+                        setAccountNumber(textValue(updates.account_number ?? updates.accountNumber ?? entity.account_number ?? entity.accountNumber) ?? "");
+                        setDailyRate(textValue(updates.daily_rate ?? updates.dailyRate ?? entity.daily_rate ?? entity.dailyRate) ?? "");
+                        setNotes(textValue(updates.notes ?? entity.notes) ?? "");
+                      } else {
+                        const nextId = val ? Number(val) : null;
+                        setEntityId(nextId);
+                        const selected = workers.find((worker) => worker.id === nextId);
+                        if (selected) {
+                          setName(selected.name);
+                          setRole(selected.type);
+                          setRoleDetail(selected.role_detail ?? "");
+                          setPhone(
+                            textValue(updates.phone ?? entity.phone) ?? selected.phone ?? ""
+                          );
+                          setAccountNumber(
+                            textValue(updates.account_number ?? updates.accountNumber ?? entity.account_number ?? entity.accountNumber) ?? selected.account_number ?? ""
+                          );
+                          setDailyRate(
+                            textValue(updates.daily_rate ?? updates.dailyRate ?? entity.daily_rate ?? entity.dailyRate) ?? selected.daily_rate ?? ""
+                          );
+                          setNotes(
+                            textValue(updates.notes ?? entity.notes) ?? selected.notes ?? ""
+                          );
+                        }
+                      }
+                    }}
+                  >
+                    <option value="">انتخاب کنید...</option>
+                    {personOptions.map((worker) => (
+                      <option key={worker.id} value={worker.id}>
+                        {workerLabel(worker)}
+                      </option>
+                    ))}
+                    {showCreateNew && (
+                      <option value={CREATE_NEW_SENTINEL}>
+                        {createNewLabel(extractedName, extractedRole)}
+                      </option>
+                    )}
+                  </select>
+                </label>
+                <label>
+                  نام
+                  <input value={name} onChange={(e) => setName(e.target.value)} />
+                </label>
+                <label>
+                  نقش
+                  {isRoleReadOnly ? (
+                    <input value={roleLabelFromType(role)} readOnly />
+                  ) : (
+                    <select value={role} onChange={(e) => setRole(e.target.value)}>
+                      {ROLE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </label>
+                {showRoleDetail && (
+                  <label>
+                    تخصص / توضیح نقش
+                    <input value={roleDetail} onChange={(e) => setRoleDetail(e.target.value)} />
+                  </label>
+                )}
+                {showPhone && (
+                  <label>
+                    شماره موبایل
+                    <input value={phone} onChange={(e) => setPhone(e.target.value)} />
+                  </label>
+                )}
+                {showAccount && (
+                  <label>
+                    شماره حساب
+                    <input value={accountNumber} onChange={(e) => setAccountNumber(e.target.value)} />
+                  </label>
+                )}
+                {showDailyRate && (
+                  <label>
+                    دستمزد روزانه
+                    <input value={dailyRate} onChange={(e) => setDailyRate(e.target.value)} />
+                  </label>
+                )}
+                {showNotes && (
+                  <label>
+                    توضیحات
+                    <input value={notes} onChange={(e) => setNotes(e.target.value)} />
+                  </label>
+                )}
+                <label>
+                  پروژه
+                  <input value={projectName || (activeProjectId ? `پروژه ${activeProjectId}` : "ثبت نشده")} readOnly />
+                </label>
+              </div>
+            </div>
+          </section>
+          <div className="modal-footer">
+            <div className="modal-actions">
+              <button
+                className="primary-action"
+                type="button"
+                onClick={handleConfirm}
+                disabled={isLoadingActive || !canConfirm}
+              >
+                تایید و ثبت
+              </button>
+              <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoadingActive}>
+                نادیده گرفتن
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </article>
   );
 }

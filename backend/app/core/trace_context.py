@@ -10,6 +10,9 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 
+logger = logging.getLogger(__name__)
+
+
 _trace_id: ContextVar[str | None] = ContextVar("trace_id", default=None)
 _job_id: ContextVar[str | None] = ContextVar("job_id", default=None)
 
@@ -34,6 +37,10 @@ def reset_trace_id(token: Any) -> None:
     _trace_id.reset(token)
 
 
+def clear_trace_id() -> None:
+    _trace_id.set(None)
+
+
 def get_job_id() -> str | None:
     return _job_id.get()
 
@@ -52,25 +59,6 @@ def set_trace_context(job_id: str | None, trace_id: str | None) -> tuple[Any | N
     return job_token, trace_token
 
 
-class TraceIdFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.trace_id = get_trace_id() or "-"
-        return True
-
-
-def configure_trace_logging() -> None:
-    root = logging.getLogger()
-    if not root.handlers:
-        logging.basicConfig(level=logging.INFO)
-    if not any(isinstance(item, TraceIdFilter) for item in root.filters):
-        root.addFilter(TraceIdFilter())
-    formatter = logging.Formatter("[%(trace_id)s] %(levelname)s %(name)s: %(message)s")
-    for handler in root.handlers:
-        if not any(isinstance(item, TraceIdFilter) for item in handler.filters):
-            handler.addFilter(TraceIdFilter())
-        handler.setFormatter(formatter)
-
-
 class TraceContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         trace_id = request.headers.get("X-Trace-Id") or new_trace_id()
@@ -80,9 +68,7 @@ class TraceContextMiddleware(BaseHTTPMiddleware):
             try:
                 response = await call_next(request)
             except Exception as exc:
-                from app.core.trace_events import trace_error
-
-                trace_error(exc, {"path": str(request.url.path), "method": request.method})
+                logger.exception("Unhandled exception during request", extra={"path": str(request.url.path), "method": request.method})
                 raise
             response.headers["X-Trace-Id"] = trace_id
             return response

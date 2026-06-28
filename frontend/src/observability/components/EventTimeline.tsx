@@ -4,10 +4,11 @@ import { EventItem } from "./EventItem";
 type FilterMode = "ALL" | "ERROR" | "LLM" | "EXECUTION";
 
 function matchesFilter(event: JobEvent, filter: FilterMode): boolean {
+  const eventName = event.event || "";
   if (filter === "ALL") return true;
-  if (filter === "ERROR") return event.event.includes("ERROR") || event.event.includes("FAILED");
-  if (filter === "LLM") return event.event.includes("LLM") || event.event.includes("DOMAIN");
-  return event.event.includes("EXECUTION") || event.event.includes("DB_WRITE");
+  if (filter === "ERROR") return eventName.includes("ERROR") || eventName.includes("FAILED");
+  if (filter === "LLM") return eventName.includes("LLM") || eventName.includes("DOMAIN");
+  return eventName.includes("EXECUTION") || eventName.includes("DB_WRITE");
 }
 
 export function EventTimeline({
@@ -51,7 +52,7 @@ export function EventTimeline({
       <div className="timeline-list">
         {visibleEvents.map((event) => (
           <EventItem
-            key={`${event.sequence_number}-${event.event}-${event.created_at}`}
+            key={`${event.sequence_number}-${event.event || "UNKNOWN_EVENT"}-${event.created_at}`}
             event={event}
             isSelected={selectedEvent === event}
             isLatest={latestEvent === event}

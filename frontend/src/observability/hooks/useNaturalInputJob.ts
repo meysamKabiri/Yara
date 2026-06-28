@@ -27,6 +27,10 @@ function interpretationsFromResult(result: NaturalInputJobRecord["result"]): Pen
   return Array.isArray(interpretations) ? interpretations as PendingInterpretation[] : [];
 }
 
+function isTerminalStatus(status?: NaturalInputJobRecord["status"] | null): boolean {
+  return status === "DONE" || status === "FAILED";
+}
+
 export function useNaturalInputJob(jobId: string | null): NaturalInputJobState {
   const [job, setJob] = useState<NaturalInputJobRecord | null>(null);
   const [isLoading, setIsLoading] = useState(Boolean(jobId));
@@ -54,30 +58,40 @@ export function useNaturalInputJob(jobId: string | null): NaturalInputJobState {
 
   useEffect(() => {
     let cancelled = false;
+    let pollTimer: number | null = null;
     if (!jobId) {
       setJob(null);
       setIsLoading(false);
       setError(null);
       return;
     }
+    const activeJobId = jobId;
 
-    setIsLoading(true);
-    api.getNaturalInputJob(jobId)
-      .then((nextJob) => {
-        if (!cancelled) {
-          setJob(nextJob);
-          setError(null);
+    async function poll() {
+      setIsLoading(true);
+      try {
+        const nextJob = await api.getNaturalInputJob(activeJobId);
+        if (cancelled) return;
+        setJob(nextJob);
+        setError(null);
+        if (!isTerminalStatus(nextJob.status)) {
+          pollTimer = window.setTimeout(poll, 1200);
         }
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load natural input job");
-      })
-      .finally(() => {
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load natural input job");
+          pollTimer = window.setTimeout(poll, 2000);
+        }
+      } finally {
         if (!cancelled) setIsLoading(false);
-      });
+      }
+    }
+
+    void poll();
 
     return () => {
       cancelled = true;
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
     };
   }, [jobId]);
 

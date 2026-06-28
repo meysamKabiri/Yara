@@ -126,10 +126,13 @@ def test_llm_v2_work_records_daily_labor(client: TestClient, monkeypatch: pytest
     project = client.post("/projects", json={"name": "test2"}).json()
     pi = natural_input_interpretation(client, project["id"], "مش رحیم امروز کار کرد")
     assert pi["canonical_event_type"] == "WORK_EVENT"
-    assert pi["semantic_action"] == "INCREMENT"
+    assert pi["semantic_action"] == "WORK_LOG"
     assert pi["structured_interpretation"]["intent"] == "WORK"
 
-    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm").json()
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"create_new": True, "name": "مش رحیم", "role": "DAILY_WORKER", "confirmed": True},
+    ).json()
     assert len(confirm["work_logs"]) == 1
     states = client.get(f"/projects/{project['id']}/worker-states").json()
     assert any(s["name"] == "مش رحیم" and s["total_days_worked"] == "1.00" for s in states)
@@ -196,6 +199,43 @@ def test_llm_v2_financial_payment_in(client: TestClient, monkeypatch: pytest.Mon
     confirm = _confirm_financial(client, pi, {"selected_person_id": worker["id"]})
     assert len(confirm["payments"]) == 1
     assert confirm["payments"][0]["direction"] == "INCOMING"
+
+
+def test_llm_v2_repairs_titled_client_project_deposit_and_confirms_money_in(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "titled deposit"}).json()
+    client_worker = _make_worker(client, "خانم احمدی", "CLIENT", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "UPDATE_ENTITY",
+            "entities": [{"name": "خانم احمدی", "kind": "PERSON", "project_role": "CLIENT", "role_detail": None}],
+            "financial": {"amount": 80000000, "direction": "OUT", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.4,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "مدل پرداخت ورودی را با setup اشتباه گرفته است",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "خانم احمدی 80 میلیون تومان به حساب پروژه واریز کرد.")
+
+    assert pi["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert pi["semantic_action"] == "PAYMENT"
+    assert pi["financial_direction"] == "INCOMING"
+    assert pi["payment_method"] == "BANK_TRANSFER"
+    assert pi["suggested_entity_id"] == client_worker["id"]
+
+    confirm = _confirm_financial(client, pi, {"selected_person_id": client_worker["id"]})
+    assert confirm["payments"][0]["amount"] == "80000000.00"
+    assert confirm["payments"][0]["direction"] == "INCOMING"
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_received"] == "80000000.00"
 
 
 def test_llm_v2_repairs_project_account_deposit_with_missing_entity(
@@ -413,6 +453,113 @@ def test_llm_v2_purchase_rejects_explicit_daily_worker_vendor_conflict(
     assert "vendor role" in confirm.json()["detail"]
 
 
+def test_unpaid_purchase_creates_invoice_without_cash_payment(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "unpaid purchase"}).json()
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "آهنچی", "kind": "COMPANY", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 80000000, "direction": "OUT", "payment_method": "CASH", "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.9,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "میلگرد خریداری شد",
+        }),
+    )
+
+    pi = natural_input_interpretation(
+        client,
+        project["id"],
+        "از آهنچی 80 میلیون تومان میلگرد خریداری شد و هنوز پرداخت نشده.",
+    )
+
+    assert pi["semantic_action"] == "DEBT_CREATED"
+    assert pi["financial_direction"] == "DEBT"
+    assert pi["payment_method"] is None
+
+    body = _confirm_financial(client, pi, {"create_new": True})
+    assert body["payments"] == []
+    assert body["invoices"][0]["total_amount"] == "80000000.00"
+    summary = client.get(f"/projects/{project['id']}/operating-summary").json()
+    assert summary["total_paid_out"] == "0.00"
+    assert summary["open_payables"] == "80000000.00"
+
+
+def test_check_purchase_confirms_as_check_payment_not_cash(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "check purchase"}).json()
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PURCHASE_PAID",
+            "entities": [{"name": "بتن آماده شرق", "kind": "COMPANY", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 55000000, "direction": "OUT", "payment_method": "CASH", "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.9,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "بتن خریداری شد",
+        }),
+    )
+
+    pi = natural_input_interpretation(
+        client,
+        project["id"],
+        "از بتن آماده شرق 55 میلیون تومان بتن خریداری شد و چک یک‌ماهه پرداخت شد.",
+    )
+
+    assert pi["semantic_action"] == "CHECK_PAYMENT"
+    assert pi["payment_method"] == "CHECK"
+
+    body = _confirm_financial(client, pi, {"create_new": True})
+    payment = body["payments"][0]
+    assert payment["amount"] == "55000000.00"
+    assert payment["type"] == "CHECK"
+    assert payment["direction"] == "DEFERRED"
+
+
+def test_outgoing_payment_to_existing_daily_worker_does_not_require_vendor_role(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "worker payment"}).json()
+    worker = _make_worker(client, "مش رحیم", "DAILY_WORKER", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "FINANCIAL",
+            "action": "PAYMENT_OUT",
+            "entities": [{"name": "مش رحیم", "kind": "PERSON", "project_role": "VENDOR", "role_detail": None}],
+            "financial": {"amount": 2000000, "direction": "OUT", "payment_method": "CASH", "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.8,
+            "ambiguity": False,
+            "missing_fields": [],
+            "reasoning_summary": "به مش رحیم پرداخت شد",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "2 میلیون تومان به مش رحیم پرداخت شد.")
+    confirm = _confirm_financial(client, pi, {"selected_person_id": worker["id"]})
+
+    assert confirm["payments"][0]["amount"] == "2000000.00"
+    assert confirm["payments"][0]["direction"] == "OUTGOING"
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert workers[0]["type"] == "DAILY_WORKER"
+
+
 def test_llm_v2_note_creates_no_state(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM v2 NOTE interpretation creates a history entry without side effects."""
     monkeypatch.setattr(
@@ -439,6 +586,74 @@ def test_llm_v2_note_creates_no_state(client: TestClient, monkeypatch: pytest.Mo
     assert len(confirm["history_entries"]) == 1
     assert confirm["payments"] == []
     assert confirm["workers"] == []
+
+
+def test_note_text_misclassified_as_setup_is_repaired_to_safe_note(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "safe note"}).json()
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SETUP",
+            "action": "ADD_ENTITY",
+            "entities": [{"name": "کارفرما", "kind": "PERSON", "project_role": "CLIENT", "role_detail": None}],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.6,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "مدل یادداشت را setup گرفته است",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "کارفرما رنگ طوسی روشن را تایید کرد.")
+
+    assert pi["canonical_event_type"] == "NOTE_EVENT"
+    assert pi["semantic_action"] == "NOTE"
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert confirm.status_code == 200
+    assert confirm.json()["workers"] == []
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+
+
+def test_work_like_setup_misclassification_does_not_create_corrupted_person(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "safe work candidate"}).json()
+    existing = _make_worker(client, "مش رحیم", "DAILY_WORKER", project["id"])
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "SET_ROLE",
+            "action": "SET_ROLE",
+            "entities": [{"name": "مش رح:م", "kind": "PERSON", "project_role": "DAILY_WORKER", "role_detail": None}],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": 0.5,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "مدل کارکرد را setup گرفته است",
+        }),
+    )
+
+    pi = natural_input_interpretation(client, project["id"], "مش رحیم امروز کار کرد.")
+
+    assert pi["canonical_event_type"] == "WORK_EVENT"
+    assert pi["semantic_action"] == "WORK_LOG"
+    confirm = client.post(
+        f"/pending-interpretations/{pi['id']}/confirm",
+        json={"entity_id": existing["id"], "confirmed": True},
+    )
+    assert confirm.status_code == 200
+    assert confirm.json()["work_logs"]
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    assert workers == [existing]
+    assert all(worker["name"] != "مش رح:م" for worker in workers)
 
 
 def test_llm_v2_structured_interpretation_stored(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -664,6 +879,90 @@ def test_llm_v2_partial_setup_creation_is_blocked_until_confirmation_resolution(
     assert workers == [existing]
 
 
+def test_skilled_worker_setup_with_phone_uses_same_pending_entity(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "skilled setup phone"}).json()
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "NOTE",
+            "action": "NOTE",
+            "entities": [],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": "fallback should not be needed"},
+            "confidence": 0.1,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "bad model fallback",
+        }),
+    )
+
+    pi = natural_input_interpretation(
+        client,
+        project["id"],
+        "ریاحی سرامیک‌کار به پروژه اضافه شد. شماره تماس ریاحی 09121111111",
+    )
+
+    assert pi["canonical_event_type"] == "SETUP_EVENT"
+    assert pi["semantic_action"] == "ENTITY_UPDATE"
+    entity = pi["extracted_entities"][0]
+    assert entity["name"] == "ریاحی"
+    assert entity["type"] == "SKILLED_WORKER"
+    assert entity["role_detail"] == "سرامیک کار"
+    assert entity["phone"] == "09121111111"
+
+    confirm = client.post(f"/pending-interpretations/{pi['id']}/confirm", json={"create_new": True})
+    assert confirm.status_code == 200
+    worker = confirm.json()["workers"][0]
+    assert worker["name"] == "ریاحی"
+    assert worker["type"] == "SKILLED_WORKER"
+    assert worker["role_detail"] == "سرامیک کار"
+    assert worker["phone"] == "09121111111"
+
+
+def test_multi_sentence_skilled_worker_setup_creates_each_role_detail(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = client.post("/projects", json={"name": "multi skilled setup"}).json()
+    monkeypatch.setattr(
+        "app.api.projects.LLMv2Interpreter.interpret",
+        lambda self, text, pid: _mock_llm_v2({
+            "intent": "NOTE",
+            "action": "NOTE",
+            "entities": [],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": "fallback should not be needed"},
+            "confidence": 0.1,
+            "ambiguity": True,
+            "missing_fields": [],
+            "reasoning_summary": "bad model fallback",
+        }),
+    )
+
+    interpretations = natural_input_interpretations(
+        client,
+        project["id"],
+        "کاظمی نقاش به پروژه اضافه شد.\nصادقی کابینت‌کار به پروژه اضافه شد.\nرحمانی گچ‌کار به پروژه اضافه شد.",
+    )
+
+    setup_interpretations = [
+        pi for pi in interpretations if pi.get("extracted_entities")
+    ]
+    assert [
+        (pi["extracted_entities"][0]["name"], pi["extracted_entities"][0]["role_detail"])
+        for pi in setup_interpretations
+    ] == [
+        ("کاظمی", "نقاش"),
+        ("صادقی", "کابینت کار"),
+        ("رحمانی", "گچ کار"),
+    ]
+
+
 def test_confirmation_modal_phone_update_copy_is_not_add_copy() -> None:
     source = Path(__file__).resolve().parents[2] / "frontend" / "src" / "ui" / "entity" / "EntityUpdateModal.tsx"
     modal_source = source.read_text()
@@ -824,3 +1123,48 @@ def test_counterparty_low_confidence_ambiguous_does_not_preselect(
     pi = natural_input_interpretation(client, project["id"], "به محمد ۱ میلیون دادم")
 
     assert pi["suggested_entity_id"] is None, "Should not auto-select when multiple ambiguous candidates exist"
+
+
+def test_outgoing_worker_payment_strips_purpose_clause_and_links_existing_worker(client: TestClient) -> None:
+    project = client.post("/projects", json={"name": "purpose payment"}).json()
+    worker = _make_worker(client, "ریاحی", "SKILLED_WORKER", project["id"])
+
+    pi = natural_input_interpretation(
+        client,
+        project["id"],
+        "به ریاحی بابت سرامیک کاری 20 میلیون تومان پرداخت شد",
+    )
+
+    assert pi["canonical_event_type"] == "FINANCIAL_EVENT"
+    assert pi["semantic_action"] == "PAYMENT"
+    assert pi["suggested_entity_id"] == worker["id"]
+    assert pi["extracted_entities"][0]["name"] == "ریاحی"
+
+    _confirm_financial(client, pi, {"entity_id": worker["id"], "confirmed": True})
+
+    workers = client.get(f"/projects/{project['id']}/workers").json()
+    payments = client.get(f"/projects/{project['id']}/payments").json()
+    assert [item["name"] for item in workers] == ["ریاحی"]
+    assert payments[0]["entity_id"] == worker["id"]
+    assert payments[0]["amount"] == "20000000.00"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "سرامیک طبقه اول تمام شد",
+        "کارفرما رنگ دیوار پذیرایی را تغییر داد",
+    ],
+)
+def test_realistic_progress_and_change_phrases_are_safe_notes(client: TestClient, text: str) -> None:
+    project = client.post("/projects", json={"name": "notes"}).json()
+
+    pi = natural_input_interpretation(client, project["id"], text)
+
+    assert pi["canonical_event_type"] == "NOTE_EVENT"
+    assert pi["semantic_action"] == "NOTE"
+    assert pi["extracted_entities"] is None
+    response = client.post(f"/pending-interpretations/{pi['id']}/confirm")
+    assert response.status_code == 200
+    assert client.get(f"/projects/{project['id']}/workers").json() == []
+    assert client.get(f"/projects/{project['id']}/payments").json() == []

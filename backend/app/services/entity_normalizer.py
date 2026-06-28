@@ -3,16 +3,17 @@ import re
 from app.services.persian_money_engine import normalize_text
 
 TITLE_PATTERN = re.compile(r"^(آقای|اقای|خانم|مهندس|استاد|حاج|مش|جناب)\s+")
+RELATION_PREFIX_PATTERN = re.compile(r"^(به|از)\s+")
 
 
 def normalize_name(text: str) -> str:
     normalized = normalize_text(text).replace("\u200c", " ")
     normalized = re.sub(r"\s+", " ", normalized).strip().lower()
     while True:
-        without_title = TITLE_PATTERN.sub("", normalized).strip()
-        if without_title == normalized:
+        without_prefix = RELATION_PREFIX_PATTERN.sub("", TITLE_PATTERN.sub("", normalized)).strip()
+        if without_prefix == normalized:
             return normalized
-        normalized = without_title
+        normalized = without_prefix
 
 
 def compact_name(text: str) -> str:

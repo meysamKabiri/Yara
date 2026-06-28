@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 _PROFILE_FIELDS = {"phone", "account_number", "card_number", "daily_rate", "notes"}
 
@@ -44,6 +44,26 @@ from app.models.core import (
 
 class ProjectCreate(BaseModel):
     name: str
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("Project name is required")
+        return name
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ProjectUpdate(ProjectCreate):
+    pass
 
 
 class ProjectRead(BaseModel):
@@ -51,6 +71,7 @@ class ProjectRead(BaseModel):
 
     id: int
     name: str
+    description: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -63,6 +84,25 @@ class ProjectTotals(BaseModel):
 
 class ProjectDetail(ProjectRead):
     totals: ProjectTotals
+
+
+class ProjectSummary(BaseModel):
+    total_received: Decimal
+    total_paid_out: Decimal
+    open_payables: Decimal
+    deferred_amount: Decimal
+    check_amount: Decimal
+    project_balance: Decimal
+    available_balance: Decimal
+    total_work_amount: Decimal
+    total_invoice_amount: Decimal
+    client_receivable: Decimal
+    vendor_debts: list[dict[str, str | int | Decimal]]
+    worker_payables: list[dict[str, str | int | Decimal]]
+
+
+class ProjectDetailWithSummary(ProjectDetail):
+    summary: ProjectSummary | None = None
 
 
 class RawEntryCreate(BaseModel):
@@ -160,11 +200,14 @@ class WorkLogCreate(BaseModel):
 
 
 class WorkLogUpdate(BaseModel):
+    worker_id: int | None = None
     task_name: str | None = None
     unit: WorkUnit | None = None
     quantity: Decimal | None = None
     rate_per_unit: Decimal | None = None
+    period_label: str | None = None
     description: str | None = None
+    correction_note: str | None = None
 
 
 class WorkLogRead(BaseModel):
@@ -178,7 +221,14 @@ class WorkLogRead(BaseModel):
     quantity: Decimal
     rate_per_unit: Decimal | None
     total_amount: Decimal | None
+    period_label: str | None = None
+    source_pending_interpretation_id: int | None = None
     description: str | None
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -187,6 +237,14 @@ class InvoiceCreate(BaseModel):
     vendor_id: int
     total_amount: Decimal
     description: str | None = None
+
+
+class InvoiceUpdate(BaseModel):
+    vendor_id: int | None = None
+    total_amount: Decimal | None = None
+    status: InvoiceStatus | None = None
+    description: str | None = None
+    correction_note: str | None = None
 
 
 class InvoiceRead(BaseModel):
@@ -198,6 +256,11 @@ class InvoiceRead(BaseModel):
     total_amount: Decimal
     description: str | None
     status: InvoiceStatus
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -209,6 +272,18 @@ class PaymentCreate(BaseModel):
     type: PaymentType
     due_date: str | None = None
     direction: FinancialDirection = FinancialDirection.OUTGOING
+    description: str | None = None
+
+
+class PaymentUpdate(BaseModel):
+    entity_id: int | None = None
+    amount: Decimal | None = None
+    related_invoice_id: int | None = None
+    type: PaymentType | None = None
+    due_date: str | None = None
+    direction: FinancialDirection | None = None
+    description: str | None = None
+    correction_note: str | None = None
 
 
 class PaymentRead(BaseModel):
@@ -222,6 +297,12 @@ class PaymentRead(BaseModel):
     type: PaymentType
     due_date: str | None
     direction: FinancialDirection
+    description: str | None = None
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -254,8 +335,22 @@ class HistoryEntryRead(BaseModel):
     rule_id: str | None
     explanation: dict | None
     conflict_warnings: list[dict] | None
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class NoteUpdate(BaseModel):
+    text: str
+    correction_note: str | None = None
+
+
+class VoidPayload(BaseModel):
+    reason: str | None = None
 
 
 class NaturalInputCreate(BaseModel):
@@ -358,6 +453,11 @@ class PendingInterpretationConfirm(BaseModel):
     role: str | None = None
     role_detail: str | None = None
     field_updates: dict[str, Any] | None = None
+    amount: Decimal | None = None
+    direction: FinancialDirection | None = None
+    payment_method: PaymentType | None = None
+    description: str | None = None
+    due_date: str | None = None
 
 
 class EntityResolutionResult(BaseModel):

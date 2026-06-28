@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, JobEvent, JobStatus } from "../../api";
+import { api, JobEvent, JobStatus, normalizeTraceEvent } from "../../api";
 
 type ConnectionState = "IDLE" | "CONNECTING" | "OPEN" | "CLOSED" | "ERROR";
 
@@ -15,25 +15,6 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 function websocketUrl(jobId: string): string {
   const base = import.meta.env.VITE_WS_BASE_URL || "ws://localhost:8000";
   return `${base}/ws/jobs/${encodeURIComponent(jobId)}`;
-}
-
-function normalizeEvent(raw: unknown, index: number, jobId: string): JobEvent | null {
-  if (!raw || typeof raw !== "object") return null;
-  const record = raw as Partial<JobEvent> & { name?: string; type?: string; data?: Record<string, unknown> };
-  const eventName = record.event ?? record.name ?? record.type;
-  if (!eventName) return null;
-  return {
-    trace_id: record.trace_id ?? "",
-    event: eventName,
-    payload: record.payload ?? record.data ?? {},
-    start_time: record.start_time ?? null,
-    end_time: record.end_time ?? null,
-    duration_ms: record.duration_ms ?? null,
-    created_at: record.created_at ?? Date.now() / 1000,
-    job_id: record.job_id ?? jobId,
-    sequence_number: record.sequence_number ?? index + 1,
-    timestamp: record.timestamp ?? null,
-  };
 }
 
 function eventKey(event: JobEvent): string {
@@ -124,8 +105,10 @@ export function useJobEventStream(
           const parsed = JSON.parse(message.data);
           const payload = Array.isArray(parsed) ? parsed : [parsed];
           const nextEvents = payload
-            .map((item, index) => normalizeEvent(item, events.length + index, activeJobId))
-            .filter((event): event is JobEvent => Boolean(event));
+            .map((item, index) => {
+              const event = normalizeTraceEvent(item, events.length + index);
+              return { ...event, job_id: event.job_id ?? activeJobId };
+            });
           appendEvents(nextEvents);
           if (nextEvents.some(isTerminalEvent)) {
             terminalSeen = true;

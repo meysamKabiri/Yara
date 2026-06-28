@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
-import { FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS, ROLE_OPTIONS } from "../../constants";
+import { FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS, ROLE_OPTIONS, SEMANTIC_ACTION_OPTIONS } from "../../constants";
+import { exactEntityIdByName } from "../confirmPayload";
 
 const CREATE_NEW_SENTINEL = -1;
 
@@ -68,6 +69,14 @@ function expectedRole(entity: Record<string, unknown>, semanticAction: string | 
   return null;
 }
 
+function actionLabel(action: string | null): string {
+  const option = SEMANTIC_ACTION_OPTIONS.find((item) => item.value === action);
+  if (option) return option.label;
+  if (action === "PAYMENT_IN") return "دریافتی";
+  if (action === "PAYMENT_OUT") return "پرداختی";
+  return "رویداد مالی";
+}
+
 interface FinancialModalProps {
   interpretation: PendingInterpretation;
   workers: Worker[];
@@ -79,6 +88,8 @@ interface FinancialModalProps {
     amount: string;
     direction: string;
     payment_method: string;
+    description?: string | null;
+    due_date?: string | null;
     create_new_entity?: boolean;
     entity_name?: string;
     project_role?: string;
@@ -108,7 +119,11 @@ export function FinancialModal({
     const expRole = expectedRole(extractedCounterparty, semAction, direction);
     const clients = workers.filter((w) => w.type === "CLIENT");
 
-    // 1. exact match + role compatible
+    // 1. unique normalized project-person match, even if extraction guessed a generic vendor role
+    const normalizedNameMatch = entityName ? exactEntityIdByName(entityName, workers) : null;
+    if (normalizedNameMatch) return normalizedNameMatch;
+
+    // 2. exact match + role compatible
     for (const c of candidateList) {
       const rec = c as Record<string, unknown>;
       if (rec.match_type === "exact" && typeof rec.person_id === "number") {
@@ -117,7 +132,7 @@ export function FinancialModal({
       }
     }
 
-    // 2. single role-compatible partial >= 0.75
+    // 3. single role-compatible partial >= 0.75
     const viable: { worker: Worker; score: number }[] = [];
     for (const c of candidateList) {
       const rec = c as Record<string, unknown>;
@@ -129,14 +144,14 @@ export function FinancialModal({
     }
     if (viable.length === 1 && viable[0].score >= 0.75) return viable[0].worker.id;
 
-    // 3. CLIENT rule: partial >= 0.60 when exactly one project client
+    // 4. CLIENT rule: partial >= 0.60 when exactly one project client
     if (expRole === "CLIENT" && clients.length === 1) {
       const client = clients[0];
       const inCandidates = candidateList.some((c) => (c as Record<string, unknown>).person_id === client.id);
       if (inCandidates) return client.id;
     }
 
-    // 4. exact name match (role-compatible)
+    // 5. exact name match (role-compatible)
     if (entityName) {
       const match = workers.find((w) => w.name === entityName && isRoleCompatible(w.type, expRole));
       if (match) return match.id;
@@ -163,6 +178,8 @@ export function FinancialModal({
   const [paymentMethod, setPaymentMethod] = useState(interpretation.payment_method ?? "");
   const [newEntityName, setNewEntityName] = useState(extractedName);
   const [newEntityRole, setNewEntityRole] = useState(extractedType);
+  const [description, setDescription] = useState(interpretation.description ?? interpretation.matched_input_text ?? "");
+  const [dueDate, setDueDate] = useState(interpretation.due_date ?? "");
 
   const isCreatingNew = entityId === CREATE_NEW_SENTINEL;
 
@@ -173,6 +190,8 @@ export function FinancialModal({
         amount: amount.trim(),
         direction,
         payment_method: paymentMethod,
+        description: description.trim() || null,
+        due_date: dueDate.trim() || null,
         create_new_entity: true,
         entity_name: newEntityName.trim(),
         project_role: newEntityRole,
@@ -183,6 +202,8 @@ export function FinancialModal({
         amount: amount.trim(),
         direction,
         payment_method: paymentMethod,
+        description: description.trim() || null,
+        due_date: dueDate.trim() || null,
       });
     }
   }
@@ -194,10 +215,19 @@ export function FinancialModal({
   const workerOptions = workers;
 
   return (
-    <article className="interpretation-card">
-      <section className="approval-section">
-        <span className="eyebrow">برداشت مالی</span>
+    <article className="interpretation-card modal-shell">
+      <header className="modal-header">
+        <div>
+          <h3 className="modal-title">ثبت مالی</h3>
+          <p>مبلغ و طرف حساب را بررسی کنید.</p>
+        </div>
+      </header>
+      <section className="approval-section modal-body">
         <div className="edit-grid">
+          <label>
+            نوع ثبت
+            <input value={actionLabel(interpretation.semantic_action)} readOnly />
+          </label>
           <label>
             طرف حساب
             <select
@@ -265,23 +295,35 @@ export function FinancialModal({
             </select>
           </label>
           <label>
+            توضیحات
+            <input value={description} onChange={(e) => setDescription(e.target.value)} />
+          </label>
+          {interpretation.due_date && (
+            <label>
+              سررسید
+              <input value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+            </label>
+          )}
+          <label>
             پروژه
             <input value={projectName || (activeProjectId ? `پروژه ${activeProjectId}` : "ثبت نشده")} readOnly />
           </label>
         </div>
       </section>
-      <div className="modal-actions">
-        <button
-          className="primary-action"
-          type="button"
-          onClick={handleConfirm}
-          disabled={isLoading || !canConfirm}
-        >
-          تایید
-        </button>
-        <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-          حذف
-        </button>
+      <div className="modal-footer">
+        <div className="modal-actions">
+          <button
+            className="primary-action"
+            type="button"
+            onClick={handleConfirm}
+            disabled={isLoading || !canConfirm}
+          >
+            تایید و ثبت
+          </button>
+          <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
+            نادیده گرفتن
+          </button>
+        </div>
       </div>
     </article>
   );

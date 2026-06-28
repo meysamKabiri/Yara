@@ -38,8 +38,38 @@ function emitTrace(traceId: string) {
 export type Project = {
   id: number;
   name: string;
+  description: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type VendorDebt = {
+  vendor_id: number;
+  vendor_name: string;
+  invoice_total: string;
+  paid_total: string;
+  debt: string;
+};
+
+export type WorkerPayable = {
+  worker_id: number;
+  worker_name: string;
+  debt: string;
+};
+
+export type ProjectSummary = {
+  total_received: string;
+  total_paid_out: string;
+  open_payables: string;
+  deferred_amount: string;
+  check_amount: string;
+  project_balance: string;
+  available_balance: string;
+  total_work_amount: string;
+  total_invoice_amount: string;
+  client_receivable: string;
+  vendor_debts: VendorDebt[];
+  worker_payables: WorkerPayable[];
 };
 
 export type ProjectDetail = Project & {
@@ -48,6 +78,7 @@ export type ProjectDetail = Project & {
     money_out: string;
     net: string;
   };
+  summary: ProjectSummary | null;
 };
 
 export type RawEntry = {
@@ -126,7 +157,14 @@ export type WorkLog = {
   quantity: string;
   rate_per_unit: string | null;
   total_amount: string | null;
+  period_label: string | null;
+  source_pending_interpretation_id: number | null;
   description: string | null;
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -138,6 +176,11 @@ export type Invoice = {
   total_amount: string;
   description: string | null;
   status: "OPEN" | "PARTIAL" | "PAID";
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -151,9 +194,45 @@ export type Payment = {
   type: PaymentType;
   due_date: string | null;
   direction: FinancialDirection;
+  description: string | null;
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
+
+export type PaymentCorrectionPayload = Partial<{
+  entity_id: number;
+  amount: string;
+  related_invoice_id: number | null;
+  type: PaymentType;
+  due_date: string | null;
+  direction: FinancialDirection;
+  description: string | null;
+  correction_note: string | null;
+}>;
+
+export type WorkLogCorrectionPayload = Partial<{
+  worker_id: number;
+  task_name: string;
+  unit: WorkUnit;
+  quantity: string;
+  rate_per_unit: string | null;
+  period_label: string | null;
+  description: string | null;
+  correction_note: string | null;
+}>;
+
+export type PayableCorrectionPayload = Partial<{
+  vendor_id: number;
+  total_amount: string;
+  status: "OPEN" | "PARTIAL" | "PAID";
+  description: string | null;
+  correction_note: string | null;
+}>;
 
 export type OperatingSummary = {
   total_work_amount: string;
@@ -166,6 +245,8 @@ export type OperatingSummary = {
   project_balance: string;
   client_receivable: string;
   available_balance: string;
+  deferred_amount: string;
+  check_amount: string;
   vendor_debts: Array<{
     vendor_id: number;
     vendor_name: string;
@@ -180,6 +261,66 @@ export type OperatingSummary = {
   }>;
 };
 
+export type ProjectReportSummary = {
+  money_in: string;
+  paid_out: string;
+  open_payables: string;
+  deferred_checks: string;
+  labor_cost: string;
+  worker_payments: string;
+  approximate_balance: string;
+  pending_count: number;
+};
+
+export type ClientPaymentReportRow = {
+  entity_id: number;
+  name: string;
+  total_paid: string;
+  payment_count: number;
+  last_payment_at: string | null;
+};
+
+export type WorkerReportRow = {
+  worker_id: number;
+  entity_id: number;
+  name: string;
+  total_days: string;
+  total_labor_cost: string;
+  total_paid: string;
+  remaining_balance: string;
+  daily_rate: string | null;
+};
+
+export type PayableReportRow = {
+  id: string;
+  entity_id: number;
+  name: string;
+  kind: "vendor_payable" | "deferred_check" | "worker_labor";
+  amount: string;
+  due_date: string | null;
+  description: string | null;
+};
+
+export type ExpenseReportSummary = {
+  vendor_paid_total: string;
+  worker_paid_total: string;
+  other_outgoing_total: string;
+  open_vendor_payables: string;
+  deferred_check_total: string;
+};
+
+export type ProjectReportResponse = {
+  project_id: number;
+  project_name: string;
+  from_date: string | null;
+  to_date: string | null;
+  summary: ProjectReportSummary;
+  client_payments: ClientPaymentReportRow[];
+  workers: WorkerReportRow[];
+  expense_summary: ExpenseReportSummary;
+  payables: PayableReportRow[];
+};
+
 export type HistoryEntry = {
   id: number;
   project_id: number;
@@ -190,6 +331,11 @@ export type HistoryEntry = {
   rule_id: string | null;
   explanation: Record<string, unknown> | null;
   conflict_warnings: Array<Record<string, unknown>> | null;
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -215,7 +361,7 @@ export type PendingInterpretation = {
   confidence: number | null;
   structured_interpretation: Record<string, unknown> | null;
   domain_route: {
-    domain: "SETUP" | "FINANCIAL" | "ENTITY_UPDATE" | "MIXED";
+    domain: "SETUP" | "FINANCIAL" | "WORK" | "ENTITY_UPDATE" | "MIXED";
     confidence: number;
     required_schema: "setup_confirmation" | "entity_update_confirmation" | "financial_confirmation" | "split_confirmation";
     ui_mode: "SetupModal" | "EntityUpdateModal" | "FinancialModal" | "SplitFlow";
@@ -236,6 +382,11 @@ export type PendingInterpretationConfirm = {
   role?: string | null;
   role_detail?: string | null;
   field_updates?: Record<string, unknown> | null;
+  amount?: string | null;
+  direction?: FinancialDirection | null;
+  payment_method?: PaymentType | null;
+  description?: string | null;
+  due_date?: string | null;
 };
 
 export type EntityResolutionResult = {
@@ -271,11 +422,28 @@ export type NaturalInputInterpretationResult = {
 export type TraceEvent = {
   trace_id: string;
   event: string;
+  event_group?: string;
   payload: Record<string, unknown>;
   start_time: number | null;
   end_time: number | null;
   duration_ms: number | null;
   created_at: number;
+};
+
+export type MetricTraceEvent = {
+  trace_id: string;
+  event_name: string;
+  event_group: string;
+  event_index: number;
+  timestamp: string;
+  duration_ms: number | null;
+  payload: Record<string, unknown>;
+};
+
+export type TraceMetricsResponse = {
+  trace_id: string;
+  total_duration_ms: number;
+  events: MetricTraceEvent[];
 };
 
 export type TraceDetail = {
@@ -308,6 +476,63 @@ export type JobEvent = TraceEvent & {
   sequence_number?: number;
   timestamp?: string | number | null;
 };
+
+type RawTraceEvent = Partial<TraceEvent> & {
+  traceId?: string;
+  trace_id?: string;
+  job_id?: string;
+  event?: string;
+  eventName?: string;
+  event_name?: string;
+  eventGroup?: string;
+  event_group?: string;
+  eventIndex?: number;
+  event_index?: number;
+  sequence_number?: number;
+  durationMs?: number | null;
+  duration_ms?: number | null;
+  createdAt?: number;
+  created_at?: number;
+  timestamp?: string | number | null;
+  name?: string;
+  type?: string;
+  data?: Record<string, unknown>;
+};
+
+export function normalizeTraceEvent(raw: unknown, index = 0): JobEvent {
+  const record = raw && typeof raw === "object" ? raw as RawTraceEvent : {};
+  const eventName = record.event ?? record.eventName ?? record.event_name ?? record.name ?? record.type ?? "UNKNOWN_EVENT";
+  const eventGroup = record.event_group ?? record.eventGroup ?? "OTHER";
+  const eventIndex = record.sequence_number ?? record.eventIndex ?? record.event_index ?? index + 1;
+
+  return {
+    trace_id: record.trace_id ?? record.traceId ?? "",
+    event: eventName,
+    event_group: eventGroup,
+    payload: record.payload ?? record.data ?? {},
+    start_time: record.start_time ?? null,
+    end_time: record.end_time ?? null,
+    duration_ms: record.duration_ms ?? record.durationMs ?? null,
+    created_at: record.created_at ?? record.createdAt ?? Date.now() / 1000,
+    job_id: record.job_id,
+    sequence_number: eventIndex,
+    timestamp: record.timestamp ?? null,
+  };
+}
+
+export function normalizeMetricTraceEvent(raw: unknown, index = 0): MetricTraceEvent {
+  const record = raw && typeof raw === "object" ? raw as RawTraceEvent : {};
+
+  return {
+    trace_id: record.trace_id ?? record.traceId ?? "",
+    event_name: record.eventName ?? record.event_name ?? record.event ?? record.name ?? record.type ?? "UNKNOWN_EVENT",
+    event_group: record.eventGroup ?? record.event_group ?? "OTHER",
+    event_index: record.eventIndex ?? record.event_index ?? record.sequence_number ?? index + 1,
+    timestamp: String(record.timestamp ?? record.created_at ?? record.createdAt ?? new Date().toISOString()),
+    duration_ms: record.durationMs ?? record.duration_ms ?? null,
+    payload: record.payload ?? record.data ?? {},
+  };
+}
 
 /* =========================================================
    REQUEST WRAPPER
@@ -357,6 +582,12 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  updateProject: (projectId: number, payload: { name: string; description?: string | null }) =>
+    request<Project>(`/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
   getProject: (projectId: number) =>
     request<ProjectDetail>(`/projects/${projectId}`),
 
@@ -379,6 +610,9 @@ export const api = {
     request<ExtractedEvent[]>(
       `/projects/${projectId}/extracted-events/pending`,
     ),
+
+  listPendingInterpretations: (projectId: number) =>
+    request<PendingInterpretation[]>(`/projects/${projectId}/pending-interpretations`),
 
   listConfirmedEvents: (projectId: number) =>
     request<ExtractedEvent[]>(
@@ -437,13 +671,37 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  correctWorkLog: (projectId: number, workLogId: number, payload: WorkLogCorrectionPayload) =>
+    request<WorkLog>(`/projects/${projectId}/work-logs/${workLogId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidWorkLog: (projectId: number, workLogId: number, reason?: string | null) =>
+    request<WorkLog>(`/projects/${projectId}/work-logs/${workLogId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+
   listPayments: (projectId: number) =>
     request<Payment[]>(`/projects/${projectId}/payments`),
 
-  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType; direction?: FinancialDirection; due_date?: string | null }) =>
+  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType; direction?: FinancialDirection; due_date?: string | null; description?: string | null }) =>
     request<Payment>(`/projects/${projectId}/payments`, {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  correctPayment: (projectId: number, paymentId: number, payload: PaymentCorrectionPayload) =>
+    request<Payment>(`/projects/${projectId}/payments/${paymentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidPayment: (projectId: number, paymentId: number, reason?: string | null) =>
+    request<Payment>(`/projects/${projectId}/payments/${paymentId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
     }),
 
   listInvoices: (projectId: number) =>
@@ -455,10 +713,50 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  correctPayable: (projectId: number, payableId: number, payload: PayableCorrectionPayload) =>
+    request<Invoice>(`/projects/${projectId}/payables/${payableId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidPayable: (projectId: number, payableId: number, reason?: string | null) =>
+    request<Invoice>(`/projects/${projectId}/payables/${payableId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+
+  correctNote: (projectId: number, noteId: number, payload: { text: string; correction_note?: string | null }) =>
+    request<HistoryEntry>(`/projects/${projectId}/notes/${noteId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidNote: (projectId: number, noteId: number, reason?: string | null) =>
+    request<HistoryEntry>(`/projects/${projectId}/notes/${noteId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+
   getOperatingSummary: (projectId: number) =>
     request<OperatingSummary>(`/projects/${projectId}/operating-summary`),
 
+  getProjectReportSummary: (projectId: number, filters: { from_date?: string; to_date?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.from_date) params.set("from_date", filters.from_date);
+    if (filters.to_date) params.set("to_date", filters.to_date);
+    const query = params.toString();
+    return request<ProjectReportResponse>(`/projects/${projectId}/reports/summary${query ? `?${query}` : ""}`);
+  },
+
   getTrace: (traceId: string) => request<TraceDetail>(`/traces/${traceId}`),
+
+  getTraceMetrics: async (traceId: string) => {
+    const result = await request<TraceMetricsResponse>(`/metrics/trace/${encodeURIComponent(traceId)}`);
+    return {
+      ...result,
+      events: result.events.map((event, index) => normalizeMetricTraceEvent(event, index)),
+    };
+  },
 
   listJobs: () => request<NaturalInputJobRecord[]>("/jobs"),
 
@@ -469,7 +767,8 @@ export const api = {
     const result = await request<JobEvent[] | { events: JobEvent[] }>(
       `/jobs/${encodeURIComponent(jobId)}/events`,
     );
-    return Array.isArray(result) ? result : result.events;
+    const events = Array.isArray(result) ? result : result.events;
+    return events.map((event, index) => normalizeTraceEvent(event, index));
   },
 
   processNaturalInput: (projectId: number, text: string) =>
