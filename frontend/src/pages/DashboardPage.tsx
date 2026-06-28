@@ -1,5 +1,5 @@
-import { FormEvent, KeyboardEvent, useMemo, useRef, useState } from "react";
-import { ArrowDownCircle, ArrowUpCircle, BriefcaseBusiness, Clock, FolderKanban, Hammer, Plus, Search, Scale, UserRound, Wallet, X } from "lucide-react";
+import { FormEvent, useMemo, useRef, useState } from "react";
+import { ArrowDownCircle, ArrowUpCircle, BriefcaseBusiness, ChevronDown, ChevronUp, Clock, FolderKanban, Plus, Search, Scale, UserRound, Wallet, X } from "lucide-react";
 import { Project } from "../api";
 
 type ProjectFinancials = {
@@ -38,6 +38,7 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
   const projectNameInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState("");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [expandedProjectId, setExpandedProjectId] = useState<number | null>(null);
   const visibleProjects = useMemo(() => {
     const needle = search.trim().toLowerCase();
     if (!needle) return projects;
@@ -47,12 +48,6 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
   function submitCreate(event: FormEvent) {
     onCreateProject(event);
     if (projectName.trim()) setIsCreateOpen(false);
-  }
-
-  function openProjectFromKeyboard(event: KeyboardEvent<HTMLElement>, projectId: number) {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    onOpenProject(projectId);
   }
 
   return (
@@ -80,34 +75,42 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
           {visibleProjects.map((project) => {
             const financials = projectFinancials[project.id] ?? { received: 0, paid: 0, net: 0, debt: 0, labor: 0, pending: 0, deferred: 0, clientName: null, lastActivity: project.updated_at };
             const status = projectStatus(financials);
+            const isExpanded = expandedProjectId === project.id;
+            const createdAt = new Date(project.created_at).toLocaleDateString("fa-IR");
+            const lastActivity = new Date(financials.lastActivity ?? project.updated_at).toLocaleDateString("fa-IR");
+            const cashBalance = financials.received - financials.paid;
             return (
               <article
-                aria-label={`مشاهده جزئیات پروژه ${project.name}`}
-                className="project-card project-overview-card"
+                className={`project-card project-overview-card${isExpanded ? " is-expanded" : ""}`}
                 key={project.id}
-                onClick={() => onOpenProject(project.id)}
-                onKeyDown={(event) => openProjectFromKeyboard(event, project.id)}
-                role="button"
-                tabIndex={0}
               >
                 <div className="project-card-head">
-                  <div>
+                  <button
+                    className="project-card-toggle"
+                    type="button"
+                    onClick={() => setExpandedProjectId((current) => current === project.id ? null : project.id)}
+                    aria-expanded={isExpanded}
+                    aria-label={`${isExpanded ? "بستن کارت پروژه" : "باز کردن کارت پروژه"} ${project.name}`}
+                  >
                     <strong>{project.name}</strong>
-                    <span><Clock aria-hidden="true" size={13} />آخرین فعالیت: {new Date(financials.lastActivity ?? project.updated_at).toLocaleDateString("fa-IR")}</span>
+                    {isExpanded ? <ChevronUp className="project-card-chevron" aria-hidden="true" size={18} /> : <ChevronDown className="project-card-chevron" aria-hidden="true" size={18} />}
+                  </button>
+                  <div className="project-card-identity">
+                    <span className="desktop-project-dates"><Clock aria-hidden="true" size={13} />ایجاد: {createdAt} · آخرین فعالیت: {lastActivity}</span>
+                    <span className="mobile-project-date"><Clock aria-hidden="true" size={13} />آخرین فعالیت: {lastActivity}</span>
                     <span><UserRound aria-hidden="true" size={13} />کارفرما: {financials.clientName ?? "ثبت نشده"}</span>
                   </div>
-                  <mark className={status.className}>{status.label}</mark>
+                  <mark className={`project-card-status ${status.className}`}>{status.label}</mark>
                 </div>
-                <dl>
+                <dl className="project-card-details">
                   <div><dt><ArrowDownCircle aria-hidden="true" size={15} />دریافتی</dt><dd className="money-positive">{money(financials.received)}</dd></div>
-                  <div><dt><ArrowUpCircle aria-hidden="true" size={15} />پرداختی</dt><dd className="money-negative">{money(financials.paid)}</dd></div>
+                  <div><dt><ArrowUpCircle aria-hidden="true" size={15} />پرداخت‌شده</dt><dd className="money-negative">{money(financials.paid)}</dd></div>
+                  <div><dt><Scale aria-hidden="true" size={15} />موجودی نقدی پروژه</dt><dd className={cashBalance >= 0 ? "money-positive" : "money-negative"}>{money(cashBalance)}</dd></div>
                   <div><dt><Wallet aria-hidden="true" size={15} />بدهی باز</dt><dd className={financials.debt > 0 ? "money-pending" : ""}>{money(financials.debt)}</dd></div>
-                  <div><dt><Hammer aria-hidden="true" size={15} />کارکرد</dt><dd>{money(financials.labor)}</dd></div>
-                  <div><dt><Scale aria-hidden="true" size={15} />مانده</dt><dd className={financials.net >= 0 ? "money-positive" : "money-negative"}>{money(financials.net)}</dd></div>
-                  <div><dt>در انتظار تایید</dt><dd className={financials.pending > 0 ? "money-pending" : ""}>{financials.pending.toLocaleString("fa-IR")}</dd></div>
+                  <div className="project-created-row"><dt>تاریخ ایجاد</dt><dd>{createdAt}</dd></div>
                 </dl>
                 <div className="project-card-actions">
-                  <span className="project-card-link">مشاهده جزئیات ←</span>
+                  <button className="project-card-link" type="button" onClick={() => onOpenProject(project.id)}>مشاهده پروژه</button>
                 </div>
               </article>
             );

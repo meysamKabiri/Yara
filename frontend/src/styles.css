@@ -48,12 +48,48 @@ button:disabled {
 input,
 select,
 textarea {
-  width: 100%;
+  background: #ffffff;
   border: 1px solid #d7dfdc;
   border-radius: 14px;
-  background: #ffffff;
   color: #1b2530;
+  min-height: 44px;
   padding: 0.7rem 0.8rem;
+  width: 100%;
+}
+
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #65727d 50%),
+    linear-gradient(135deg, #65727d 50%, transparent 50%);
+  background-position:
+    left 1rem center,
+    left 0.72rem center;
+  background-repeat: no-repeat;
+  background-size:
+    0.32rem 0.32rem,
+    0.32rem 0.32rem;
+  direction: rtl;
+  line-height: 1.45;
+  padding-inline-end: 0.8rem;
+  padding-inline-start: 2.2rem;
+  text-align: right;
+  text-overflow: ellipsis;
+}
+
+select:disabled {
+  background-color: #f3f6f4;
+  color: #7a8782;
+  opacity: 1;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: #8eb8a2;
+  box-shadow: 0 0 0 3px rgb(47 143 91 / 0.12);
+  outline: none;
 }
 
 textarea {
@@ -404,7 +440,7 @@ textarea {
 }
 
 .project-overview-card {
-  cursor: pointer;
+  cursor: default;
   gap: 0.9rem;
   min-height: 0;
   outline: none;
@@ -443,12 +479,30 @@ textarea {
 
 .project-card-head {
   align-items: flex-start;
-  display: flex;
-  gap: 0.75rem;
-  justify-content: space-between;
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  width: 100%;
 }
 
-.project-card-head > div {
+.project-card-toggle {
+  align-items: flex-start;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 0.65rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 0;
+  text-align: start;
+  width: 100%;
+}
+
+.project-card-identity {
   display: grid;
   gap: 0.2rem;
   min-width: 0;
@@ -464,9 +518,25 @@ textarea {
   white-space: nowrap;
 }
 
-.project-card-head mark {
+.mobile-project-date {
+  display: none;
+}
+
+.project-card-status {
   flex: 0 0 auto;
   font-size: 0.76rem;
+  justify-self: start;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-card-chevron {
+  color: #65727d;
+  display: none;
+  flex: 0 0 auto;
+  margin-top: 0.35rem;
 }
 
 .project-overview-card dl {
@@ -483,11 +553,16 @@ textarea {
 
 .project-card-link {
   align-items: center;
+  appearance: none;
+  background: transparent;
+  border: 0;
   color: #426c5a;
+  cursor: pointer;
   display: inline-flex;
   font-size: 0.86rem;
   font-weight: 800;
   line-height: 1.6;
+  padding: 0;
 }
 
 .project-overview-card:hover .project-card-link,
@@ -1931,6 +2006,25 @@ mark {
     padding: 0.85rem;
   }
 
+  .project-list-title {
+    align-items: stretch;
+    display: grid;
+    gap: 0.75rem;
+    justify-content: stretch;
+  }
+
+  .project-list-title .create-project-trigger {
+    box-shadow: 0 6px 16px rgb(47 143 91 / 0.12);
+    justify-content: center;
+    min-height: 44px;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .project-search {
+    max-width: 100%;
+  }
+
   .create-project-card {
     grid-template-columns: 1fr;
     max-width: 100%;
@@ -1947,14 +2041,67 @@ mark {
 
   .project-overview-card {
     border-radius: 20px;
+    box-shadow: 0 8px 22px rgb(31 48 38 / 0.035);
+    gap: 0;
+    padding: 0.9rem;
   }
 
   .project-card-head {
-    display: grid;
+    gap: 0.45rem;
   }
 
-  .project-card-head mark {
-    justify-self: start;
+  .project-card-status {
+    max-width: 8.5rem;
+  }
+
+  .project-card-toggle {
+    align-items: flex-start;
+    min-height: 44px;
+  }
+
+  .project-card-chevron {
+    display: block;
+    height: 20px;
+    margin-top: 0.45rem;
+    width: 20px;
+  }
+
+  .project-card-head .desktop-project-dates {
+    display: none;
+  }
+
+  .project-card-head .mobile-project-date {
+    display: inline-flex;
+  }
+
+  .project-overview-card .project-card-details,
+  .project-overview-card .project-card-actions {
+    display: none;
+  }
+
+  .project-overview-card.is-expanded {
+    gap: 0.85rem;
+  }
+
+  .project-overview-card.is-expanded .project-card-details {
+    border-top: 1px solid #eef3f0;
+    display: grid;
+    padding-top: 0.75rem;
+  }
+
+  .project-overview-card.is-expanded .project-card-actions {
+    border-top: 1px solid #eef3f0;
+    display: flex;
+    padding-top: 0.75rem;
+  }
+
+  .project-card-actions .project-card-link {
+    align-items: center;
+    border: 1px solid #cdded5;
+    border-radius: 12px;
+    justify-content: center;
+    min-height: 42px;
+    width: 100%;
   }
 
   .main-nav {
