@@ -1,5 +1,9 @@
 from inspect import signature
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
+import traceback
+
+from sqlalchemy import select, update
 
 from app.core.financial_role_repair import normalize_outgoing_payment_role
 from app.core import unified_pipeline
@@ -12,11 +16,20 @@ from app.core.trace_context import (
     set_trace_context,
 )
 from app.db.session import SessionLocal
-from app.models.core import NaturalInputJob, NaturalInputJobStatus
+from app.models.core import (
+    NaturalInputJob,
+    NaturalInputJobStatus,
+    PendingInterpretation,
+    PendingInterpretationStatus,
+    RawEntry,
+    RawEntryStatus,
+)
 from app.schemas.projects import PendingInterpretationRead
+from app.services.financial_reconciliation_service import record_dead_letter_job
 
 
 FINAL_JOB_STATUSES = {NaturalInputJobStatus.DONE, NaturalInputJobStatus.FAILED}
+RUNNING_JOB_RECOVERY_AFTER = timedelta(minutes=15)
 
 
 def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
@@ -28,7 +41,11 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
     llm_finished = False
 
     try:
-        job = db.query(NaturalInputJob).filter(NaturalInputJob.job_id == job_id).one_or_none()
+        job = db.scalar(
+            select(NaturalInputJob)
+            .where(NaturalInputJob.job_id == job_id)
+            .with_for_update()
+        )
         if job is None:
             job = NaturalInputJob(
                 job_id=job_id,
@@ -41,12 +58,41 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
             job.trace_id = new_trace_id()
             db.flush()
         trace_id = job.trace_id
+        if job.status in FINAL_JOB_STATUSES:
+            return {
+                "job_id": job.job_id,
+                "status": job.status.value if hasattr(job.status, "value") else job.status,
+                "result": job.result,
+                "error": job.error,
+                "trace_id": job.trace_id,
+            }
+        recovered_from_running = False
+        if job.status == NaturalInputJobStatus.PENDING:
+            if not _claim_pending_job(db, job_id):
+                db.refresh(job)
+                return {
+                    "job_id": job.job_id,
+                    "status": job.status.value if hasattr(job.status, "value") else job.status,
+                    "result": job.result,
+                    "error": job.error,
+                    "trace_id": job.trace_id,
+                }
+            db.refresh(job)
+        elif job.status == NaturalInputJobStatus.RUNNING:
+            recovered_from_running = True
+        if recovered_from_running and not _running_job_is_stale(job):
+            return {
+                "job_id": job.job_id,
+                "status": NaturalInputJobStatus.RUNNING.value,
+                "result": job.result,
+                "error": job.error,
+                "trace_id": job.trace_id,
+            }
         track_event(db=db, trace_id=trace_id, event_name="job.started", payload={"job_id": job_id, "project_id": project_id})
         job_token, trace_token = set_trace_context(job_id, trace_id)
-        if job.status == NaturalInputJobStatus.RUNNING:
+        if recovered_from_running:
             track_event(db=db, trace_id=trace_id, event_name="JOB_RECOVERED_FROM_RUNNING", payload={"project_id": project_id, "previous_status": NaturalInputJobStatus.RUNNING.value})
         track_event(db=db, trace_id=trace_id, event_name="JOB_STARTED", payload={"project_id": project_id})
-        job.status = NaturalInputJobStatus.RUNNING
         job.error = None
         commit_start = perf_counter()
         db.commit()
@@ -55,7 +101,18 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         track_event(db=db, trace_id=trace_id, event_name="DOMAIN_ROUTER_START", payload={"project_id": project_id})
         pipeline_start = perf_counter()
         request_cache = new_request_cache()
-        interpretations = _process_input_once(db, project_id, text, request_cache)
+        interpretations = []
+        if recovered_from_running:
+            interpretations = _existing_pending_interpretations_for_retry(db, project_id, text)
+            if interpretations:
+                track_event(
+                    db=db,
+                    trace_id=trace_id,
+                    event_name="JOB_RETRY_REUSED_PENDING_INTERPRETATIONS",
+                    payload={"project_id": project_id, "interpretation_count": len(interpretations)},
+                )
+        if not interpretations:
+            interpretations = _process_input_once(db, project_id, text, request_cache)
         failed_llm_result = _failed_llm_result(request_cache)
         if failed_llm_result is not None and not interpretations:
             track_event(db=db, trace_id=trace_id, event_name="LLM_FAILED", payload={"project_id": project_id, "error_message": failed_llm_result.get("reasoning_summary") or "LLM output parsing failed"}, duration_ms=(perf_counter() - pipeline_start) * 1000)
@@ -88,6 +145,9 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
         job.status = NaturalInputJobStatus.DONE
         job.result = result
         job.error = None
+        raw_entry = _raw_entry_for_job(db, job_id)
+        if raw_entry is not None:
+            raw_entry.status = RawEntryStatus.PROCESSED
         commit_start = perf_counter()
         db.commit()
         track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.DONE.value}, duration_ms=(perf_counter() - commit_start) * 1000)
@@ -113,12 +173,24 @@ def process_natural_input_job(job_id: str, project_id: int, text: str) -> dict:
             trace_id = job.trace_id
             job.status = NaturalInputJobStatus.FAILED
             job.error = str(e)
+            raw_entry = _raw_entry_for_job(db, job_id)
+            if raw_entry is not None:
+                raw_entry.status = RawEntryStatus.FAILED
             failed_result = dict(job.result or {})
             failed_result.setdefault("_events", [])
             job.result = failed_result
             commit_start = perf_counter()
             db.commit()
             track_event(db=db, trace_id=trace_id, event_name="DB_WRITE_SUCCESS", payload={"project_id": project_id, "status": NaturalInputJobStatus.FAILED.value}, duration_ms=(perf_counter() - commit_start) * 1000)
+            record_dead_letter_job(
+                db,
+                job_id=job_id,
+                project_id=project_id,
+                payload={"job_id": job_id, "project_id": project_id, "text": text},
+                error_trace="".join(traceback.format_exception(type(e), e, e.__traceback__)),
+                retry_count=0,
+                source="natural_input",
+            )
         if trace_id is not None:
             track_event(db=db, trace_id=trace_id, event_name="job.failed", payload={"job_id": job_id, "error": str(e)})
             track_event(db=db, trace_id=trace_id, event_name="ERROR_OCCURRED", payload={"project_id": project_id, "error_message": str(e)})
@@ -154,6 +226,48 @@ def _process_input_once(db, project_id: int, text: str, request_cache):
     if "request_cache" in signature(process_input).parameters:
         return process_input(db, project_id, text, request_cache=request_cache)
     return process_input(db, project_id, text)
+
+
+def _raw_entry_for_job(db, job_id: str) -> RawEntry | None:
+    return db.query(RawEntry).filter(RawEntry.job_id == job_id).one_or_none()
+
+
+def _claim_pending_job(db, job_id: str) -> bool:
+    result = db.execute(
+        update(NaturalInputJob)
+        .where(
+            NaturalInputJob.job_id == job_id,
+            NaturalInputJob.status == NaturalInputJobStatus.PENDING,
+        )
+        .values(status=NaturalInputJobStatus.RUNNING, error=None)
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+def _running_job_is_stale(job: NaturalInputJob) -> bool:
+    updated_at = job.updated_at
+    if updated_at is None:
+        return True
+    if updated_at.tzinfo is not None:
+        updated_at = updated_at.astimezone(UTC).replace(tzinfo=None)
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - RUNNING_JOB_RECOVERY_AFTER
+    return updated_at < cutoff
+
+
+def _existing_pending_interpretations_for_retry(db, project_id: int, text: str) -> list[PendingInterpretation]:
+    return (
+        db.query(PendingInterpretation)
+        .filter(
+            PendingInterpretation.project_id == project_id,
+            PendingInterpretation.raw_input_text == text,
+            PendingInterpretation.status.in_(
+                [PendingInterpretationStatus.PENDING, PendingInterpretationStatus.EDITED]
+            ),
+        )
+        .order_by(PendingInterpretation.id.asc())
+        .all()
+    )
 
 
 def _failed_llm_result(request_cache) -> dict | None:

@@ -107,6 +107,7 @@ class ProjectDetailWithSummary(ProjectDetail):
 
 class RawEntryCreate(BaseModel):
     text: str
+    idempotency_key: str | None = None
 
 
 class RawEntryRead(BaseModel):
@@ -114,6 +115,8 @@ class RawEntryRead(BaseModel):
 
     id: int
     project_id: int
+    job_id: str | None = None
+    idempotency_key: str | None = None
     text: str
     status: RawEntryStatus
     created_at: datetime
@@ -355,6 +358,7 @@ class VoidPayload(BaseModel):
 
 class NaturalInputCreate(BaseModel):
     text: str
+    idempotency_key: str | None = None
 
 
 class DomainRouteRead(BaseModel):

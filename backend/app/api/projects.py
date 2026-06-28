@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Response, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
@@ -543,7 +544,7 @@ def _find_or_create_worker_state(
             WorkerState.project_id == project_id,
             WorkerState.name == normalized_name,
             WorkerState.role == role,
-        )
+        ).with_for_update()
     )
     if state is not None:
         return state
@@ -552,7 +553,7 @@ def _find_or_create_worker_state(
             select(WorkerState).where(
                 WorkerState.project_id == project_id,
                 WorkerState.name == normalized_name,
-            )
+            ).with_for_update()
         )
         if state is not None:
             return state
@@ -1232,7 +1233,11 @@ def create_raw_entry(
     project_id: int, payload: RawEntryCreate, db: DbSession
 ) -> RawEntry:
     _get_project(db, project_id)
-    raw_entry = RawEntry(project_id=project_id, text=payload.text)
+    raw_entry = RawEntry(
+        project_id=project_id,
+        text=payload.text,
+        idempotency_key=payload.idempotency_key,
+    )
     db.add(raw_entry)
     db.commit()
     db.refresh(raw_entry)
@@ -1262,6 +1267,20 @@ def process_natural_input(
 ):
     _get_project(db, project_id)
 
+    idempotency_key = (payload.idempotency_key or "").strip() or str(uuid.uuid4())
+    existing_raw_entry = db.scalar(
+        select(RawEntry).where(
+            RawEntry.project_id == project_id,
+            RawEntry.idempotency_key == idempotency_key,
+        )
+    )
+    if existing_raw_entry is not None and existing_raw_entry.job_id:
+        existing_job = db.scalar(
+            select(NaturalInputJob).where(NaturalInputJob.job_id == existing_raw_entry.job_id)
+        )
+        if existing_job is not None:
+            return _natural_input_job_response(existing_job)
+
     job_id = str(uuid.uuid4())
     trace_id = get_trace_id() or str(uuid.uuid4())
     job = NaturalInputJob(
@@ -1271,6 +1290,14 @@ def process_natural_input(
         status=NaturalInputJobStatus.PENDING,
     )
     db.add(job)
+    raw_entry = RawEntry(
+        project_id=project_id,
+        job_id=job_id,
+        idempotency_key=idempotency_key,
+        text=payload.text,
+        status=RawEntryStatus.PENDING,
+    )
+    db.add(raw_entry)
     db.commit()
     track_event(db=db, event_name="db.job_created", payload={"job_id": job_id, "project_id": project_id})
 
@@ -1293,7 +1320,7 @@ def process_natural_input(
         ) from exc
 
     track_event(db=db, event_name="db.job_enqueued", payload={"job_id": job_id, "project_id": project_id})
-    return {"job_id": job_id, "status": "PENDING", "trace_id": trace_id}
+    return _natural_input_job_response(job)
 
 
 @router.get("/natural-input-jobs/{job_id}")
@@ -1305,6 +1332,10 @@ def get_natural_input_job(job_id: str, db: DbSession) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    return _natural_input_job_response(job)
+
+
+def _natural_input_job_response(job: NaturalInputJob) -> dict[str, Any]:
     response: dict[str, Any] = {
         "job_id": job.job_id,
         "status": job.status.value if hasattr(job.status, "value") else job.status,
@@ -1543,11 +1574,22 @@ def confirm_pending_interpretation(
         payload = PendingInterpretationConfirm()
     try:
         _normalize_confirm_identity_payload(payload)
-        interpretation = _get_pending_interpretation(db, interpretation_id)
+        logger.info(
+            "financial_confirmation_transaction_started",
+            extra={"pending_interpretation_id": interpretation_id},
+        )
+        interpretation = _get_pending_interpretation_for_confirmation(db, interpretation_id)
         if interpretation.status not in {
             PendingInterpretationStatus.PENDING,
             PendingInterpretationStatus.EDITED,
         }:
+            logger.info(
+                "financial_confirmation_conflict",
+                extra={
+                    "pending_interpretation_id": interpretation_id,
+                    "status": interpretation.status.value,
+                },
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
             )
@@ -1586,13 +1628,43 @@ def confirm_pending_interpretation(
                 role=resolution_result["role"],
                 requires_confirmation=False,
             )
+        interpretation.status = PendingInterpretationStatus.CONFIRMING
+        db.flush()
+        logger.info(
+            "pending_interpretation_lock_acquired",
+            extra={"pending_interpretation_id": interpretation.id},
+        )
         result = _execute_pending_interpretation(db, interpretation, payload)
         interpretation.status = PendingInterpretationStatus.CONFIRMED
         db.commit()
+        confirmation_duration_ms = round((perf_counter() - db_write_start) * 1000, 3)
+        logger.info(
+            "financial_confirmation_transaction_committed",
+            extra={"pending_interpretation_id": interpretation.id},
+        )
+        track_event(
+            db=db,
+            event_name="EXECUTION_STARTED",
+            payload={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+                "post_commit": True,
+            },
+        )
+        track_event(
+            db=db,
+            event_name="EXECUTION_COMPLETED",
+            duration_ms=confirmation_duration_ms,
+            payload={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+                "post_commit": True,
+            },
+        )
         track_event(
             db=db,
             event_name="DB_WRITE_SUCCESS",
-            duration_ms=round((perf_counter() - db_write_start) * 1000, 3),
+            duration_ms=confirmation_duration_ms,
             payload={"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
         )
         db.refresh(interpretation)
@@ -1604,9 +1676,26 @@ def confirm_pending_interpretation(
         if not _execution_engine_primary_enabled(interpretation):
             _run_execution_engine_shadow(db, interpretation, payload, result)
         return result
+    except IntegrityError as exc:
+        db.rollback()
+        db.expire_all()
+        _reconcile_duplicate_confirmation_after_rollback(db, interpretation_id)
+        logger.info(
+            "financial_confirmation_conflict",
+            extra={"pending_interpretation_id": interpretation_id, "reason": "duplicate_source_interpretation"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Interpretation is already confirmed",
+        ) from exc
     except Exception as exc:
-        track_event(db=db, event_name="db.confirmation_failed", payload={"interpretation_id": interpretation_id, "error": str(exc)})
-        track_event(db=db, event_name="ERROR_OCCURRED", payload={"pending_interpretation_id": interpretation_id, "error_message": str(exc)})
+        db.rollback()
+        db.expire_all()
+        _reset_confirming_interpretation_after_rollback(db, interpretation_id)
+        logger.exception(
+            "financial_confirmation_transaction_rolled_back",
+            extra={"pending_interpretation_id": interpretation_id},
+        )
         raise
 
 
@@ -1620,6 +1709,53 @@ def _get_pending_interpretation(
             detail="Interpretation not found",
         )
     return interpretation
+
+
+def _get_pending_interpretation_for_confirmation(
+    db: DbSession, interpretation_id: int
+) -> PendingInterpretation:
+    interpretation = db.scalar(
+        select(PendingInterpretation)
+        .where(PendingInterpretation.id == interpretation_id)
+        .with_for_update()
+    )
+    if interpretation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Interpretation not found",
+        )
+    return interpretation
+
+
+def _reset_confirming_interpretation_after_rollback(
+    db: DbSession, interpretation_id: int
+) -> None:
+    interpretation = db.get(PendingInterpretation, interpretation_id)
+    if interpretation is None:
+        return
+    if interpretation.status != PendingInterpretationStatus.CONFIRMING:
+        return
+    interpretation.status = PendingInterpretationStatus.PENDING
+    db.commit()
+
+
+def _reconcile_duplicate_confirmation_after_rollback(
+    db: DbSession, interpretation_id: int
+) -> None:
+    interpretation = db.get(PendingInterpretation, interpretation_id)
+    if interpretation is None or interpretation.status != PendingInterpretationStatus.CONFIRMING:
+        return
+    has_financial_record = db.scalar(
+        select(Payment.id).where(Payment.source_pending_interpretation_id == interpretation_id)
+    ) or db.scalar(
+        select(Invoice.id).where(Invoice.source_pending_interpretation_id == interpretation_id)
+    )
+    interpretation.status = (
+        PendingInterpretationStatus.CONFIRMED
+        if has_financial_record
+        else PendingInterpretationStatus.PENDING
+    )
+    db.commit()
 
 
 def _execute_pending_interpretation(
@@ -1991,6 +2127,7 @@ def _execute_with_execution_engine_primary(
             payment_method=interpretation.payment_method,
             due_date=interpretation.due_date,
             description=interpretation.description,
+            source_pending_interpretation_id=interpretation.id,
         ),
     )
     confirmed = ConfirmedFinancialInterpretation(
@@ -2002,6 +2139,7 @@ def _execute_with_execution_engine_primary(
         payment_method=interpretation.payment_method,
         due_date=interpretation.due_date,
         description=interpretation.description,
+        source_pending_interpretation_id=interpretation.id,
     )
     engine_result = ExecutionEngine().execute_confirmed_interpretation(
         confirmed,
@@ -2239,7 +2377,7 @@ def _shadow_state_for_confirmed_person(
         select(WorkerState).where(
             WorkerState.project_id == confirmed.project_id,
             WorkerState.worker_id == confirmed.entity_id,
-        )
+        ).with_for_update()
     )
 
 

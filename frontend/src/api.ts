@@ -771,10 +771,10 @@ export const api = {
     return events.map((event, index) => normalizeTraceEvent(event, index));
   },
 
-  processNaturalInput: (projectId: number, text: string) =>
+  processNaturalInput: (projectId: number, text: string, idempotencyKey?: string) =>
     request<NaturalInputJobRecord>(`/projects/${projectId}/natural-input`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, idempotency_key: idempotencyKey }),
     }),
 
   updatePendingInterpretation: (id: number, payload: PendingInterpretationUpdate) =>

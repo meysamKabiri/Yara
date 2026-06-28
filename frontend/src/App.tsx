@@ -121,6 +121,13 @@ function textValue(value: unknown): string | null {
   return null;
 }
 
+function newIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function setupEntities(interpretation: PendingInterpretation): SetupEntity[] {
   return (interpretation.extracted_entities ?? [])
     .map((entity) => {
@@ -214,6 +221,7 @@ function App() {
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const notificationShellRef = useRef<HTMLDivElement>(null);
   const submittedTextRef = useRef("");
+  const submittedIdempotencyKeyRef = useRef("");
 
   const isLoading = loadingAction !== null;
   const routeProjectId = route.name === "project" ? route.projectId : null;
@@ -517,20 +525,23 @@ function App() {
 
   async function submitNaturalInput(event: FormEvent) {
     event.preventDefault();
+    if (isLoading) return;
     if (!activeProjectId) {
       setError("ابتدا پروژه را انتخاب کنید.");
       return;
     }
     if (!naturalText.trim()) return;
     const submittedText = naturalText.trim();
+    const idempotencyKey = newIdempotencyKey();
     submittedTextRef.current = submittedText;
+    submittedIdempotencyKeyRef.current = idempotencyKey;
     setNaturalText("");
     setPendingInterpretations([]);
     setReviewModalDismissed(false);
     setSuccessMessage(null);
     setError(null);
     await runAction("در حال ارسال ورودی", async () => {
-      const job = await api.processNaturalInput(activeProjectId, submittedText);
+      const job = await api.processNaturalInput(activeProjectId, submittedText, idempotencyKey);
       setNaturalInputJobId(job.job_id);
     });
   }
@@ -542,7 +553,9 @@ function App() {
     setPendingInterpretations([]);
     setReviewModalDismissed(false);
     runAction("در حال ارسال ورودی", async () => {
-      const job = await api.processNaturalInput(activeProjectId, submittedTextRef.current);
+      const idempotencyKey = submittedIdempotencyKeyRef.current || newIdempotencyKey();
+      submittedIdempotencyKeyRef.current = idempotencyKey;
+      const job = await api.processNaturalInput(activeProjectId, submittedTextRef.current, idempotencyKey);
       setNaturalInputJobId(job.job_id);
     });
   }
