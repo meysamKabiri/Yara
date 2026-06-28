@@ -142,7 +142,7 @@ export function DashboardPage({ projects, projectFinancials, projectName, isLoad
               </label>
               <label>
                 <span>توضیح اختیاری</span>
-                <textarea disabled placeholder="در نسخه فعلی ذخیره نمی‌شود" />
+                <textarea disabled placeholder="پس از ایجاد پروژه از ویرایش پروژه اضافه کنید" />
               </label>
             </div>
             <div className="modal-footer">

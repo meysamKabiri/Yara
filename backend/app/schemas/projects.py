@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 _PROFILE_FIELDS = {"phone", "account_number", "card_number", "daily_rate", "notes"}
 
@@ -44,6 +44,26 @@ from app.models.core import (
 
 class ProjectCreate(BaseModel):
     name: str
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("Project name is required")
+        return name
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ProjectUpdate(ProjectCreate):
+    pass
 
 
 class ProjectRead(BaseModel):
@@ -51,6 +71,7 @@ class ProjectRead(BaseModel):
 
     id: int
     name: str
+    description: str | None = None
     created_at: datetime
     updated_at: datetime
 

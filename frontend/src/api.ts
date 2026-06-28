@@ -38,6 +38,7 @@ function emitTrace(traceId: string) {
 export type Project = {
   id: number;
   name: string;
+  description: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -579,6 +580,12 @@ export const api = {
     request<Project>("/projects", {
       method: "POST",
       body: JSON.stringify({ name }),
+    }),
+
+  updateProject: (projectId: number, payload: { name: string; description?: string | null }) =>
+    request<Project>(`/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
     }),
 
   getProject: (projectId: number) =>

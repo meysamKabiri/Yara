@@ -440,6 +440,20 @@ function App() {
     });
   }
 
+  async function updateProject(projectId: number, payload: { name: string; description?: string | null }) {
+    await runAction("در حال ویرایش پروژه", async () => {
+      await api.updateProject(projectId, payload);
+      const [projectList, detail] = await Promise.all([
+        api.listProjects(),
+        api.getProject(projectId),
+      ]);
+      setProjects(projectList);
+      setProjectDetail(detail);
+      setSuccessMessage("پروژه به‌روزرسانی شد");
+      await loadProjectFinancials(projectList);
+    });
+  }
+
   async function refreshActiveProject() {
     if (!activeProjectId) return;
     await loadProjectData(activeProjectId);
@@ -954,6 +968,7 @@ function App() {
           onVoidPayable={voidPayable}
           onCorrectNote={correctNote}
           onVoidNote={voidNote}
+          onUpdateProject={updateProject}
         />
       );
     }

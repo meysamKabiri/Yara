@@ -7,7 +7,6 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronUp,
-  ClipboardList,
   Clock,
   Coins,
   CreditCard,
@@ -110,6 +109,7 @@ type ProjectDetailPageProps = {
   onVoidPayable: (projectId: number, payableId: number, reason?: string | null) => Promise<void>;
   onCorrectNote: (projectId: number, noteId: number, payload: { text: string; correction_note?: string | null }) => Promise<void>;
   onVoidNote: (projectId: number, noteId: number, reason?: string | null) => Promise<void>;
+  onUpdateProject: (projectId: number, payload: { name: string; description?: string | null }) => Promise<void>;
   requestedTab?: string | null;
 };
 
@@ -520,6 +520,67 @@ function VoidModal({
   );
 }
 
+function ProjectEditModal({
+  project,
+  isLoading,
+  onClose,
+  onSubmit,
+}: {
+  project: ProjectDetail;
+  isLoading: boolean;
+  onClose: () => void;
+  onSubmit: (payload: { name: string; description?: string | null }) => Promise<void>;
+}) {
+  const [name, setName] = useState(project.name);
+  const [description, setDescription] = useState(project.description ?? "");
+  const trimmedName = name.trim();
+
+  useEffect(() => {
+    setName(project.name);
+    setDescription(project.description ?? "");
+  }, [project.id, project.name, project.description]);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="modal-shell correction-modal project-edit-modal"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (!trimmedName) return;
+          await onSubmit({ name: trimmedName, description: description.trim() || null });
+        }}
+      >
+        <header className="modal-header">
+          <div>
+            <h2 className="modal-title">ویرایش پروژه</h2>
+            <p>نام و توضیح پروژه را به‌روزرسانی کنید.</p>
+          </div>
+          <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
+            <X aria-hidden="true" size={20} />
+          </button>
+        </header>
+        <div className="modal-body correction-form">
+          <label>
+            <span>نام پروژه</span>
+            <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
+          </label>
+          <label>
+            <span>توضیح اختیاری</span>
+            <textarea value={description} onChange={(event) => setDescription(event.target.value)} />
+          </label>
+        </div>
+        <footer className="modal-footer">
+          <div className="modal-actions">
+            <button className="primary-action" type="submit" disabled={isLoading || !trimmedName}>ذخیره تغییرات</button>
+            <button type="button" onClick={onClose} disabled={isLoading}>انصراف</button>
+          </div>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
 function EmptyState({ children }: { children: string }) {
   return <p className="empty-state">{children}</p>;
 }
@@ -614,6 +675,7 @@ function ProjectReportsTab({ projectId, pendingCount }: { projectId: number; pen
   };
 
   const summary = report?.summary;
+  const reportCashBalance = summary ? Number(summary.money_in) - Number(summary.paid_out) : 0;
   return (
     <div className="detail-tab-content reports-tab">
       <section className="report-controls" aria-label="بازه گزارش">
@@ -638,10 +700,15 @@ function ProjectReportsTab({ projectId, pendingCount }: { projectId: number; pen
         <>
           <section className="report-summary-grid">
             <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>دریافتی</span><strong>{money(summary.money_in)}</strong><small>پرداخت‌های تاییدشده کارفرما</small></article>
-            <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده واقعی</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
-            <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی‌ها و چک‌ها</span><strong>{money(Number(summary.open_payables) + Number(summary.deferred_checks))}</strong><small>بدهی باز: {money(summary.open_payables)} · چک/مدت‌دار: {money(summary.deferred_checks)} · کارکرد: {money(summary.labor_cost)}</small></article>
-            <article className={Number(summary.approximate_balance) >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>مانده تقریبی</span><strong>{money(summary.approximate_balance)}</strong><small>دریافتی - پرداختی - بدهی باز</small></article>
+            <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
+            <article className={reportCashBalance >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>موجودی نقدی</span><strong>{money(reportCashBalance)}</strong><small>دریافتی - پرداخت‌شده</small></article>
           </section>
+          <aside className="debt-notice report-debt-notice" aria-label="بدهی باز">
+            <ReceiptText aria-hidden="true" />
+            <span>بدهی باز</span>
+            <strong>{money(summary.open_payables)}</strong>
+            <small>شامل بدهی فروشندگان و مانده کارگران</small>
+          </aside>
           <p className="summary-helper">
             گزارش فقط از رکوردهای تاییدشده ساخته می‌شود. موارد در انتظار تایید فعلی: {pendingCount.toLocaleString("fa-IR")}
           </p>
@@ -751,11 +818,13 @@ export function ProjectDetailPage({
   onConfirmPending, onEditPending, onDiscardPending, requestedTab,
   onCorrectPayment, onVoidPayment, onCorrectWorkLog, onVoidWorkLog,
   onCorrectPayable, onVoidPayable, onCorrectNote, onVoidNote,
+  onUpdateProject,
 }: ProjectDetailPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("summary");
   const [selectedPersonId, setSelectedPersonId] = useState<number | null>(null);
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
   const [voidTarget, setVoidTarget] = useState<VoidTarget | null>(null);
+  const [isProjectEditOpen, setIsProjectEditOpen] = useState(false);
 
   useEffect(() => {
     if (!requestedTab) return;
@@ -771,11 +840,8 @@ export function ProjectDetailPage({
   const paidOut = summary ? Number(summary.total_paid_out) : activePayments.filter((p) => p.direction === "OUTGOING").reduce((t, p) => t + Number(p.amount || 0), 0);
   const received = summary ? Number(summary.total_received_from_client ?? summary.total_received) : activePayments.filter((p) => p.direction === "INCOMING").reduce((t, p) => t + Number(p.amount || 0), 0);
   const payables = Number(summary?.open_payables ?? 0);
-  const deferredAmount = summary ? Number(summary.deferred_amount ?? 0) : activePayments.filter((p) => p.direction === "DEFERRED").reduce((t, p) => t + Number(p.amount || 0), 0);
-  const checkAmount = summary ? Number(summary.check_amount ?? 0) : activePayments.filter((p) => p.type === "CHECK").reduce((t, p) => t + Number(p.amount || 0), 0);
   const totalLaborCost = summary ? Number(summary.total_work_amount ?? 0) : activeWorkLogs.reduce((t, log) => t + Number(log.total_amount || 0), 0);
-  const workerPayables = summary?.worker_payables ?? [];
-  const netBalance = Number(summary?.project_balance ?? received - paidOut - payables);
+  const cashBalance = received - paidOut;
   const notes = history.filter((entry) => entry.change_type === "NOTE");
   const activeNotes = activeHistory.filter((entry) => entry.change_type === "NOTE");
   const pending = pendingInterpretations.filter((pi) => pi.status === "PENDING" || pi.status === "EDITED");
@@ -921,6 +987,12 @@ export function ProjectDetailPage({
     setVoidTarget(null);
   }
 
+  async function submitProjectEdit(payload: { name: string; description?: string | null }) {
+    if (!project) return;
+    await onUpdateProject(project.id, payload);
+    setIsProjectEditOpen(false);
+  }
+
   if (!project) {
     return <div className="empty-page">برای شروع، یک پروژه را از خانه باز کنید.</div>;
   }
@@ -929,10 +1001,14 @@ export function ProjectDetailPage({
     <div className="page-stack project-workspace">
       <section className="project-topbar">
         <button className="icon-button" type="button" onClick={onBack} aria-label="بازگشت"><ChevronRight aria-hidden="true" size={22} /></button>
-        <div>
+        <div className="project-title-block min-w-0">
           <span className="eyebrow">جزئیات پروژه</span>
           <h1>{project.name}</h1>
+          {project.description && <p>{project.description}</p>}
         </div>
+        <button className="icon-button project-edit-button" type="button" onClick={() => setIsProjectEditOpen(true)} aria-label="ویرایش پروژه">
+          <Pencil aria-hidden="true" size={18} />
+        </button>
       </section>
 
       <section className="ai-work-card">
@@ -959,51 +1035,61 @@ export function ProjectDetailPage({
 
       {activeTab === "summary" && (
         <div className="detail-tab-content">
-          <section className="summary-grid six-up project-summary-grid">
-            <article className="metric-card positive">
+          <section className="summary-grid project-summary-grid">
+            <button
+              className="metric-card summary-action-card positive"
+              type="button"
+              onClick={() => setActiveTab("financial")}
+              aria-label="مشاهده جزئیات دریافتی از کارفرما در تب مالی"
+            >
               <ArrowDownCircle aria-hidden="true" />
               <span>دریافتی از کارفرما</span>
               <strong>{money(received)}</strong>
               <small>پول تاییدشده ورودی به پروژه</small>
-            </article>
-            <article className="metric-card negative">
+              <em>مشاهده جزئیات</em>
+            </button>
+            <button
+              className="metric-card summary-action-card negative"
+              type="button"
+              onClick={() => setActiveTab("financial")}
+              aria-label="مشاهده جزئیات پرداخت‌شده در تب مالی"
+            >
               <ArrowUpCircle aria-hidden="true" />
               <span>پرداخت‌شده</span>
               <strong>{money(paidOut)}</strong>
               <small>فقط پرداخت واقعی نقدی یا بانکی</small>
-            </article>
-            <article className="metric-card pending">
-              <Hammer aria-hidden="true" />
-              <span>کارکرد ثبت‌شده کارگران</span>
-              <strong>{money(totalLaborCost)}</strong>
-              <small>هزینه کارکرد؛ پرداخت نقدی نیست</small>
-            </article>
-            <article className="metric-card pending">
-              <ReceiptText aria-hidden="true" />
-              <span>بدهی باز</span>
-              <strong>{money(payables)}</strong>
-              <small>{workerPayables.length > 0 ? "بدهی فروشندگان + کارکرد پرداخت‌نشده" : "پرداخت‌های انجام‌نشده"}</small>
-            </article>
-            <article className="metric-card pending">
-              <Banknote aria-hidden="true" />
-              <span>چک / پرداخت مدت‌دار</span>
-              <strong>{money(deferredAmount || checkAmount)}</strong>
-              <small>جدا از پرداخت‌شده نمایش داده می‌شود</small>
-            </article>
-            <article className={netBalance >= 0 ? "metric-card positive" : "metric-card negative"}>
+              <em>مشاهده جزئیات</em>
+            </button>
+            <button
+              className={cashBalance >= 0 ? "metric-card summary-action-card positive" : "metric-card summary-action-card negative"}
+              type="button"
+              onClick={() => setActiveTab("financial")}
+              aria-label="مشاهده جزئیات موجودی نقدی پروژه در تب مالی"
+            >
               <Scale aria-hidden="true" />
-              <span>مانده پروژه</span>
-              <strong>{money(netBalance >= 0 ? Number(summary?.available_balance ?? netBalance) : netBalance)}</strong>
-              <small>{netBalance >= 0 ? "موجودی پروژه" : "کسری بودجه"}</small>
-            </article>
-            <article className={pending.length > 0 ? "metric-card pending" : "metric-card"}>
-              <ClipboardList aria-hidden="true" />
-              <span>موارد در انتظار تایید</span>
-              <strong>{pending.length.toLocaleString("fa-IR")}</strong>
-              <small>{pending.length > 0 ? "هنوز در totals حساب نشده‌اند" : "همه موارد بررسی شده‌اند"}</small>
-            </article>
+              <span>موجودی نقدی پروژه</span>
+              <strong>{money(cashBalance)}</strong>
+              <small>دریافتی از کارفرما - پرداخت‌شده</small>
+              <em>مشاهده جزئیات</em>
+            </button>
           </section>
-          <p className="summary-helper">مانده پروژه = دریافتی از کارفرما - پرداخت‌شده - بدهی باز. پرداخت‌شده فقط پول واقعی تاییدشده است؛ کارکرد کارگران جداگانه نمایش داده می‌شود.</p>
+          <button
+            className="debt-notice"
+            type="button"
+            onClick={() => setActiveTab("payables")}
+            aria-label="مشاهده جزئیات بدهی باز در تب بدهی‌ها و چک‌ها"
+          >
+            <ReceiptText aria-hidden="true" />
+            <span>بدهی باز</span>
+            <strong>{money(payables)}</strong>
+            <small>شامل بدهی فروشندگان و مانده کارگران</small>
+            <em>مشاهده جزئیات</em>
+          </button>
+          {pending.length > 0 && (
+            <p className="summary-helper">
+              {pending.length.toLocaleString("fa-IR")} مورد در انتظار تایید هنوز در اعداد خلاصه حساب نشده است.
+            </p>
+          )}
         </div>
       )}
 
@@ -1253,6 +1339,14 @@ export function ProjectDetailPage({
         onClose={() => setVoidTarget(null)}
         onSubmit={submitVoid}
       />
+      {isProjectEditOpen && (
+        <ProjectEditModal
+          project={project}
+          isLoading={isLoading}
+          onClose={() => setIsProjectEditOpen(false)}
+          onSubmit={submitProjectEdit}
+        />
+      )}
     </div>
   );
 }

@@ -104,6 +104,34 @@ textarea {
   color: #65727d;
 }
 
+.min-w-0 {
+  min-width: 0;
+}
+
+.overflow-hidden {
+  overflow: hidden;
+}
+
+.text-truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.break-words {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .main-nav {
   display: grid;
   gap: 0.45rem;
@@ -164,8 +192,11 @@ textarea {
 .page-stack {
   display: grid;
   gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
   max-width: 1120px;
   margin: 0 auto;
+  min-width: 0;
+  width: 100%;
 }
 
 .home-page {
@@ -400,8 +431,14 @@ textarea {
 }
 
 .project-overview-card strong {
+  display: -webkit-box;
   font-size: 1.08rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   line-height: 1.7;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .project-card-head {
@@ -421,6 +458,10 @@ textarea {
   align-items: center;
   display: inline-flex;
   gap: 0.25rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-card-head mark {
@@ -489,6 +530,10 @@ textarea {
 .project-overview-card dd {
   font-weight: 800;
   margin: 0.15rem 0 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .home-empty-state {
@@ -529,10 +574,41 @@ textarea {
   align-items: center;
   display: flex;
   gap: 1rem;
+  min-width: 0;
 }
 
 .project-topbar h1 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.35;
   margin: 0.1rem 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.project-title-block {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 0.15rem;
+}
+
+.project-title-block p {
+  color: #65727d;
+  display: -webkit-box;
+  font-size: 0.86rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.7;
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.project-edit-button {
+  flex: 0 0 auto;
 }
 
 .ai-work-card {
@@ -569,6 +645,7 @@ textarea {
 
 .project-summary-grid {
   gap: 0.6rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .project-summary-grid .metric-card {
@@ -589,6 +666,100 @@ textarea {
 
 .project-summary-grid .metric-card small {
   font-size: 0.72rem;
+}
+
+.summary-action-card,
+.debt-notice {
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  max-width: 100%;
+  min-width: 0;
+  text-align: start;
+  width: 100%;
+}
+
+.summary-action-card {
+  appearance: none;
+}
+
+.summary-action-card em,
+.debt-notice em {
+  color: #507266;
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 800;
+  margin-top: 0.15rem;
+}
+
+.summary-action-card:hover,
+.summary-action-card:focus-visible,
+.debt-notice:hover,
+.debt-notice:focus-visible {
+  border-color: #bdd3c8;
+  box-shadow: 0 14px 38px rgb(31 48 38 / 0.09);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.summary-action-card:active,
+.debt-notice:active {
+  box-shadow: 0 7px 20px rgb(31 48 38 / 0.08);
+  transform: translateY(0);
+}
+
+.debt-notice {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #e4ebe7;
+  border-radius: 14px;
+  box-shadow: 0 10px 26px rgb(31 48 38 / 0.035);
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.9rem;
+}
+
+.debt-notice > svg {
+  color: #8a6a2f;
+  height: 18px;
+  width: 18px;
+}
+
+.debt-notice span {
+  color: #40545a;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.debt-notice strong {
+  color: #1f3026;
+  font-size: 1rem;
+  font-weight: 900;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.debt-notice small {
+  color: #61756d;
+  font-size: 0.75rem;
+  grid-column: 2 / 4;
+  line-height: 1.7;
+}
+
+.debt-notice em {
+  grid-column: 2 / 4;
+}
+
+.report-debt-notice {
+  cursor: default;
+}
+
+.report-debt-notice:hover {
+  border-color: #e4ebe7;
+  box-shadow: 0 10px 26px rgb(31 48 38 / 0.035);
+  transform: none;
 }
 
 .summary-helper {
@@ -1123,13 +1294,24 @@ mark {
   margin: 0.2rem 0 0;
 }
 
+.modal-header > div {
+  min-width: 0;
+}
+
 .modal-header p {
   color: #65727d;
   line-height: 1.8;
+  overflow-wrap: anywhere;
 }
 
 .modal-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .modal-close {
@@ -1185,6 +1367,7 @@ mark {
 .correction-form input,
 .correction-form select,
 .correction-form textarea {
+  min-width: 0;
   width: 100%;
 }
 
@@ -1250,6 +1433,7 @@ mark {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+  min-width: 0;
 }
 
 .multi-review-meta {
@@ -1269,6 +1453,7 @@ mark {
   font-size: 0.82rem;
   font-weight: 650;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .multi-review-actions {
@@ -1314,6 +1499,7 @@ mark {
 .interpretation-card {
   border: 1px solid #dde5e8;
   border-radius: 8px;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -1382,6 +1568,13 @@ mark {
   gap: 0.3rem;
   color: #44515a;
   font-size: 0.88rem;
+  min-width: 0;
+}
+
+.edit-grid input,
+.edit-grid select,
+.edit-grid textarea {
+  min-width: 0;
 }
 
 .wide-field {
@@ -1814,6 +2007,20 @@ mark {
 
   .modal-actions > button {
     min-height: 44px;
+  }
+
+  .debt-notice {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .debt-notice strong {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .debt-notice small,
+  .debt-notice em {
+    grid-column: 2;
   }
 
   .create-project-trigger {
@@ -2605,6 +2812,7 @@ mark {
   margin: 0;
   font-size: 0.85rem;
   color: #3a525e;
+  min-width: 0;
 }
 
 .role-group-title mark {
@@ -2630,6 +2838,7 @@ mark {
   padding: 0.7rem 0.85rem;
   display: grid;
   gap: 0.3rem;
+  min-width: 0;
 }
 
 .visibility-person-card.clickable-card,
@@ -2652,10 +2861,15 @@ mark {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .vpc-head strong {
   font-size: 0.93rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .role-pill {
@@ -2680,6 +2894,8 @@ mark {
   font-size: 0.8rem;
   gap: 0.15rem;
   line-height: 1.7;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .vpc-meta {
@@ -2694,6 +2910,8 @@ mark {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .visibility-trx-list {
@@ -2712,6 +2930,7 @@ mark {
   border-radius: 16px;
   display: grid;
   gap: 0.75rem;
+  min-width: 0;
   padding: 0.9rem;
 }
 
@@ -2725,10 +2944,12 @@ mark {
 .worker-labor-head > div {
   display: grid;
   gap: 0.15rem;
+  min-width: 0;
 }
 
 .worker-labor-head strong {
   font-size: 1rem;
+  overflow-wrap: anywhere;
 }
 
 .worker-labor-head span {
@@ -2791,6 +3012,7 @@ mark {
   display: grid;
   gap: 0.15rem;
   grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
 }
 
 .visibility-trx-row .trx-main,
@@ -2841,11 +3063,13 @@ mark {
   justify-content: space-between;
   align-items: center;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .trx-person {
   font-weight: 700;
   font-size: 0.9rem;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -2853,6 +3077,13 @@ mark {
   font-weight: 800;
   font-size: 0.95rem;
   color: #1b3122;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.trx-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .drawer-backdrop {
@@ -2869,6 +3100,7 @@ mark {
   gap: 0.9rem;
   height: 100%;
   max-width: 460px;
+  min-width: 0;
   overflow-y: auto;
   padding: 1rem;
   position: fixed;
@@ -2882,15 +3114,27 @@ mark {
   display: flex;
   gap: 0.75rem;
   justify-content: space-between;
+  min-width: 0;
+}
+
+.drawer-header > div {
+  min-width: 0;
 }
 
 .drawer-header h2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   margin: 0.1rem 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .drawer-header p {
   color: #65727d;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .drawer-metrics {
@@ -3110,6 +3354,7 @@ mark {
   display: grid;
   gap: 0.3rem;
   background: #fffcf5;
+  min-width: 0;
 }
 
 .visibility-pending-card .vpc-head {
@@ -3120,6 +3365,7 @@ mark {
   font-size: 0.88rem;
   color: #2d3d46;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .visibility-vendor-debts {
@@ -3188,6 +3434,7 @@ mark {
 
 .detail-tab-content {
   animation: fadeIn 0.2s ease;
+  min-width: 0;
 }
 
 .reports-tab {
@@ -3454,7 +3701,7 @@ mark {
 .report-summary-grid {
   display: grid;
   gap: 0.8rem;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .report-summary-grid .metric-card {
@@ -3502,12 +3749,14 @@ mark {
   display: flex;
   gap: 0.6rem;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .report-row-head strong {
   color: #1f2d3a;
   font-size: 0.95rem;
   line-height: 1.8;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 

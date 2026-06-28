@@ -137,6 +137,7 @@ export function ReportsPage({ projects, selectedProjectId, onProjectChange }: Re
   }
 
   const summary = report?.summary;
+  const cashBalance = summary ? Number(summary.money_in) - Number(summary.paid_out) : 0;
 
   return (
     <div className="page-stack">
@@ -177,10 +178,15 @@ export function ReportsPage({ projects, selectedProjectId, onProjectChange }: Re
         <>
           <section className="report-summary-grid">
             <article className="metric-card positive"><ArrowDownCircle aria-hidden="true" /><span>دریافتی</span><strong>{money(summary.money_in)}</strong><small>{selectedProject?.name}</small></article>
-            <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده واقعی</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
-            <article className="metric-card pending"><ReceiptText aria-hidden="true" /><span>بدهی‌ها و چک‌ها</span><strong>{money(Number(summary.open_payables) + Number(summary.deferred_checks))}</strong><small>بدهی باز: {money(summary.open_payables)} · چک/مدت‌دار: {money(summary.deferred_checks)} · کارکرد: {money(summary.labor_cost)}</small></article>
-            <article className={Number(summary.approximate_balance) >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>مانده تقریبی</span><strong>{money(summary.approximate_balance)}</strong><small>دریافتی - پرداختی - بدهی باز</small></article>
+            <article className="metric-card negative"><ArrowUpCircle aria-hidden="true" /><span>پرداخت‌شده</span><strong>{money(summary.paid_out)}</strong><small>بدون چک و بدهی مدت‌دار</small></article>
+            <article className={cashBalance >= 0 ? "metric-card positive" : "metric-card negative"}><Scale aria-hidden="true" /><span>موجودی نقدی</span><strong>{money(cashBalance)}</strong><small>دریافتی - پرداخت‌شده</small></article>
           </section>
+          <aside className="debt-notice report-debt-notice" aria-label="بدهی باز">
+            <ReceiptText aria-hidden="true" />
+            <span>بدهی باز</span>
+            <strong>{money(summary.open_payables)}</strong>
+            <small>شامل بدهی فروشندگان و مانده کارگران</small>
+          </aside>
           <p className="summary-helper">موارد در انتظار تایید فقط جداگانه شمرده می‌شوند: {summary.pending_count.toLocaleString("fa-IR")}</p>
           <section className="report-sections">
             <article className="report-section-card">

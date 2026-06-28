@@ -69,6 +69,7 @@ from app.schemas.projects import (
     ProjectRead,
     ProjectSummary,
     ProjectTotals,
+    ProjectUpdate,
     RawEntryCreate,
     RawEntryRead,
     NoteUpdate,
@@ -1180,7 +1181,7 @@ def _correction_value(value: Any) -> str | int | float | None:
     "/projects", response_model=ProjectRead, status_code=status.HTTP_201_CREATED
 )
 def create_project(payload: ProjectCreate, db: DbSession) -> Project:
-    project = Project(name=payload.name)
+    project = Project(name=payload.name, description=payload.description)
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -1195,6 +1196,21 @@ def list_projects(db: DbSession) -> list[Project]:
             select(Project).order_by(Project.created_at.desc(), Project.id.desc())
         )
     )
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectRead)
+def update_project(project_id: int, payload: ProjectUpdate, db: DbSession) -> Project:
+    project = _get_project(db, project_id)
+    project.name = payload.name
+    project.description = payload.description
+    db.commit()
+    db.refresh(project)
+    track_event(
+        db=db,
+        event_name="db.project_updated",
+        payload={"project_id": project.id, "name": project.name},
+    )
+    return project
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetailWithSummary)
