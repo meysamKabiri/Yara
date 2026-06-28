@@ -17,13 +17,15 @@ import {
   Mic,
   Paperclip,
   Phone,
+  Pencil,
   ReceiptText,
   Scale,
   Send,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
-import { api, HistoryEntry, Invoice, OperatingSummary, Payment, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog } from "../api";
+import { api, HistoryEntry, Invoice, OperatingSummary, PayableCorrectionPayload, Payment, PaymentCorrectionPayload, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog, WorkLogCorrectionPayload } from "../api";
 import { PersianDatePicker } from "../components/PersianDatePicker";
 import { quickReportRange, ReportFilterKey } from "../utils/jalaliDate";
 
@@ -62,6 +64,12 @@ const REPORT_PAYABLE_KIND_LABELS: Record<PayableReportRow["kind"], string> = {
 };
 
 type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "reports" | "pending";
+type CorrectionTarget =
+  | { kind: "payment"; record: Payment }
+  | { kind: "workLog"; record: WorkLog }
+  | { kind: "payable"; record: Invoice }
+  | { kind: "note"; record: HistoryEntry };
+type VoidTarget = CorrectionTarget;
 
 const CSV_EXPORTS = [
   { label: "خلاصه پروژه", path: "summary.csv" },
@@ -94,6 +102,14 @@ type ProjectDetailPageProps = {
   onConfirmPending: (interpretation: PendingInterpretation) => void;
   onEditPending: (interpretation: PendingInterpretation) => void;
   onDiscardPending: (interpretation: PendingInterpretation) => void;
+  onCorrectPayment: (projectId: number, paymentId: number, payload: PaymentCorrectionPayload) => Promise<void>;
+  onVoidPayment: (projectId: number, paymentId: number, reason?: string | null) => Promise<void>;
+  onCorrectWorkLog: (projectId: number, workLogId: number, payload: WorkLogCorrectionPayload) => Promise<void>;
+  onVoidWorkLog: (projectId: number, workLogId: number, reason?: string | null) => Promise<void>;
+  onCorrectPayable: (projectId: number, payableId: number, payload: PayableCorrectionPayload) => Promise<void>;
+  onVoidPayable: (projectId: number, payableId: number, reason?: string | null) => Promise<void>;
+  onCorrectNote: (projectId: number, noteId: number, payload: { text: string; correction_note?: string | null }) => Promise<void>;
+  onVoidNote: (projectId: number, noteId: number, reason?: string | null) => Promise<void>;
   requestedTab?: string | null;
 };
 
@@ -181,7 +197,24 @@ function PersonCard({ worker, laborStats, onOpen }: { worker: Worker; laborStats
   );
 }
 
-function PaymentRow({ payment, workerMap }: { payment: Payment; workerMap: Record<number, Worker> }) {
+function VoidedBadge({ isVoided }: { isVoided?: boolean }) {
+  return isVoided ? <mark className="voided-badge">باطل‌شده</mark> : null;
+}
+
+function RecordActions({ disabled, onEdit, onVoid }: { disabled?: boolean; onEdit: () => void; onVoid: () => void }) {
+  return (
+    <div className="record-actions">
+      <button className="icon-button" type="button" onClick={onEdit} disabled={disabled} aria-label="ویرایش">
+        <Pencil aria-hidden="true" size={16} />
+      </button>
+      <button className="icon-button danger-icon" type="button" onClick={onVoid} disabled={disabled} aria-label="باطل کردن">
+        <Trash2 aria-hidden="true" size={16} />
+      </button>
+    </div>
+  );
+}
+
+function PaymentRow({ payment, workerMap, onEdit, onVoid }: { payment: Payment; workerMap: Record<number, Worker>; onEdit: () => void; onVoid: () => void }) {
   const person = workerMap[payment.entity_id];
   const isIncoming = payment.direction === "INCOMING";
   const isDeferred = payment.direction === "DEFERRED";
@@ -189,61 +222,72 @@ function PaymentRow({ payment, workerMap }: { payment: Payment; workerMap: Recor
   const directionLabel = DIRECTION_LABELS[payment.direction] ?? UNKNOWN_LABEL;
   const methodLabel = isDeferred && payment.type !== "CHECK" ? "مدت‌دار" : PAYMENT_TYPE_LABELS[payment.type] ?? UNKNOWN_LABEL;
   return (
-    <div className={`visibility-trx-row ${directionClass}`}>
+    <div className={`visibility-trx-row ${directionClass}${payment.is_voided ? " is-voided" : ""}`}>
       <div className="trx-main">
         <span className="trx-person">{person?.name ?? `فرد ${payment.entity_id}`}</span>
         <span className="trx-amount">{money(payment.amount)}</span>
       </div>
       <div className="trx-meta">
+        <VoidedBadge isVoided={payment.is_voided} />
         <span>{shortDate(payment.created_at)}</span>
         <span>{directionLabel}</span>
         <span>{methodLabel}</span>
         {payment.due_date && <span>سررسید: {shortDate(payment.due_date)}</span>}
+        {payment.description && <span>{payment.description}</span>}
+        {payment.void_reason && <span>علت: {payment.void_reason}</span>}
       </div>
+      <RecordActions disabled={payment.is_voided} onEdit={onEdit} onVoid={onVoid} />
     </div>
   );
 }
 
-function InvoiceRow({ invoice, workerMap }: { invoice: Invoice; workerMap: Record<number, Worker> }) {
+function InvoiceRow({ invoice, workerMap, onEdit, onVoid }: { invoice: Invoice; workerMap: Record<number, Worker>; onEdit: () => void; onVoid: () => void }) {
   const vendor = workerMap[invoice.vendor_id];
   const statusLabel = invoice.status === "OPEN" ? "پرداخت‌نشده" : invoice.status === "PARTIAL" ? "بخشی پرداخت شده" : "پرداخت شده";
   return (
-    <div className="visibility-trx-row trx-payable">
+    <div className={`visibility-trx-row trx-payable${invoice.is_voided ? " is-voided" : ""}`}>
       <div className="trx-main">
         <span className="trx-person">{vendor?.name ?? `فروشنده ${invoice.vendor_id}`}</span>
         <span className="trx-amount">{money(invoice.total_amount)}</span>
       </div>
       <div className="trx-meta">
+        <VoidedBadge isVoided={invoice.is_voided} />
         <span>{shortDate(invoice.created_at)}</span>
         <span className={`status-badge status-${invoice.status.toLowerCase()}`}>{statusLabel}</span>
         {invoice.description && <span>{invoice.description}</span>}
+        {invoice.void_reason && <span>علت: {invoice.void_reason}</span>}
       </div>
+      <RecordActions disabled={invoice.is_voided} onEdit={onEdit} onVoid={onVoid} />
     </div>
   );
 }
 
-function WorkLogRow({ workLog, workerMap }: { workLog: WorkLog; workerMap: Record<number, Worker> }) {
+function WorkLogRow({ workLog, workerMap, onEdit, onVoid }: { workLog: WorkLog; workerMap: Record<number, Worker>; onEdit: () => void; onVoid: () => void }) {
   const worker = workerMap[workLog.worker_id];
   return (
-    <div className="visibility-trx-row labor-row">
+    <div className={`visibility-trx-row labor-row${workLog.is_voided ? " is-voided" : ""}`}>
       <div className="trx-main">
         <span className="trx-person">{worker?.name ?? `کارگر ${workLog.worker_id}`}</span>
         <span className="trx-amount">{workLog.total_amount ? money(workLog.total_amount) : "نرخ روزانه ثبت نشده"}</span>
       </div>
       <div className="trx-meta">
+        <VoidedBadge isVoided={workLog.is_voided} />
         <span>{workLog.period_label || "بازه ثبت نشده"}</span>
         <span>{days(workLog.quantity)}</span>
         <span>{workLog.rate_per_unit ? `نرخ: ${money(workLog.rate_per_unit)}` : "نرخ روزانه ثبت نشده"}</span>
         <span>{shortDate(workLog.created_at)}</span>
         {workLog.description && <span>{workLog.description}</span>}
+        {workLog.void_reason && <span>علت: {workLog.void_reason}</span>}
       </div>
+      <RecordActions disabled={workLog.is_voided} onEdit={onEdit} onVoid={onVoid} />
     </div>
   );
 }
 
-function WorkLogGroupCard({ worker, logs, laborStats }: { worker: Worker; logs: WorkLog[]; laborStats?: LaborStats }) {
-  const totalDays = laborStats?.totalDays ?? logs.reduce((total, log) => total + Number(log.unit === "day" ? log.quantity || 0 : 0), 0);
-  const totalCost = laborStats?.totalCost ?? logs.reduce((total, log) => total + Number(log.total_amount || 0), 0);
+function WorkLogGroupCard({ worker, logs, laborStats, onEditLog, onVoidLog }: { worker: Worker; logs: WorkLog[]; laborStats?: LaborStats; onEditLog: (log: WorkLog) => void; onVoidLog: (log: WorkLog) => void }) {
+  const activeLogs = logs.filter((log) => !log.is_voided);
+  const totalDays = laborStats?.totalDays ?? activeLogs.reduce((total, log) => total + Number(log.unit === "day" ? log.quantity || 0 : 0), 0);
+  const totalCost = laborStats?.totalCost ?? activeLogs.reduce((total, log) => total + Number(log.total_amount || 0), 0);
   const paidOut = laborStats?.paidOut ?? 0;
   const balance = laborStats?.balance ?? totalCost - paidOut;
   return (
@@ -263,9 +307,9 @@ function WorkLogGroupCard({ worker, logs, laborStats }: { worker: Worker; logs: 
       </section>
       <div className="worker-labor-logs">
         {logs.map((log) => (
-          <div className="worker-labor-log" key={log.id}>
+          <div className={`worker-labor-log${log.is_voided ? " is-voided" : ""}`} key={log.id}>
             <div>
-              <strong>{log.period_label || "بازه ثبت نشده"}</strong>
+              <strong>{log.period_label || "بازه ثبت نشده"} <VoidedBadge isVoided={log.is_voided} /></strong>
               <span>{log.description || log.task_name}</span>
             </div>
             <div>
@@ -274,6 +318,7 @@ function WorkLogGroupCard({ worker, logs, laborStats }: { worker: Worker; logs: 
               <strong>{log.total_amount ? money(log.total_amount) : "بدون مبلغ"}</strong>
               <small>{shortDate(log.created_at)}</small>
             </div>
+            <RecordActions disabled={log.is_voided} onEdit={() => onEditLog(log)} onVoid={() => onVoidLog(log)} />
           </div>
         ))}
       </div>
@@ -299,12 +344,14 @@ function PersonDetailDrawer({
   onClose: () => void;
 }) {
   const kind = personKind(worker);
-  const incoming = payments.filter((payment) => payment.direction === "INCOMING");
-  const outgoing = payments.filter((payment) => payment.direction === "OUTGOING");
-  const deferred = payments.filter((payment) => payment.direction === "DEFERRED" || payment.type === "CHECK");
+  const activePayments = payments.filter((payment) => !payment.is_voided);
+  const activeInvoices = invoices.filter((invoice) => !invoice.is_voided);
+  const incoming = activePayments.filter((payment) => payment.direction === "INCOMING");
+  const outgoing = activePayments.filter((payment) => payment.direction === "OUTGOING");
+  const deferred = activePayments.filter((payment) => payment.direction === "DEFERRED" || payment.type === "CHECK");
   const paid = outgoing.reduce((total, payment) => total + Number(payment.amount || 0), 0);
   const received = incoming.reduce((total, payment) => total + Number(payment.amount || 0), 0);
-  const invoiceTotal = invoices.reduce((total, invoice) => total + Number(invoice.total_amount || 0), 0);
+  const invoiceTotal = activeInvoices.reduce((total, invoice) => total + Number(invoice.total_amount || 0), 0);
   return (
     <div className="drawer-backdrop" onClick={onClose}>
       <aside className="person-drawer" onClick={(event) => event.stopPropagation()}>
@@ -332,10 +379,143 @@ function PersonDetailDrawer({
             {worker.daily_rate && <div><dt>دستمزد روزانه</dt><dd>{money(worker.daily_rate)}</dd></div>}
           </dl>
         </section>
-        {workLogs.length > 0 && <section className="drawer-section"><h3>سوابق کارکرد</h3><div className="mini-list">{workLogs.map((log) => <div className="mini-row" key={log.id}><strong>{log.total_amount ? money(log.total_amount) : days(log.quantity)}</strong><span>{log.period_label || shortDate(log.created_at)}</span></div>)}</div></section>}
-        <section className="drawer-section"><h3>سوابق پرداخت</h3><div className="mini-list">{payments.map((payment) => <div className="mini-row" key={payment.id}><strong>{money(payment.amount)}</strong><span>{DIRECTION_LABELS[payment.direction] ?? "پرداخت"}</span></div>)}{payments.length === 0 && <p className="empty-state">پرداختی ثبت نشده است</p>}</div></section>
-        {invoices.length > 0 && <section className="drawer-section"><h3>فاکتورها</h3><div className="mini-list">{invoices.map((invoice) => <div className="mini-row" key={invoice.id}><strong>{money(invoice.total_amount)}</strong><span>{invoice.description || "فاکتور"}</span></div>)}</div></section>}
+        {workLogs.length > 0 && <section className="drawer-section"><h3>سوابق کارکرد</h3><div className="mini-list">{workLogs.map((log) => <div className={`mini-row${log.is_voided ? " is-voided" : ""}`} key={log.id}><strong>{log.total_amount ? money(log.total_amount) : days(log.quantity)}</strong><span>{log.period_label || shortDate(log.created_at)} <VoidedBadge isVoided={log.is_voided} /></span></div>)}</div></section>}
+        <section className="drawer-section"><h3>سوابق پرداخت</h3><div className="mini-list">{payments.map((payment) => <div className={`mini-row${payment.is_voided ? " is-voided" : ""}`} key={payment.id}><strong>{money(payment.amount)}</strong><span>{DIRECTION_LABELS[payment.direction] ?? "پرداخت"} <VoidedBadge isVoided={payment.is_voided} /></span></div>)}{payments.length === 0 && <p className="empty-state">پرداختی ثبت نشده است</p>}</div></section>
+        {invoices.length > 0 && <section className="drawer-section"><h3>فاکتورها</h3><div className="mini-list">{invoices.map((invoice) => <div className={`mini-row${invoice.is_voided ? " is-voided" : ""}`} key={invoice.id}><strong>{money(invoice.total_amount)}</strong><span>{invoice.description || "فاکتور"} <VoidedBadge isVoided={invoice.is_voided} /></span></div>)}</div></section>}
       </aside>
+    </div>
+  );
+}
+
+function CorrectionModal({
+  target,
+  workers,
+  isLoading,
+  onClose,
+  onSubmit,
+}: {
+  target: CorrectionTarget | null;
+  workers: Worker[];
+  isLoading: boolean;
+  onClose: () => void;
+  onSubmit: (target: CorrectionTarget, values: Record<string, FormDataEntryValue>) => Promise<void>;
+}) {
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    setNote("");
+  }, [target]);
+  if (!target) return null;
+  const title = target.kind === "payment" ? "اصلاح پرداخت" : target.kind === "workLog" ? "اصلاح کارکرد" : target.kind === "payable" ? "اصلاح بدهی" : "اصلاح یادداشت";
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="modal-shell correction-modal"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+          await onSubmit(target, values);
+        }}
+      >
+        <header className="modal-header">
+          <div>
+            <h2 className="modal-title">{title}</h2>
+            <p>فقط رکورد تاییدشده اصلاح می‌شود.</p>
+          </div>
+          <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
+            <X aria-hidden="true" size={20} />
+          </button>
+        </header>
+        <div className="modal-body correction-form">
+          {target.kind === "payment" && (
+            <>
+              <label><span>شخص</span><select name="entity_id" defaultValue={target.record.entity_id}>{workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select></label>
+              <label><span>مبلغ</span><input name="amount" inputMode="decimal" defaultValue={target.record.amount} /></label>
+              <label><span>جهت</span><select name="direction" defaultValue={target.record.direction}><option value="INCOMING">دریافت</option><option value="OUTGOING">پرداخت</option><option value="DEFERRED">مدت‌دار</option></select></label>
+              <label><span>روش پرداخت</span><select name="type" defaultValue={target.record.type}><option value="CASH">نقدی</option><option value="BANK_TRANSFER">کارت/بانک</option><option value="CHECK">چک</option><option value="OTHER">سایر</option></select></label>
+              <label><span>سررسید</span><input name="due_date" defaultValue={target.record.due_date ?? ""} /></label>
+              <label><span>توضیح</span><textarea name="description" defaultValue={target.record.description ?? ""} /></label>
+            </>
+          )}
+          {target.kind === "workLog" && (
+            <>
+              <label><span>کارگر</span><select name="worker_id" defaultValue={target.record.worker_id}>{workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select></label>
+              <label><span>عنوان کار</span><input name="task_name" defaultValue={target.record.task_name} /></label>
+              <label><span>بازه</span><input name="period_label" defaultValue={target.record.period_label ?? ""} /></label>
+              <label><span>مقدار</span><input name="quantity" inputMode="decimal" defaultValue={target.record.quantity} /></label>
+              <label><span>واحد</span><select name="unit" defaultValue={target.record.unit}><option value="day">روز</option><option value="meter">متر</option><option value="item">عدد</option><option value="project">پروژه</option><option value="custom">سفارشی</option></select></label>
+              <label><span>نرخ</span><input name="rate_per_unit" inputMode="decimal" defaultValue={target.record.rate_per_unit ?? ""} /></label>
+              <label><span>توضیح</span><textarea name="description" defaultValue={target.record.description ?? ""} /></label>
+            </>
+          )}
+          {target.kind === "payable" && (
+            <>
+              <label><span>فروشنده</span><select name="vendor_id" defaultValue={target.record.vendor_id}>{workers.filter((worker) => worker.type === "VENDOR").map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select></label>
+              <label><span>مبلغ</span><input name="total_amount" inputMode="decimal" defaultValue={target.record.total_amount} /></label>
+              <label><span>توضیح</span><textarea name="description" defaultValue={target.record.description ?? ""} /></label>
+            </>
+          )}
+          {target.kind === "note" && (
+            <label><span>متن یادداشت</span><textarea name="text" defaultValue={target.record.input_text} /></label>
+          )}
+          <label><span>یادداشت اصلاح</span><textarea name="correction_note" value={note} onChange={(event) => setNote(event.target.value)} /></label>
+        </div>
+        <footer className="modal-footer">
+          <div className="modal-actions">
+            <button className="primary-action" type="submit" disabled={isLoading}>ثبت اصلاح</button>
+            <button type="button" onClick={onClose} disabled={isLoading}>انصراف</button>
+          </div>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function VoidModal({
+  target,
+  isLoading,
+  onClose,
+  onSubmit,
+}: {
+  target: VoidTarget | null;
+  isLoading: boolean;
+  onClose: () => void;
+  onSubmit: (target: VoidTarget, reason: string) => Promise<void>;
+}) {
+  const [reason, setReason] = useState("");
+  useEffect(() => {
+    setReason("");
+  }, [target]);
+  if (!target) return null;
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="modal-shell correction-modal"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          await onSubmit(target, reason);
+        }}
+      >
+        <header className="modal-header">
+          <div>
+            <h2 className="modal-title">باطل کردن رکورد</h2>
+            <p>رکورد حذف نمی‌شود و فقط از محاسبات فعال خارج می‌شود.</p>
+          </div>
+          <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
+            <X aria-hidden="true" size={20} />
+          </button>
+        </header>
+        <div className="modal-body correction-form">
+          <label><span>علت</span><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="مثلا ثبت تکراری یا اشتباه" /></label>
+        </div>
+        <footer className="modal-footer">
+          <div className="modal-actions">
+            <button className="danger-action" type="submit" disabled={isLoading}>باطل کردن</button>
+            <button type="button" onClick={onClose} disabled={isLoading}>انصراف</button>
+          </div>
+        </footer>
+      </form>
     </div>
   );
 }
@@ -569,9 +749,13 @@ export function ProjectDetailPage({
   rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
   onVoicePlaceholder, onAttachPlaceholder, successMessage,
   onConfirmPending, onEditPending, onDiscardPending, requestedTab,
+  onCorrectPayment, onVoidPayment, onCorrectWorkLog, onVoidWorkLog,
+  onCorrectPayable, onVoidPayable, onCorrectNote, onVoidNote,
 }: ProjectDetailPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("summary");
   const [selectedPersonId, setSelectedPersonId] = useState<number | null>(null);
+  const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
+  const [voidTarget, setVoidTarget] = useState<VoidTarget | null>(null);
 
   useEffect(() => {
     if (!requestedTab) return;
@@ -580,15 +764,20 @@ export function ProjectDetailPage({
     }
   }, [requestedTab]);
 
-  const paidOut = summary ? Number(summary.total_paid_out) : payments.filter((p) => p.direction === "OUTGOING").reduce((t, p) => t + Number(p.amount || 0), 0);
-  const received = summary ? Number(summary.total_received_from_client ?? summary.total_received) : payments.filter((p) => p.direction === "INCOMING").reduce((t, p) => t + Number(p.amount || 0), 0);
+  const activePayments = useMemo(() => payments.filter((payment) => !payment.is_voided), [payments]);
+  const activeWorkLogs = useMemo(() => workLogs.filter((log) => !log.is_voided), [workLogs]);
+  const activeInvoices = useMemo(() => invoices.filter((invoice) => !invoice.is_voided), [invoices]);
+  const activeHistory = useMemo(() => history.filter((entry) => !entry.is_voided), [history]);
+  const paidOut = summary ? Number(summary.total_paid_out) : activePayments.filter((p) => p.direction === "OUTGOING").reduce((t, p) => t + Number(p.amount || 0), 0);
+  const received = summary ? Number(summary.total_received_from_client ?? summary.total_received) : activePayments.filter((p) => p.direction === "INCOMING").reduce((t, p) => t + Number(p.amount || 0), 0);
   const payables = Number(summary?.open_payables ?? 0);
-  const deferredAmount = summary ? Number(summary.deferred_amount ?? 0) : payments.filter((p) => p.direction === "DEFERRED").reduce((t, p) => t + Number(p.amount || 0), 0);
-  const checkAmount = summary ? Number(summary.check_amount ?? 0) : payments.filter((p) => p.type === "CHECK").reduce((t, p) => t + Number(p.amount || 0), 0);
-  const totalLaborCost = summary ? Number(summary.total_work_amount ?? 0) : workLogs.reduce((t, log) => t + Number(log.total_amount || 0), 0);
+  const deferredAmount = summary ? Number(summary.deferred_amount ?? 0) : activePayments.filter((p) => p.direction === "DEFERRED").reduce((t, p) => t + Number(p.amount || 0), 0);
+  const checkAmount = summary ? Number(summary.check_amount ?? 0) : activePayments.filter((p) => p.type === "CHECK").reduce((t, p) => t + Number(p.amount || 0), 0);
+  const totalLaborCost = summary ? Number(summary.total_work_amount ?? 0) : activeWorkLogs.reduce((t, log) => t + Number(log.total_amount || 0), 0);
   const workerPayables = summary?.worker_payables ?? [];
   const netBalance = Number(summary?.project_balance ?? received - paidOut - payables);
   const notes = history.filter((entry) => entry.change_type === "NOTE");
+  const activeNotes = activeHistory.filter((entry) => entry.change_type === "NOTE");
   const pending = pendingInterpretations.filter((pi) => pi.status === "PENDING" || pi.status === "EDITED");
 
   const workerMap: Record<number, Worker> = useMemo(() => {
@@ -613,13 +802,13 @@ export function ProjectDetailPage({
 
   const laborStatsByWorker = useMemo(() => {
     const stats: Record<number, LaborStats> = {};
-    for (const log of workLogs) {
+    for (const log of activeWorkLogs) {
       const current = stats[log.worker_id] ?? { totalDays: 0, totalCost: 0, paidOut: 0, balance: 0 };
       current.totalDays += Number(log.quantity || 0);
       current.totalCost += Number(log.total_amount || 0);
       stats[log.worker_id] = current;
     }
-    for (const payment of payments) {
+    for (const payment of activePayments) {
       const worker = workerMap[payment.entity_id];
       if (!worker || worker.type !== "DAILY_WORKER") continue;
       const current = stats[payment.entity_id] ?? { totalDays: 0, totalCost: 0, paidOut: 0, balance: 0 };
@@ -630,11 +819,11 @@ export function ProjectDetailPage({
     }
     for (const item of Object.values(stats)) item.balance = item.totalCost - item.paidOut;
     return stats;
-  }, [payments, workLogs, workerMap]);
+  }, [activePayments, activeWorkLogs, workerMap]);
 
   const totalLaborDays = useMemo(() => {
-    return workLogs.reduce((total, log) => total + Number(log.unit === "day" ? log.quantity || 0 : 0), 0);
-  }, [workLogs]);
+    return activeWorkLogs.reduce((total, log) => total + Number(log.unit === "day" ? log.quantity || 0 : 0), 0);
+  }, [activeWorkLogs]);
 
   const dailyWorkerPaidOut = useMemo(() => {
     return Object.values(laborStatsByWorker).reduce((total, stats) => total + stats.paidOut, 0);
@@ -653,23 +842,84 @@ export function ProjectDetailPage({
   }, [workLogs]);
 
   const openInvoices = useMemo(() => {
-    return invoices.filter((inv) => inv.status === "OPEN" || inv.status === "PARTIAL");
+    return activeInvoices.filter((inv) => inv.status === "OPEN" || inv.status === "PARTIAL");
+  }, [activeInvoices]);
+
+  const payableInvoices = useMemo(() => {
+    return invoices.filter((inv) => inv.is_voided || inv.status === "OPEN" || inv.status === "PARTIAL");
   }, [invoices]);
 
   const deferredPayments = useMemo(() => {
+    return confirmedPayments.filter((payment) => !payment.is_voided && (payment.direction === "DEFERRED" || payment.type === "CHECK"));
+  }, [confirmedPayments]);
+
+  const payablePayments = useMemo(() => {
     return confirmedPayments.filter((payment) => payment.direction === "DEFERRED" || payment.type === "CHECK");
   }, [confirmedPayments]);
 
   const tabs = [
     { key: "summary" as TabKey, label: "خلاصه" },
     { key: "people" as TabKey, label: "افراد", count: workers.length },
-    { key: "labor" as TabKey, label: "کارکرد کارگران", count: workLogs.length },
-    { key: "financial" as TabKey, label: "مالی", count: confirmedPayments.length },
+    { key: "labor" as TabKey, label: "کارکرد کارگران", count: activeWorkLogs.length },
+    { key: "financial" as TabKey, label: "مالی", count: activePayments.length },
     { key: "payables" as TabKey, label: "بدهی‌ها / چک‌ها", count: openInvoices.length + deferredPayments.length },
-    { key: "notes" as TabKey, label: "یادداشت‌ها", count: notes.length },
+    { key: "notes" as TabKey, label: "یادداشت‌ها", count: activeNotes.length },
     { key: "reports" as TabKey, label: "گزارش‌ها" },
     { key: "pending" as TabKey, label: "در انتظار تایید", count: pending.length },
   ];
+
+  const valueText = (values: Record<string, FormDataEntryValue>, key: string) => {
+    const value = values[key];
+    return typeof value === "string" ? value.trim() : "";
+  };
+
+  async function submitCorrection(target: CorrectionTarget, values: Record<string, FormDataEntryValue>) {
+    if (!project) return;
+    if (target.kind === "payment") {
+      await onCorrectPayment(project.id, target.record.id, {
+        entity_id: Number(valueText(values, "entity_id")),
+        amount: valueText(values, "amount"),
+        direction: valueText(values, "direction") as Payment["direction"],
+        type: valueText(values, "type") as Payment["type"],
+        due_date: valueText(values, "due_date") || null,
+        description: valueText(values, "description") || null,
+        correction_note: valueText(values, "correction_note") || null,
+      });
+    } else if (target.kind === "workLog") {
+      await onCorrectWorkLog(project.id, target.record.id, {
+        worker_id: Number(valueText(values, "worker_id")),
+        task_name: valueText(values, "task_name"),
+        period_label: valueText(values, "period_label") || null,
+        unit: valueText(values, "unit") as WorkLog["unit"],
+        quantity: valueText(values, "quantity"),
+        rate_per_unit: valueText(values, "rate_per_unit") || null,
+        description: valueText(values, "description") || null,
+        correction_note: valueText(values, "correction_note") || null,
+      });
+    } else if (target.kind === "payable") {
+      await onCorrectPayable(project.id, target.record.id, {
+        vendor_id: Number(valueText(values, "vendor_id")),
+        total_amount: valueText(values, "total_amount"),
+        description: valueText(values, "description") || null,
+        correction_note: valueText(values, "correction_note") || null,
+      });
+    } else {
+      await onCorrectNote(project.id, target.record.id, {
+        text: valueText(values, "text"),
+        correction_note: valueText(values, "correction_note") || null,
+      });
+    }
+    setCorrectionTarget(null);
+  }
+
+  async function submitVoid(target: VoidTarget, reason: string) {
+    if (!project) return;
+    if (target.kind === "payment") await onVoidPayment(project.id, target.record.id, reason);
+    else if (target.kind === "workLog") await onVoidWorkLog(project.id, target.record.id, reason);
+    else if (target.kind === "payable") await onVoidPayable(project.id, target.record.id, reason);
+    else await onVoidNote(project.id, target.record.id, reason);
+    setVoidTarget(null);
+  }
 
   if (!project) {
     return <div className="empty-page">برای شروع، یک پروژه را از خانه باز کنید.</div>;
@@ -819,7 +1069,16 @@ export function ProjectDetailPage({
               {Object.entries(workLogsByWorker).map(([workerId, logs]) => {
                 const worker = workerMap[Number(workerId)];
                 if (!worker) return null;
-                return <WorkLogGroupCard key={workerId} worker={worker} logs={logs} laborStats={laborStatsByWorker[Number(workerId)]} />;
+                return (
+                  <WorkLogGroupCard
+                    key={workerId}
+                    worker={worker}
+                    logs={logs}
+                    laborStats={laborStatsByWorker[Number(workerId)]}
+                    onEditLog={(log) => setCorrectionTarget({ kind: "workLog", record: log })}
+                    onVoidLog={(log) => setVoidTarget({ kind: "workLog", record: log })}
+                  />
+                );
               })}
             </div>
           )}
@@ -832,7 +1091,15 @@ export function ProjectDetailPage({
             <EmptyState>هیچ تراکنشی ثبت نشده است</EmptyState>
           ) : (
             <div className="visibility-trx-list">
-              {confirmedPayments.map((payment) => <PaymentRow key={payment.id} payment={payment} workerMap={workerMap} />)}
+              {confirmedPayments.map((payment) => (
+                <PaymentRow
+                  key={payment.id}
+                  payment={payment}
+                  workerMap={workerMap}
+                  onEdit={() => setCorrectionTarget({ kind: "payment", record: payment })}
+                  onVoid={() => setVoidTarget({ kind: "payment", record: payment })}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -840,23 +1107,39 @@ export function ProjectDetailPage({
 
       {activeTab === "payables" && (
         <div className="detail-tab-content">
-          {openInvoices.length === 0 && deferredPayments.length === 0 && (!summary?.vendor_debts || summary.vendor_debts.length === 0) ? (
+          {payableInvoices.length === 0 && payablePayments.length === 0 && (!summary?.vendor_debts || summary.vendor_debts.length === 0) ? (
             <EmptyState>بدهی یا چک ثبت نشده است</EmptyState>
           ) : (
             <>
-              {openInvoices.length > 0 && (
+              {payableInvoices.length > 0 && (
                 <section className="payable-section">
                   <h4 className="role-group-title"><ReceiptText size={14} />بدهی‌های باز</h4>
                   <div className="visibility-trx-list">
-                    {openInvoices.map((invoice) => <InvoiceRow key={invoice.id} invoice={invoice} workerMap={workerMap} />)}
+                    {payableInvoices.map((invoice) => (
+                      <InvoiceRow
+                        key={invoice.id}
+                        invoice={invoice}
+                        workerMap={workerMap}
+                        onEdit={() => setCorrectionTarget({ kind: "payable", record: invoice })}
+                        onVoid={() => setVoidTarget({ kind: "payable", record: invoice })}
+                      />
+                    ))}
                   </div>
                 </section>
               )}
-              {deferredPayments.length > 0 && (
+              {payablePayments.length > 0 && (
                 <section className="payable-section">
                   <h4 className="role-group-title"><Banknote size={14} />چک‌ها / پرداخت‌های مدت‌دار</h4>
                   <div className="visibility-trx-list">
-                    {deferredPayments.map((payment) => <PaymentRow key={payment.id} payment={payment} workerMap={workerMap} />)}
+                    {payablePayments.map((payment) => (
+                      <PaymentRow
+                        key={payment.id}
+                        payment={payment}
+                        workerMap={workerMap}
+                        onEdit={() => setCorrectionTarget({ kind: "payment", record: payment })}
+                        onVoid={() => setVoidTarget({ kind: "payment", record: payment })}
+                      />
+                    ))}
                   </div>
                 </section>
               )}
@@ -889,11 +1172,14 @@ export function ProjectDetailPage({
           ) : (
             <div className="visibility-notes-list">
               {notes.map((note) => (
-                <article key={note.id} className="visibility-note-card">
+                <article key={note.id} className={`visibility-note-card${note.is_voided ? " is-voided" : ""}`}>
                   <div className="vpc-meta">
+                    <VoidedBadge isVoided={note.is_voided} />
                     <span><Clock size={12} />{shortDate(note.created_at)}</span>
+                    {note.void_reason && <span>علت: {note.void_reason}</span>}
                   </div>
                   <p>{note.input_text}</p>
+                  <RecordActions disabled={note.is_voided} onEdit={() => setCorrectionTarget({ kind: "note", record: note })} onVoid={() => setVoidTarget({ kind: "note", record: note })} />
                 </article>
               ))}
             </div>
@@ -954,6 +1240,19 @@ export function ProjectDetailPage({
           onClose={() => setSelectedPersonId(null)}
         />
       )}
+      <CorrectionModal
+        target={correctionTarget}
+        workers={workers}
+        isLoading={isLoading}
+        onClose={() => setCorrectionTarget(null)}
+        onSubmit={submitCorrection}
+      />
+      <VoidModal
+        target={voidTarget}
+        isLoading={isLoading}
+        onClose={() => setVoidTarget(null)}
+        onSubmit={submitVoid}
+      />
     </div>
   );
 }

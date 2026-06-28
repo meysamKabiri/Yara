@@ -440,6 +440,67 @@ function App() {
     });
   }
 
+  async function refreshActiveProject() {
+    if (!activeProjectId) return;
+    await loadProjectData(activeProjectId);
+  }
+
+  async function correctPayment(projectId: number, paymentId: number, payload: Parameters<typeof api.correctPayment>[2]) {
+    await runAction("در حال اصلاح پرداخت", async () => {
+      await api.correctPayment(projectId, paymentId, payload);
+      await refreshActiveProject();
+    });
+  }
+
+  async function voidPayment(projectId: number, paymentId: number, reason?: string | null) {
+    await runAction("در حال باطل کردن پرداخت", async () => {
+      await api.voidPayment(projectId, paymentId, reason);
+      await refreshActiveProject();
+    });
+  }
+
+  async function correctWorkLog(projectId: number, workLogId: number, payload: Parameters<typeof api.correctWorkLog>[2]) {
+    await runAction("در حال اصلاح کارکرد", async () => {
+      await api.correctWorkLog(projectId, workLogId, payload);
+      await refreshActiveProject();
+    });
+  }
+
+  async function voidWorkLog(projectId: number, workLogId: number, reason?: string | null) {
+    await runAction("در حال باطل کردن کارکرد", async () => {
+      await api.voidWorkLog(projectId, workLogId, reason);
+      await refreshActiveProject();
+    });
+  }
+
+  async function correctPayable(projectId: number, payableId: number, payload: Parameters<typeof api.correctPayable>[2]) {
+    await runAction("در حال اصلاح بدهی", async () => {
+      await api.correctPayable(projectId, payableId, payload);
+      await refreshActiveProject();
+    });
+  }
+
+  async function voidPayable(projectId: number, payableId: number, reason?: string | null) {
+    await runAction("در حال باطل کردن بدهی", async () => {
+      await api.voidPayable(projectId, payableId, reason);
+      await refreshActiveProject();
+    });
+  }
+
+  async function correctNote(projectId: number, noteId: number, payload: { text: string; correction_note?: string | null }) {
+    await runAction("در حال اصلاح یادداشت", async () => {
+      await api.correctNote(projectId, noteId, payload);
+      await refreshActiveProject();
+    });
+  }
+
+  async function voidNote(projectId: number, noteId: number, reason?: string | null) {
+    await runAction("در حال باطل کردن یادداشت", async () => {
+      await api.voidNote(projectId, noteId, reason);
+      await refreshActiveProject();
+    });
+  }
+
   async function submitNaturalInput(event: FormEvent) {
     event.preventDefault();
     if (!activeProjectId) {
@@ -885,6 +946,14 @@ function App() {
           onConfirmPending={confirmPendingFromDetail}
           onEditPending={(interpretation) => setPendingTabEditingId(interpretation.id)}
           onDiscardPending={discardPendingFromDetail}
+          onCorrectPayment={correctPayment}
+          onVoidPayment={voidPayment}
+          onCorrectWorkLog={correctWorkLog}
+          onVoidWorkLog={voidWorkLog}
+          onCorrectPayable={correctPayable}
+          onVoidPayable={voidPayable}
+          onCorrectNote={correctNote}
+          onVoidNote={voidNote}
         />
       );
     }

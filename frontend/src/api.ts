@@ -159,6 +159,11 @@ export type WorkLog = {
   period_label: string | null;
   source_pending_interpretation_id: number | null;
   description: string | null;
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -170,6 +175,11 @@ export type Invoice = {
   total_amount: string;
   description: string | null;
   status: "OPEN" | "PARTIAL" | "PAID";
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -183,9 +193,45 @@ export type Payment = {
   type: PaymentType;
   due_date: string | null;
   direction: FinancialDirection;
+  description: string | null;
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
+
+export type PaymentCorrectionPayload = Partial<{
+  entity_id: number;
+  amount: string;
+  related_invoice_id: number | null;
+  type: PaymentType;
+  due_date: string | null;
+  direction: FinancialDirection;
+  description: string | null;
+  correction_note: string | null;
+}>;
+
+export type WorkLogCorrectionPayload = Partial<{
+  worker_id: number;
+  task_name: string;
+  unit: WorkUnit;
+  quantity: string;
+  rate_per_unit: string | null;
+  period_label: string | null;
+  description: string | null;
+  correction_note: string | null;
+}>;
+
+export type PayableCorrectionPayload = Partial<{
+  vendor_id: number;
+  total_amount: string;
+  status: "OPEN" | "PARTIAL" | "PAID";
+  description: string | null;
+  correction_note: string | null;
+}>;
 
 export type OperatingSummary = {
   total_work_amount: string;
@@ -284,6 +330,11 @@ export type HistoryEntry = {
   rule_id: string | null;
   explanation: Record<string, unknown> | null;
   conflict_warnings: Array<Record<string, unknown>> | null;
+  is_voided: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  correction_note: string | null;
+  corrected_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -613,13 +664,37 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  correctWorkLog: (projectId: number, workLogId: number, payload: WorkLogCorrectionPayload) =>
+    request<WorkLog>(`/projects/${projectId}/work-logs/${workLogId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidWorkLog: (projectId: number, workLogId: number, reason?: string | null) =>
+    request<WorkLog>(`/projects/${projectId}/work-logs/${workLogId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+
   listPayments: (projectId: number) =>
     request<Payment[]>(`/projects/${projectId}/payments`),
 
-  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType; direction?: FinancialDirection; due_date?: string | null }) =>
+  createPayment: (projectId: number, payload: { entity_id: number; amount: string; related_invoice_id?: number | null; type: PaymentType; direction?: FinancialDirection; due_date?: string | null; description?: string | null }) =>
     request<Payment>(`/projects/${projectId}/payments`, {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  correctPayment: (projectId: number, paymentId: number, payload: PaymentCorrectionPayload) =>
+    request<Payment>(`/projects/${projectId}/payments/${paymentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidPayment: (projectId: number, paymentId: number, reason?: string | null) =>
+    request<Payment>(`/projects/${projectId}/payments/${paymentId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
     }),
 
   listInvoices: (projectId: number) =>
@@ -629,6 +704,30 @@ export const api = {
     request<Invoice>(`/projects/${projectId}/invoices`, {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  correctPayable: (projectId: number, payableId: number, payload: PayableCorrectionPayload) =>
+    request<Invoice>(`/projects/${projectId}/payables/${payableId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidPayable: (projectId: number, payableId: number, reason?: string | null) =>
+    request<Invoice>(`/projects/${projectId}/payables/${payableId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+
+  correctNote: (projectId: number, noteId: number, payload: { text: string; correction_note?: string | null }) =>
+    request<HistoryEntry>(`/projects/${projectId}/notes/${noteId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  voidNote: (projectId: number, noteId: number, reason?: string | null) =>
+    request<HistoryEntry>(`/projects/${projectId}/notes/${noteId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason || null }),
     }),
 
   getOperatingSummary: (projectId: number) =>

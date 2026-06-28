@@ -43,7 +43,7 @@ def project_report_summary(
     payments = list(
         db.scalars(
             _period_filter(
-                select(Payment).where(Payment.project_id == project_id),
+                select(Payment).where(Payment.project_id == project_id, Payment.is_voided == False),
                 Payment.created_at,
                 start_at,
                 end_at,
@@ -53,7 +53,7 @@ def project_report_summary(
     work_logs = list(
         db.scalars(
             _period_filter(
-                select(WorkLog).where(WorkLog.project_id == project_id),
+                select(WorkLog).where(WorkLog.project_id == project_id, WorkLog.is_voided == False),
                 WorkLog.created_at,
                 start_at,
                 end_at,
@@ -63,7 +63,7 @@ def project_report_summary(
     invoices = list(
         db.scalars(
             _period_filter(
-                select(Invoice).where(Invoice.project_id == project_id),
+                select(Invoice).where(Invoice.project_id == project_id, Invoice.is_voided == False),
                 Invoice.created_at,
                 start_at,
                 end_at,

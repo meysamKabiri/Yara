@@ -179,11 +179,14 @@ class WorkLogCreate(BaseModel):
 
 
 class WorkLogUpdate(BaseModel):
+    worker_id: int | None = None
     task_name: str | None = None
     unit: WorkUnit | None = None
     quantity: Decimal | None = None
     rate_per_unit: Decimal | None = None
+    period_label: str | None = None
     description: str | None = None
+    correction_note: str | None = None
 
 
 class WorkLogRead(BaseModel):
@@ -200,6 +203,11 @@ class WorkLogRead(BaseModel):
     period_label: str | None = None
     source_pending_interpretation_id: int | None = None
     description: str | None
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -208,6 +216,14 @@ class InvoiceCreate(BaseModel):
     vendor_id: int
     total_amount: Decimal
     description: str | None = None
+
+
+class InvoiceUpdate(BaseModel):
+    vendor_id: int | None = None
+    total_amount: Decimal | None = None
+    status: InvoiceStatus | None = None
+    description: str | None = None
+    correction_note: str | None = None
 
 
 class InvoiceRead(BaseModel):
@@ -219,6 +235,11 @@ class InvoiceRead(BaseModel):
     total_amount: Decimal
     description: str | None
     status: InvoiceStatus
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -230,6 +251,18 @@ class PaymentCreate(BaseModel):
     type: PaymentType
     due_date: str | None = None
     direction: FinancialDirection = FinancialDirection.OUTGOING
+    description: str | None = None
+
+
+class PaymentUpdate(BaseModel):
+    entity_id: int | None = None
+    amount: Decimal | None = None
+    related_invoice_id: int | None = None
+    type: PaymentType | None = None
+    due_date: str | None = None
+    direction: FinancialDirection | None = None
+    description: str | None = None
+    correction_note: str | None = None
 
 
 class PaymentRead(BaseModel):
@@ -243,6 +276,12 @@ class PaymentRead(BaseModel):
     type: PaymentType
     due_date: str | None
     direction: FinancialDirection
+    description: str | None = None
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -275,8 +314,22 @@ class HistoryEntryRead(BaseModel):
     rule_id: str | None
     explanation: dict | None
     conflict_warnings: list[dict] | None
+    is_voided: bool = False
+    void_reason: str | None = None
+    voided_at: datetime | None = None
+    correction_note: str | None = None
+    corrected_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class NoteUpdate(BaseModel):
+    text: str
+    correction_note: str | None = None
+
+
+class VoidPayload(BaseModel):
+    reason: str | None = None
 
 
 class NaturalInputCreate(BaseModel):

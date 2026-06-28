@@ -1164,6 +1164,35 @@ mark {
   margin: 0;
 }
 
+.correction-modal {
+  width: min(620px, 100%);
+  overflow: hidden;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.correction-form label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.correction-form label span {
+  color: #40545a;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.correction-form input,
+.correction-form select,
+.correction-form textarea {
+  width: 100%;
+}
+
+.correction-form textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
 .interpretation-stack {
   display: flex;
   flex-direction: column;
@@ -1754,6 +1783,11 @@ mark {
     width: calc(100vw - 24px);
   }
 
+  .correction-modal {
+    max-height: calc(100dvh - 24px);
+    width: calc(100vw - 24px);
+  }
+
   .modal-header,
   .modal-body,
   .modal-footer {
@@ -1785,6 +1819,28 @@ mark {
   .create-project-trigger {
     min-width: 0;
     width: 100%;
+  }
+
+  .visibility-trx-row {
+    grid-template-columns: 1fr;
+  }
+
+  .visibility-trx-row .record-actions {
+    grid-column: 1;
+    grid-row: auto;
+    justify-content: stretch;
+  }
+
+  .record-actions .icon-button {
+    flex: 1;
+  }
+
+  .worker-labor-log {
+    grid-template-columns: 1fr;
+  }
+
+  .worker-labor-log > div:last-child {
+    justify-items: start;
   }
 }
 
@@ -2715,7 +2771,7 @@ mark {
   border-top: 1px solid #eef3f0;
   display: grid;
   gap: 0.45rem;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   padding-top: 0.55rem;
 }
 
@@ -2734,6 +2790,50 @@ mark {
   padding: 0.6rem 0.85rem;
   display: grid;
   gap: 0.15rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.visibility-trx-row .trx-main,
+.visibility-trx-row .trx-meta {
+  grid-column: 1;
+}
+
+.visibility-trx-row .record-actions {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.record-actions {
+  align-items: center;
+  align-self: center;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.record-actions .icon-button {
+  min-height: 36px;
+  min-width: 36px;
+}
+
+.danger-icon {
+  background: #fff0f0;
+  color: #a72f2f;
+}
+
+.is-voided {
+  opacity: 0.72;
+}
+
+.voided-badge {
+  background: #f1f4f5;
+  border: 1px solid #d7e0e3;
+  border-radius: 999px;
+  color: #56666d;
+  display: inline-flex;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  padding: 0.28rem 0.45rem;
 }
 
 .trx-main {

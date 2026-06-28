@@ -243,6 +243,7 @@ class ExecutionEngine:
             type=payment_method,
             due_date=confirmed_interpretation.due_date,
             direction=direction,
+            description=confirmed_interpretation.description,
         )
         db.add(payment)
         db.flush()

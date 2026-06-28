@@ -227,6 +227,11 @@ class WorkLog(TimestampMixin, Base):
     period_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
     source_pending_interpretation_id: Mapped[int | None] = mapped_column(ForeignKey("pendinginterpretation.id"), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="work_logs")
     worker: Mapped[Worker] = relationship(back_populates="work_logs")
@@ -243,6 +248,11 @@ class Invoice(TimestampMixin, Base):
         default=InvoiceStatus.OPEN,
         nullable=False,
     )
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="invoices")
     vendor: Mapped[Worker] = relationship(back_populates="invoices")
@@ -269,6 +279,12 @@ class Payment(TimestampMixin, Base):
         default=FinancialDirection.OUTGOING,
         nullable=False,
     )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="payments")
     entity: Mapped[Worker] = relationship(back_populates="payments")
@@ -311,6 +327,11 @@ class HistoryEntry(TimestampMixin, Base):
     rule_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     conflict_warnings: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    is_voided: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    correction_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="history_entries")
     worker_state: Mapped[WorkerState | None] = relationship(back_populates="history_entries")

@@ -54,10 +54,12 @@ from app.schemas.projects import (
     HistoryEntryRead,
     InvoiceCreate,
     InvoiceRead,
+    InvoiceUpdate,
     NaturalInputCreate,
     NaturalInputResult,
     PaymentCreate,
     PaymentRead,
+    PaymentUpdate,
     PendingInterpretationConfirm,
     PendingInterpretationRead,
     PendingInterpretationUpdate,
@@ -69,6 +71,8 @@ from app.schemas.projects import (
     ProjectTotals,
     RawEntryCreate,
     RawEntryRead,
+    NoteUpdate,
+    VoidPayload,
     WorkerCreate,
     WorkerRead,
     WorkerStateRead,
@@ -245,6 +249,15 @@ def _get_work_log(db: DbSession, work_log_id: int) -> WorkLog:
     return work_log
 
 
+def _get_project_work_log(db: DbSession, project_id: int, work_log_id: int) -> WorkLog:
+    work_log = _get_work_log(db, work_log_id)
+    if work_log.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Work log not found"
+        )
+    return work_log
+
+
 def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.project_id != project_id:
@@ -252,6 +265,43 @@ def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
             status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found"
         )
     return invoice
+
+
+def _get_payment(db: DbSession, project_id: int, payment_id: int) -> Payment:
+    payment = db.get(Payment, payment_id)
+    if payment is None or payment.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found"
+        )
+    return payment
+
+
+def _get_note(db: DbSession, project_id: int, note_id: int) -> HistoryEntry:
+    note = db.get(HistoryEntry, note_id)
+    if note is None or note.project_id != project_id or note.change_type != HistoryChangeType.NOTE:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Note not found"
+        )
+    return note
+
+
+def _ensure_not_voided(record: Any) -> None:
+    if getattr(record, "is_voided", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Voided records cannot be corrected",
+        )
+
+
+def _void_record(record: Any, reason: str | None) -> None:
+    if getattr(record, "is_voided", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Record is already voided",
+        )
+    record.is_voided = True
+    record.void_reason = reason
+    record.voided_at = datetime.now(UTC)
 
 
 def _require_pending(event: ExtractedEvent) -> None:
@@ -279,7 +329,7 @@ def _project_totals(db: DbSession, project_id: int) -> ProjectTotals:
         elif event.type in {ExtractedEventType.MONEY_OUT, ExtractedEventType.PURCHASE}:
             money_out += event.amount
     payments = db.scalars(
-        select(Payment).where(Payment.project_id == project_id)
+        select(Payment).where(Payment.project_id == project_id, Payment.is_voided == False)
     ).all()
     for payment in payments:
         if payment.direction == FinancialDirection.INCOMING:
@@ -3891,14 +3941,58 @@ def list_work_logs(project_id: int, db: DbSession) -> list[WorkLog]:
     )
 
 
+@router.patch("/projects/{project_id}/work-logs/{work_log_id}", response_model=WorkLogRead)
+def correct_project_work_log(
+    project_id: int,
+    work_log_id: int,
+    payload: WorkLogUpdate,
+    db: DbSession,
+) -> WorkLog:
+    _get_project(db, project_id)
+    work_log = _get_project_work_log(db, project_id, work_log_id)
+    _ensure_not_voided(work_log)
+    updates = payload.model_dump(exclude_unset=True)
+    correction_note = updates.pop("correction_note", None)
+    if "worker_id" in updates and updates["worker_id"] is not None:
+        _get_worker(db, project_id, updates["worker_id"])
+    for field, value in updates.items():
+        setattr(work_log, field, value)
+    work_log.total_amount = _work_log_total(work_log.quantity, work_log.rate_per_unit)
+    work_log.corrected_at = datetime.now(UTC)
+    work_log.correction_note = correction_note
+    db.commit()
+    db.refresh(work_log)
+    return work_log
+
+
+@router.post("/projects/{project_id}/work-logs/{work_log_id}/void", response_model=WorkLogRead)
+def void_project_work_log(
+    project_id: int,
+    work_log_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> WorkLog:
+    _get_project(db, project_id)
+    work_log = _get_project_work_log(db, project_id, work_log_id)
+    _void_record(work_log, payload.reason)
+    db.commit()
+    db.refresh(work_log)
+    return work_log
+
+
 @router.patch("/work-logs/{work_log_id}", response_model=WorkLogRead)
 def update_work_log(work_log_id: int, payload: WorkLogUpdate, db: DbSession) -> WorkLog:
     # LEGACY_RISK: updates WorkLog.total_amount without ExecutionEngine.
     # Same note as create_work_log.
     work_log = _get_work_log(db, work_log_id)
+    _ensure_not_voided(work_log)
     for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "correction_note":
+            work_log.correction_note = value
+            continue
         setattr(work_log, field, value)
     work_log.total_amount = _work_log_total(work_log.quantity, work_log.rate_per_unit)
+    work_log.corrected_at = datetime.now(UTC)
     db.commit()
     db.refresh(work_log)
     return work_log
@@ -3963,6 +4057,50 @@ def list_invoices(project_id: int, db: DbSession) -> list[Invoice]:
     )
 
 
+@router.patch("/projects/{project_id}/payables/{payable_id}", response_model=InvoiceRead)
+def correct_project_payable(
+    project_id: int,
+    payable_id: int,
+    payload: InvoiceUpdate,
+    db: DbSession,
+) -> Invoice:
+    _get_project(db, project_id)
+    invoice = _get_invoice(db, project_id, payable_id)
+    _ensure_not_voided(invoice)
+    updates = payload.model_dump(exclude_unset=True)
+    correction_note = updates.pop("correction_note", None)
+    if "vendor_id" in updates and updates["vendor_id"] is not None:
+        vendor = _get_worker(db, project_id, updates["vendor_id"])
+        if vendor.type != WorkerType.VENDOR:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Worker is not a vendor",
+            )
+    for field, value in updates.items():
+        setattr(invoice, field, value)
+    _refresh_invoice_status(db, invoice)
+    invoice.corrected_at = datetime.now(UTC)
+    invoice.correction_note = correction_note
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+@router.post("/projects/{project_id}/payables/{payable_id}/void", response_model=InvoiceRead)
+def void_project_payable(
+    project_id: int,
+    payable_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> Invoice:
+    _get_project(db, project_id)
+    invoice = _get_invoice(db, project_id, payable_id)
+    _void_record(invoice, payload.reason)
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
 @router.post(
     "/projects/{project_id}/payments",
     response_model=PaymentRead,
@@ -4001,6 +4139,7 @@ def create_payment(project_id: int, payload: PaymentCreate, db: DbSession) -> Pa
             payment_method=payload.type,
             due_date=payload.due_date,
             related_invoice_id=payload.related_invoice_id,
+            description=payload.description,
         ),
         db,
         state,
@@ -4043,6 +4182,100 @@ def list_payments(project_id: int, db: DbSession) -> list[Payment]:
     )
 
 
+@router.patch("/projects/{project_id}/payments/{payment_id}", response_model=PaymentRead)
+def correct_project_payment(
+    project_id: int,
+    payment_id: int,
+    payload: PaymentUpdate,
+    db: DbSession,
+) -> Payment:
+    _get_project(db, project_id)
+    payment = _get_payment(db, project_id, payment_id)
+    _ensure_not_voided(payment)
+    updates = payload.model_dump(exclude_unset=True)
+    correction_note = updates.pop("correction_note", None)
+    old_invoice_id = payment.related_invoice_id
+    next_entity_id = updates.get("entity_id", payment.entity_id)
+    if "entity_id" in updates and updates["entity_id"] is not None:
+        _get_worker(db, project_id, updates["entity_id"])
+    if "related_invoice_id" in updates and updates["related_invoice_id"] is not None:
+        invoice = _get_invoice(db, project_id, updates["related_invoice_id"])
+        if invoice.vendor_id != next_entity_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment entity must match invoice vendor",
+            )
+    for field, value in updates.items():
+        setattr(payment, field, value)
+    payment.corrected_at = datetime.now(UTC)
+    payment.correction_note = correction_note
+    db.flush()
+    if old_invoice_id is not None:
+        old_invoice = db.get(Invoice, old_invoice_id)
+        if old_invoice is not None:
+            _refresh_invoice_status(db, old_invoice)
+    if payment.related_invoice_id is not None:
+        invoice = db.get(Invoice, payment.related_invoice_id)
+        if invoice is not None:
+            _refresh_invoice_status(db, invoice)
+    db.commit()
+    db.refresh(payment)
+    return payment
+
+
+@router.post("/projects/{project_id}/payments/{payment_id}/void", response_model=PaymentRead)
+def void_project_payment(
+    project_id: int,
+    payment_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> Payment:
+    _get_project(db, project_id)
+    payment = _get_payment(db, project_id, payment_id)
+    _void_record(payment, payload.reason)
+    db.flush()
+    if payment.related_invoice_id is not None:
+        invoice = db.get(Invoice, payment.related_invoice_id)
+        if invoice is not None:
+            _refresh_invoice_status(db, invoice)
+    db.commit()
+    db.refresh(payment)
+    return payment
+
+
+@router.patch("/projects/{project_id}/notes/{note_id}", response_model=HistoryEntryRead)
+def correct_project_note(
+    project_id: int,
+    note_id: int,
+    payload: NoteUpdate,
+    db: DbSession,
+) -> HistoryEntry:
+    _get_project(db, project_id)
+    note = _get_note(db, project_id, note_id)
+    _ensure_not_voided(note)
+    note.input_text = payload.text
+    note.corrected_at = datetime.now(UTC)
+    note.correction_note = payload.correction_note
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+@router.post("/projects/{project_id}/notes/{note_id}/void", response_model=HistoryEntryRead)
+def void_project_note(
+    project_id: int,
+    note_id: int,
+    payload: VoidPayload,
+    db: DbSession,
+) -> HistoryEntry:
+    _get_project(db, project_id)
+    note = _get_note(db, project_id, note_id)
+    _void_record(note, payload.reason)
+    db.commit()
+    db.refresh(note)
+    return note
+
+
 @router.get("/projects/{project_id}/operating-summary")
 def get_operating_summary(project_id: int, db: DbSession) -> dict[str, Any]:
     _get_project(db, project_id)
@@ -4078,7 +4311,7 @@ def export_project_payments_csv(
         for worker in db.scalars(select(Worker).where(Worker.project_id == project_id))
     }
     statement = _apply_datetime_range(
-        select(Payment).where(Payment.project_id == project_id),
+        select(Payment).where(Payment.project_id == project_id, Payment.is_voided == False),
         Payment.created_at,
         from_date,
         to_date,
@@ -4093,7 +4326,7 @@ def export_project_payments_csv(
             DIRECTION_LABELS.get(payment.direction, payment.direction.value),
             PAYMENT_TYPE_LABELS.get(payment.type, payment.type.value),
             _decimal_text(payment.amount),
-            payment.due_date or "",
+            payment.description or payment.due_date or "",
         ])
     return _csv_response(
         f"project-{project_id}-payments.csv",
@@ -4143,7 +4376,7 @@ def export_project_work_logs_csv(
 ) -> Response:
     _get_project(db, project_id)
     statement = _apply_datetime_range(
-        select(WorkLog).where(WorkLog.project_id == project_id),
+        select(WorkLog).where(WorkLog.project_id == project_id, WorkLog.is_voided == False),
         WorkLog.created_at,
         from_date,
         to_date,
@@ -4186,7 +4419,7 @@ def export_project_payables_csv(
         from_date,
         to_date,
     ).order_by(Invoice.created_at.asc(), Invoice.id.asc())
-    for invoice in db.scalars(invoice_statement):
+    for invoice in db.scalars(invoice_statement.where(Invoice.is_voided == False)):
         debt = max(invoice.total_amount - invoice_paid_amount(db, invoice.id), Decimal("0"))
         if debt <= 0:
             continue
@@ -4205,6 +4438,7 @@ def export_project_payables_csv(
         select(Payment).where(
             Payment.project_id == project_id,
             (Payment.direction == FinancialDirection.DEFERRED) | (Payment.type == PaymentType.CHECK),
+            Payment.is_voided == False,
         ),
         Payment.created_at,
         from_date,
@@ -4255,6 +4489,7 @@ def export_project_notes_csv(
         select(HistoryEntry).where(
             HistoryEntry.project_id == project_id,
             HistoryEntry.change_type == HistoryChangeType.NOTE,
+            HistoryEntry.is_voided == False,
         ),
         HistoryEntry.created_at,
         from_date,
