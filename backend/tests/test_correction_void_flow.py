@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -209,3 +211,114 @@ def test_note_correction_and_void_remain_visible_but_export_excludes_voided(
     assert history[0]["input_text"] == "یادداشت اصلاح‌شده"
     assert history[0]["is_voided"] is True
     assert "یادداشت اصلاح‌شده" not in client.get(f"/projects/{project['id']}/exports/notes.csv").text
+
+
+def test_demo_scenario_correction_void_totals_and_exports(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    project = _project(client, "ویلا دماوند - نسخه دمو")
+    project_id = project["id"]
+    client_worker = _worker(client, project_id, "میثم کبیری", "CLIENT")
+    vendor = _worker(client, project_id, "هادی پور", "VENDOR")
+    unpaid_vendor = _worker(client, project_id, "آهنچی", "VENDOR")
+    worker = _worker(client, project_id, "مش رحیم", "DAILY_WORKER")
+
+    client_payment = _payment(
+        client,
+        project_id,
+        client_worker["id"],
+        "100000000",
+        direction="INCOMING",
+    )
+    assert client_payment["amount"] == "100000000.00"
+    vendor_payment = _payment(client, project_id, vendor["id"], "20000000")
+    worker_payment = _payment(client, project_id, worker["id"], "2000000")
+    invoice = _invoice(client, project_id, unpaid_vendor["id"], "50000000")
+    response = client.post(
+        f"/projects/{project_id}/work-logs",
+        json={
+            "worker_id": worker["id"],
+            "task_name": "کار هفته قبل",
+            "unit": "day",
+            "quantity": "4.5",
+            "rate_per_unit": "1200000",
+            "period_label": "هفته قبل",
+        },
+    )
+    assert response.status_code == 201, response.text
+    work_log = response.json()
+    note = HistoryEntry(
+        project_id=project_id,
+        input_text="کارفرما گفت رنگ در تغییر کند",
+        change_type=HistoryChangeType.NOTE,
+        delta={},
+    )
+    db_session.add(note)
+    db_session.commit()
+
+    report = client.get(f"/projects/{project_id}/reports/summary").json()
+    summary = report["summary"]
+    assert summary["money_in"] == "100000000.00"
+    assert summary["paid_out"] == "22000000.00"
+    assert summary["labor_cost"] == "5400000.00"
+    assert _report_worker(report, "مش رحیم")["remaining_balance"] == "3400000.00"
+    assert _report_payable(report, "آهنچی")["amount"] == "50000000.00"
+
+    response = client.patch(
+        f"/projects/{project_id}/payments/{vendor_payment['id']}",
+        json={"amount": "25000000", "correction_note": "اصلاح مبلغ دمو"},
+    )
+    assert response.status_code == 200, response.text
+    report = client.get(f"/projects/{project_id}/reports/summary").json()
+    assert report["summary"]["paid_out"] == "27000000.00"
+    assert _net_cash(report) == "73000000.00"
+
+    response = client.post(
+        f"/projects/{project_id}/payments/{worker_payment['id']}/void",
+        json={"reason": "اعتبارسنجی دمو"},
+    )
+    assert response.status_code == 200, response.text
+    report = client.get(f"/projects/{project_id}/reports/summary").json()
+    assert report["summary"]["paid_out"] == "25000000.00"
+    assert _report_worker(report, "مش رحیم")["remaining_balance"] == "5400000.00"
+
+    response = client.patch(
+        f"/projects/{project_id}/work-logs/{work_log['id']}",
+        json={"quantity": "5", "rate_per_unit": "1200000", "correction_note": "اصلاح روز دمو"},
+    )
+    assert response.status_code == 200, response.text
+    report = client.get(f"/projects/{project_id}/reports/summary").json()
+    assert report["summary"]["labor_cost"] == "6000000.00"
+    assert _report_worker(report, "مش رحیم")["remaining_balance"] == "6000000.00"
+
+    response = client.post(
+        f"/projects/{project_id}/payables/{invoice['id']}/void",
+        json={"reason": "اعتبارسنجی دمو"},
+    )
+    assert response.status_code == 200, response.text
+    report = client.get(f"/projects/{project_id}/reports/summary").json()
+    assert all(row["name"] != "آهنچی" for row in report["payables"])
+
+    payments_csv = client.get(f"/projects/{project_id}/exports/payments.csv").text
+    payables_csv = client.get(f"/projects/{project_id}/exports/payables.csv").text
+    work_logs_csv = client.get(f"/projects/{project_id}/exports/work-logs.csv").text
+    notes_csv = client.get(f"/projects/{project_id}/exports/notes.csv").text
+    assert "25000000.00" in payments_csv
+    assert "2000000.00" not in payments_csv
+    assert "آهنچی" not in payables_csv
+    assert "6000000.00" in work_logs_csv
+    assert "کارفرما گفت رنگ در تغییر کند" in notes_csv
+
+
+def _report_worker(report: dict, name: str) -> dict:
+    return next(row for row in report["workers"] if row["name"] == name)
+
+
+def _report_payable(report: dict, name: str) -> dict:
+    return next(row for row in report["payables"] if row["name"] == name)
+
+
+def _net_cash(report: dict) -> str:
+    summary = report["summary"]
+    return str(Decimal(summary["money_in"]) - Decimal(summary["paid_out"]))
