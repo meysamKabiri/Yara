@@ -1,5 +1,6 @@
 from app.models.core import (
     CounterpartyType,
+    DeadLetterJob,
     EventCorrection,
     ExtractedEvent,
     ExtractedEventStatus,
@@ -19,6 +20,9 @@ from app.models.core import (
     Project,
     RawEntry,
     RawEntryStatus,
+    ReconciliationEvent,
+    ReconciliationEventStatus,
+    ReconciliationStatus,
     ShadowInterpretationLog,
     TraceEvent,
     TraceEventCounter,
@@ -32,6 +36,7 @@ from app.models.core import (
 
 __all__ = [
     "CounterpartyType",
+    "DeadLetterJob",
     "EventCorrection",
     "ExtractedEvent",
     "ExtractedEventStatus",
@@ -51,6 +56,9 @@ __all__ = [
     "Project",
     "RawEntry",
     "RawEntryStatus",
+    "ReconciliationEvent",
+    "ReconciliationEventStatus",
+    "ReconciliationStatus",
     "ShadowInterpretationLog",
     "TraceEventCounter",
     "Worker",
