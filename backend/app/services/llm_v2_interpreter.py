@@ -94,7 +94,11 @@ def _has_profile_fields(value: dict) -> bool:
 _FINANCIAL_AMOUNT_UNITS = {"تومان", "تومن", "ریال", "هزار", "میلیون", "میلیارد"}
 
 _FINANCIAL_PURCHASE_VERBS = {"خریدم", "خرید کردم", "فاکتور"}
-_FINANCIAL_IN_VERBS = {"گرفتم", "گرفت", "دریافت", "دریافت کردم", "واریز", "واریز کرد", "واریز شده"}
+_FINANCIAL_IN_VERBS = {
+    "گرفتم", "گرفت", "دریافت", "دریافت کردم",
+    "واریز", "واریز کرد", "واریز شده",
+    "ریخت", "ریخت به حساب", "زد به حساب", "به حساب",
+}
 _FINANCIAL_OUT_VERBS = {"دادم", "داد", "پرداخت", "پرداخت کردم", "پول داد"}
 _FINANCIAL_VERBS = _FINANCIAL_PURCHASE_VERBS | _FINANCIAL_IN_VERBS | _FINANCIAL_OUT_VERBS | {"چک", "بدهکار", "طلبکار"}
 
@@ -365,6 +369,26 @@ class LLMv2Interpreter:
         if self._has_profile_update_fields(entities):
             intent = "SETUP"
             action = "UPDATE_ENTITY"
+        elif raw_text and intent in {"SETUP", "SET_ROLE"} and _has_financial_signal(raw_text):
+            amount = parse_persian_money(raw_text)
+            if amount is not None:
+                inferred_action = _infer_financial_action(raw_text)
+                intent = "FINANCIAL"
+                action = inferred_action
+                financial["amount"] = amount
+                direction = "IN" if inferred_action == "PAYMENT_IN" else "OUT"
+                financial["direction"] = direction
+                if financial.get("payment_method") not in VALID_PAYMENT_METHODS:
+                    financial["payment_method"] = (
+                        "BANK_TRANSFER"
+                        if any(signal in normalize_text(raw_text) for signal in ["حساب", "کارت", "واریز", "انتقال", "بانکی", "ریخت"])
+                        else None
+                    )
+                if entities:
+                    if inferred_action == "PAYMENT_IN":
+                        entities[0]["project_role"] = "CLIENT"
+                    elif inferred_action == "PURCHASE_PAID":
+                        entities[0]["project_role"] = "VENDOR"
 
         result = {
             "intent": intent if intent in VALID_INTENTS else "NOTE",

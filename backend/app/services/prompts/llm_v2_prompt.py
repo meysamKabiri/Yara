@@ -17,6 +17,7 @@ FINANCIAL_RULES = """Financial focus:
 - خرید paid now => PURCHASE_PAID, OUT, VENDOR, CASH.
 - نسیه/فاکتور/بدهی => DEBT_CREATED. چک => CHECK_PAYMENT.
 - incoming client/project money => PAYMENT_IN, IN, CLIENT.
+- amount + money movement (ریخت به حساب/واریز کرد/زد به حساب/از X گرفتم) => FINANCIAL, not SETUP.
 - outgoing to unknown person => PAYMENT_OUT, OUT, OTHER.
 - BANK_TRANSFER only for کارت/واریز/حساب/انتقال/بانکی."""
 
@@ -82,7 +83,10 @@ def _has_financial_signal(normalized: str) -> bool:
     amount_signal = any(term in normalized for term in ["تومان", "تومن", "ریال", "هزار", "میلیون", "میلیارد"])
     verb_signal = any(
         term in normalized
-        for term in ["خرید", "خریدم", "پرداخت", "دادم", "داد", "گرفتم", "واریز", "چک", "فاکتور", "بدهی", "نسیه"]
+        for term in [
+            "خرید", "خریدم", "پرداخت", "دادم", "داد", "گرفتم", "واریز",
+            "ریخت", "زد به حساب", "به حساب", "چک", "فاکتور", "بدهی", "نسیه",
+        ]
     )
     return amount_signal and verb_signal
 

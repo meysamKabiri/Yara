@@ -1673,6 +1673,8 @@ def _financial_payment_fast_path_direction(normalized: str) -> str | None:
         return "OUT"
     if "از " in normalized and " گرفتم" in normalized:
         return "IN"
+    if any(phrase in normalized for phrase in [" ریخت به حساب", " زد به حساب", " به حساب ریخت", " به حساب واریز کرد"]):
+        return "IN"
     if " واریز کرد" in normalized:
         if not normalized.strip().startswith("به "):
             return "IN"
@@ -1855,6 +1857,9 @@ def _text_has_financial_signal(raw_text: str) -> bool:
             "خریدم",
             "خرید",
             "واریز",
+            "ریخت",
+            "زد به حساب",
+            "به حساب",
             "پول داد",
             "چک",
             "میلیون",
