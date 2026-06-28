@@ -1,3 +1,5 @@
+import { AUTH_TOKEN_KEY } from "./features/auth/authApi";
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 /* =========================================================
@@ -539,9 +541,11 @@ export function normalizeMetricTraceEvent(raw: unknown, index = 0): MetricTraceE
 ========================================================= */
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     },
     ...options,

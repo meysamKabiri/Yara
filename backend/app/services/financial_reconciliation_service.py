@@ -178,14 +178,20 @@ def recover_stuck_confirming_interpretations(
     db: Session,
     *,
     max_age_minutes: int = 15,
+    project_ids: set[int] | None = None,
 ) -> int:
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=max_age_minutes)
+    statement = select(PendingInterpretation).where(
+        PendingInterpretation.status == PendingInterpretationStatus.CONFIRMING,
+        PendingInterpretation.updated_at < cutoff,
+    )
+    if project_ids is not None:
+        if not project_ids:
+            return 0
+        statement = statement.where(PendingInterpretation.project_id.in_(project_ids))
     stuck = list(
         db.scalars(
-            select(PendingInterpretation).where(
-                PendingInterpretation.status == PendingInterpretationStatus.CONFIRMING,
-                PendingInterpretation.updated_at < cutoff,
-            )
+            statement
         )
     )
     recovered = 0
@@ -208,21 +214,36 @@ def recover_stuck_confirming_interpretations(
     return recovered
 
 
-def safety_metrics(db: Session) -> dict[str, int]:
+def safety_metrics(db: Session, project_ids: set[int] | None = None) -> dict[str, int]:
+    if project_ids is not None and not project_ids:
+        return {
+            "total_processed_financial_events": 0,
+            "reconciliation_drift_count": 0,
+            "dlq_job_count": 0,
+            "confirming_recovery_count": 0,
+            "duplicate_prevention_count": 0,
+        }
+    payment_count = select(func.count(Payment.id)).where(Payment.is_voided == False)
+    drift_count = select(func.count(ReconciliationEvent.id)).where(ReconciliationEvent.drift_detected == True)
+    dlq_count = select(func.count(DeadLetterJob.id))
+    confirming_count = select(func.count(PendingInterpretation.id)).where(
+        PendingInterpretation.status == PendingInterpretationStatus.CONFIRMING
+    )
+    if project_ids is not None:
+        payment_count = payment_count.where(Payment.project_id.in_(project_ids))
+        drift_count = drift_count.where(ReconciliationEvent.project_id.in_(project_ids))
+        dlq_count = dlq_count.where(DeadLetterJob.project_id.in_(project_ids))
+        confirming_count = confirming_count.where(PendingInterpretation.project_id.in_(project_ids))
     return {
         "total_processed_financial_events": int(
-            db.scalar(select(func.count(Payment.id)).where(Payment.is_voided == False)) or 0
+            db.scalar(payment_count) or 0
         ),
         "reconciliation_drift_count": int(
-            db.scalar(select(func.count(ReconciliationEvent.id)).where(ReconciliationEvent.drift_detected == True)) or 0
+            db.scalar(drift_count) or 0
         ),
-        "dlq_job_count": int(db.scalar(select(func.count(DeadLetterJob.id))) or 0),
+        "dlq_job_count": int(db.scalar(dlq_count) or 0),
         "confirming_recovery_count": int(
-            db.scalar(
-                select(func.count(PendingInterpretation.id)).where(
-                    PendingInterpretation.status == PendingInterpretationStatus.CONFIRMING
-                )
-            )
+            db.scalar(confirming_count)
             or 0
         ),
         "duplicate_prevention_count": 0,

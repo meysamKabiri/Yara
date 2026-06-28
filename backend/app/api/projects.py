@@ -10,11 +10,12 @@ from enum import StrEnum
 from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.auth import authenticated_user_id, get_current_user
 from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
 from app.core.observability_service import track_event, track_timed_event
 from app.core.queue import get_queue
@@ -113,7 +114,7 @@ from app.services.semantic_normalizer import (
     CanonicalEventType,
 )
 
-router = APIRouter(tags=["projects"])
+router = APIRouter(tags=["projects"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger(__name__)
 
 # Feature flag controlling which financial write engine is primary.
@@ -134,6 +135,10 @@ def _get_project(db: DbSession, project_id: int) -> Project:
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+        )
+    if project.owner_id != authenticated_user_id():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Project access forbidden"
         )
     return project
 
@@ -215,6 +220,7 @@ def _apply_datetime_range(statement, column, from_date: date | None, to_date: da
 
 
 def _get_raw_entry(db: DbSession, project_id: int, raw_entry_id: int) -> RawEntry:
+    _get_project(db, project_id)
     raw_entry = db.get(RawEntry, raw_entry_id)
     if raw_entry is None or raw_entry.project_id != project_id:
         raise HTTPException(
@@ -230,10 +236,12 @@ def _get_event(db: DbSession, event_id: int) -> ExtractedEvent:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Extracted event not found",
         )
+    _get_project(db, event.project_id)
     return event
 
 
 def _get_worker(db: DbSession, project_id: int, worker_id: int) -> Worker:
+    _get_project(db, project_id)
     worker = db.get(Worker, worker_id)
     if worker is None or worker.project_id != project_id:
         raise HTTPException(
@@ -248,6 +256,7 @@ def _get_work_log(db: DbSession, work_log_id: int) -> WorkLog:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Work log not found"
         )
+    _get_project(db, work_log.project_id)
     return work_log
 
 
@@ -261,6 +270,7 @@ def _get_project_work_log(db: DbSession, project_id: int, work_log_id: int) -> W
 
 
 def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
+    _get_project(db, project_id)
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.project_id != project_id:
         raise HTTPException(
@@ -270,6 +280,7 @@ def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
 
 
 def _get_payment(db: DbSession, project_id: int, payment_id: int) -> Payment:
+    _get_project(db, project_id)
     payment = db.get(Payment, payment_id)
     if payment is None or payment.project_id != project_id:
         raise HTTPException(
@@ -279,6 +290,7 @@ def _get_payment(db: DbSession, project_id: int, payment_id: int) -> Payment:
 
 
 def _get_note(db: DbSession, project_id: int, note_id: int) -> HistoryEntry:
+    _get_project(db, project_id)
     note = db.get(HistoryEntry, note_id)
     if note is None or note.project_id != project_id or note.change_type != HistoryChangeType.NOTE:
         raise HTTPException(
@@ -1182,7 +1194,11 @@ def _correction_value(value: Any) -> str | int | float | None:
     "/projects", response_model=ProjectRead, status_code=status.HTTP_201_CREATED
 )
 def create_project(payload: ProjectCreate, db: DbSession) -> Project:
-    project = Project(name=payload.name, description=payload.description)
+    project = Project(
+        name=payload.name,
+        description=payload.description,
+        owner_id=authenticated_user_id(),
+    )
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -1194,7 +1210,9 @@ def create_project(payload: ProjectCreate, db: DbSession) -> Project:
 def list_projects(db: DbSession) -> list[Project]:
     return list(
         db.scalars(
-            select(Project).order_by(Project.created_at.desc(), Project.id.desc())
+            select(Project)
+            .where(Project.owner_id == authenticated_user_id())
+            .order_by(Project.created_at.desc(), Project.id.desc())
         )
     )
 
@@ -1325,13 +1343,15 @@ def process_natural_input(
 
 @router.get("/natural-input-jobs/{job_id}")
 def get_natural_input_job(job_id: str, db: DbSession) -> dict[str, Any]:
-    mark_stale_natural_input_jobs_failed(db)
     job = db.query(NaturalInputJob).filter(NaturalInputJob.job_id == job_id).one_or_none()
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    _get_project(db, job.project_id)
+    mark_stale_natural_input_jobs_failed(db, project_ids={job.project_id})
+    db.refresh(job)
     return _natural_input_job_response(job)
 
 
@@ -1350,10 +1370,17 @@ def _natural_input_job_response(job: NaturalInputJob) -> dict[str, Any]:
 
 @router.get("/jobs")
 def list_natural_input_jobs(db: DbSession) -> list[dict[str, Any]]:
-    mark_stale_natural_input_jobs_failed(db)
+    owner_id = authenticated_user_id()
+    owned_project_ids = set(
+        db.scalars(select(Project.id).where(Project.owner_id == owner_id))
+    )
+    mark_stale_natural_input_jobs_failed(db, project_ids=owned_project_ids)
     jobs = list(
         db.scalars(
-            select(NaturalInputJob).order_by(
+            select(NaturalInputJob)
+            .join(Project, NaturalInputJob.project_id == Project.id)
+            .where(Project.owner_id == owner_id)
+            .order_by(
                 NaturalInputJob.created_at.desc(),
                 NaturalInputJob.id.desc(),
             )
@@ -1370,6 +1397,7 @@ def get_natural_input_job_events(job_id: str, db: DbSession) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    _get_project(db, job.project_id)
     events = _job_persisted_events(job)
     if not events and job.trace_id is not None:
         from app.core.event_tracker import get_trace_events
@@ -1385,19 +1413,25 @@ def get_natural_input_job_events(job_id: str, db: DbSession) -> dict[str, Any]:
 def mark_stale_natural_input_jobs_failed(
     db: DbSession,
     max_age_minutes: int = 15,
+    project_ids: set[int] | None = None,
 ) -> int:
+    if project_ids is not None and not project_ids:
+        return 0
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=max_age_minutes)
+    statement = select(NaturalInputJob).where(
+        NaturalInputJob.status.in_(
+            [
+                NaturalInputJobStatus.PENDING,
+                NaturalInputJobStatus.RUNNING,
+            ]
+        ),
+        NaturalInputJob.updated_at < cutoff,
+    )
+    if project_ids is not None:
+        statement = statement.where(NaturalInputJob.project_id.in_(project_ids))
     stale_jobs = list(
         db.scalars(
-            select(NaturalInputJob).where(
-                NaturalInputJob.status.in_(
-                    [
-                        NaturalInputJobStatus.PENDING,
-                        NaturalInputJobStatus.RUNNING,
-                    ]
-                ),
-                NaturalInputJob.updated_at < cutoff,
-            )
+            statement
         )
     )
     for job in stale_jobs:
@@ -1708,6 +1742,7 @@ def _get_pending_interpretation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Interpretation not found",
         )
+    _get_project(db, interpretation.project_id)
     return interpretation
 
 
@@ -1724,6 +1759,7 @@ def _get_pending_interpretation_for_confirmation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Interpretation not found",
         )
+    _get_project(db, interpretation.project_id)
     return interpretation
 
 
@@ -3992,6 +4028,7 @@ def update_worker(worker_id: int, payload: WorkerUpdate, db: DbSession) -> Worke
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Worker not found"
         )
+    _get_project(db, worker.project_id)
     values = payload.model_dump(exclude_unset=True)
     target_type = values.get("type") or worker.type
     if target_type != WorkerType.DAILY_WORKER:

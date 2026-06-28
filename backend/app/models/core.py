@@ -2,13 +2,15 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 import uuid
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base, TimestampMixin
+
+LEGACY_OWNER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 class RawEntryStatus(StrEnum):
@@ -114,8 +116,24 @@ class HistoryChangeType(StrEnum):
     NOTE = "NOTE"
 
 
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    projects: Mapped[list["Project"]] = relationship(back_populates="owner")
+
+
 class Project(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id"),
+        default=LEGACY_OWNER_ID,
+        nullable=False,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     reconciliation_status: Mapped[ReconciliationStatus] = mapped_column(
@@ -126,6 +144,7 @@ class Project(TimestampMixin, Base):
     last_reconciled_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     raw_entries: Mapped[list["RawEntry"]] = relationship(back_populates="project")
+    owner: Mapped[User] = relationship(back_populates="projects")
     extracted_events: Mapped[list["ExtractedEvent"]] = relationship(back_populates="project")
     workers: Mapped[list["Worker"]] = relationship(back_populates="project")
     work_logs: Mapped[list["WorkLog"]] = relationship(back_populates="project")

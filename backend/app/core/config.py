@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://postgres:postgres@localhost:5432/yara",
         validation_alias="DATABASE_URL",
     )
+    jwt_secret: str = Field(default="dev-only-yara-secret", validation_alias="JWT_SECRET")
 
 
 @lru_cache

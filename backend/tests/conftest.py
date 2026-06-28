@@ -9,10 +9,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core import llm_cache as llm_cache_module
+from app.core.auth import create_access_token, hash_password
 from app.db.base import Base
 from app.db.session import get_db_session
 from app.jobs import natural_input_job
 from app.main import app
+from app.models.core import LEGACY_OWNER_ID, User
 
 # Module-level dict-backed counter for SQLite next_trace_event_index mock.
 # SQLite UDFs cannot execute SQL on their own connection, so we use a plain dict.
@@ -87,6 +89,15 @@ def client() -> Generator[TestClient, None, None]:
         expire_on_commit=False,
     )
     Base.metadata.create_all(bind=engine)
+    with TestingSessionLocal() as db:
+        default_user = User(
+            id=LEGACY_OWNER_ID,
+            email="test-owner@yara.local",
+            password_hash=hash_password("password123"),
+        )
+        db.add(default_user)
+        db.commit()
+        default_token = create_access_token(default_user)
 
     def override_get_db_session() -> Generator[Session, None, None]:
         db = TestingSessionLocal()
@@ -147,6 +158,14 @@ def client() -> Generator[TestClient, None, None]:
     monkeypatch.setattr("app.api.health._check_redis", lambda: "unavailable")
     monkeypatch.setattr("app.api.health._check_ollama", lambda: "unavailable")
     test_client = TestClient(app)
+    original_request = test_client.request
+
+    def authenticated_request(method, url, **kwargs):
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.setdefault("Authorization", f"Bearer {default_token}")
+        return original_request(method, url, headers=headers, **kwargs)
+
+    test_client.request = authenticated_request
     try:
         test_client.app.state.testing_session_factory = TestingSessionLocal
         test_client.app.state.testing_enqueued_jobs = {}

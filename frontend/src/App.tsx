@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowUpCircle, BarChart3, Bell, CheckCircle2, Clock, Home, Plus, ReceiptText, Users } from "lucide-react";
+import { Activity, ArrowUpCircle, BarChart3, Bell, CheckCircle2, Clock, Home, LogOut, Plus, ReceiptText, Users } from "lucide-react";
 import {
   api,
   FinancialDirection,
@@ -28,6 +28,9 @@ import { DomainUIController } from "./ui/DomainUIController";
 import { buildConfirmPayload, exactEntityIdByName, exactNeedsSelectionEntityId, normalizeNeedsSelection } from "./ui/confirmPayload";
 import { SetupEntity } from "./types/domain";
 import { AiProcessingStatus } from "./components/AiProcessingStatus";
+import { AuthPage } from "./features/auth/AuthPage";
+import { authApi, AUTH_TOKEN_KEY } from "./features/auth/authApi";
+import { AuthUser } from "./features/auth/types";
 
 const exampleInputs = [
   "کارفرمای پروژه میثم کبیری است",
@@ -194,6 +197,8 @@ async function confirmPendingWithSelectionRetry(
 
 function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.pathname));
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectName, setProjectName] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
@@ -305,9 +310,28 @@ function App() {
   }, []);
 
   useEffect(() => {
+    async function checkAuth() {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (!token) {
+        setAuthChecked(true);
+        return;
+      }
+      try {
+        setAuthUser(await authApi.me());
+      } catch {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+      } finally {
+        setAuthChecked(true);
+      }
+    }
+    checkAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!authChecked || !authUser) return;
     if (window.location.pathname === "/") navigate("/dashboard", true);
     loadProjects();
-  }, []);
+  }, [authChecked, authUser]);
 
   useEffect(() => {
     if (projects.length > 0) loadProjectFinancials(projects);
@@ -361,6 +385,45 @@ function App() {
     } finally {
       setLoadingAction(null);
     }
+  }
+
+  function resetProjectState() {
+    setProjects([]);
+    setProjectName("");
+    setSelectedProjectId(null);
+    setProjectDetail(null);
+    setRawEntries([]);
+    setWorkers([]);
+    setWorkerStates([]);
+    setHistory([]);
+    setInvoices([]);
+    setPayments([]);
+    setWorkLogs([]);
+    setOperatingSummary(null);
+    setProjectFinancials({});
+    setNaturalText("");
+    setPendingInterpretations([]);
+    setNaturalInputJobId(null);
+    setSetupEditEntities({});
+    setCandidateSelections({});
+    setUnknownEntityForms({});
+    setPendingTabEditingId(null);
+    setReviewModalDismissed(true);
+    setIsNotificationOpen(false);
+  }
+
+  function handleAuthenticated(user: AuthUser) {
+    setAuthUser(user);
+    resetProjectState();
+    setError(null);
+    navigate("/dashboard", true);
+  }
+
+  function logout() {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    setAuthUser(null);
+    resetProjectState();
+    navigate("/dashboard", true);
   }
 
   async function loadProjects() {
@@ -1004,51 +1067,73 @@ function App() {
     );
   }
 
+  if (!authChecked) {
+    return (
+      <main className="auth-shell" dir="rtl">
+        <div className="loading-banner">در حال بررسی ورود...</div>
+      </main>
+    );
+  }
+
+  if (!authUser) {
+    return <AuthPage onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <main className="app-shell" dir="rtl">
-      <aside className="sidebar">
-        <div className="brand-block">
+      <header className="app-header">
+        <div className="app-header-inner">
+          <div className="brand-block">
           <strong>Yara</strong>
           <span className="mobile-page-title">{pageTitle}</span>
-        </div>
-        <nav className="main-nav" aria-label="Primary navigation">
-          {navItems.map((item) => (
-            <button className={item.active ? "active" : ""} key={item.label} type="button" onClick={() => navigate(item.path)}>
-              <NavIcon name={item.icon} />
-              {item.label}
-            </button>
-          ))}
-        </nav>
-        <div className="notification-shell" ref={notificationShellRef}>
-          <button className={openDebtCount > 0 ? "header-bell has-alerts" : "header-bell"} type="button" aria-label="هشدارها" onClick={() => setIsNotificationOpen((value) => !value)}>
-            <Bell aria-hidden="true" size={17} />
-            <span>{openDebtCount.toLocaleString("fa-IR")}</span>
-          </button>
-          {isNotificationOpen && (
-            <div className="notification-dropdown">
-              <div className="notification-dropdown-head">
-                <strong>اعلان‌ها</strong>
-                <span>{notificationItems.length.toLocaleString("fa-IR")} مورد</span>
-              </div>
-              {notificationItems.length === 0 ? (
-                <p className="notification-empty"><CheckCircle2 size={16} />اعلان جدیدی وجود ندارد</p>
-              ) : (
-                <div className="notification-list">
-                  {notificationItems.map((item) => (
-                    <button key={item.id} type="button" onClick={() => openProjectTab(item.projectId, item.tab)}>
-                      {item.tab === "pending" ? <Clock aria-hidden="true" size={16} /> : item.tab === "payables" ? <ReceiptText aria-hidden="true" size={16} /> : <ArrowUpCircle aria-hidden="true" size={16} />}
-                      <span>
-                        <strong>{item.title}</strong>
-                        <small>{item.detail}{item.amount !== undefined ? ` — ${Number(item.amount).toLocaleString("fa-IR")} تومان` : ""}</small>
-                      </span>
-                    </button>
-                  ))}
+          </div>
+
+          <nav className="main-nav" aria-label="Primary navigation">
+            {navItems.map((item) => (
+              <button className={item.active ? "active" : ""} key={item.label} type="button" onClick={() => navigate(item.path)}>
+                <NavIcon name={item.icon} />
+                {item.label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="header-user-cluster">
+            <span className="header-user-email" title={authUser.email}>{authUser.email}</span>
+            <div className="notification-shell" ref={notificationShellRef}>
+              <button className={openDebtCount > 0 ? "header-bell has-alerts" : "header-bell"} type="button" aria-label="هشدارها" onClick={() => setIsNotificationOpen((value) => !value)}>
+                <Bell aria-hidden="true" size={17} />
+                <span>{openDebtCount.toLocaleString("fa-IR")}</span>
+              </button>
+              {isNotificationOpen && (
+                <div className="notification-dropdown">
+                  <div className="notification-dropdown-head">
+                    <strong>اعلان‌ها</strong>
+                    <span>{notificationItems.length.toLocaleString("fa-IR")} مورد</span>
+                  </div>
+                  {notificationItems.length === 0 ? (
+                    <p className="notification-empty"><CheckCircle2 size={16} />اعلان جدیدی وجود ندارد</p>
+                  ) : (
+                    <div className="notification-list">
+                      {notificationItems.map((item) => (
+                        <button key={item.id} type="button" onClick={() => openProjectTab(item.projectId, item.tab)}>
+                          {item.tab === "pending" ? <Clock aria-hidden="true" size={16} /> : item.tab === "payables" ? <ReceiptText aria-hidden="true" size={16} /> : <ArrowUpCircle aria-hidden="true" size={16} />}
+                          <span>
+                            <strong>{item.title}</strong>
+                            <small>{item.detail}{item.amount !== undefined ? ` — ${Number(item.amount).toLocaleString("fa-IR")} تومان` : ""}</small>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
+            <button className="text-button header-logout" type="button" onClick={logout} aria-label="خروج" title="خروج">
+              <LogOut aria-hidden="true" size={17} />
+            </button>
+          </div>
         </div>
-      </aside>
+      </header>
 
       <section className="workspace">
         {error && <div className="error-banner">{error}</div>}
