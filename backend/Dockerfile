@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir .
 
 COPY . .
 RUN pip install --no-cache-dir --no-deps -e .
+ARG INSTALL_DEV=false
+RUN if [ "$INSTALL_DEV" = "true" ]; then pip install --no-cache-dir ".[dev]"; fi
 
 EXPOSE 8000
 

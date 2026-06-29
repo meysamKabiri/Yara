@@ -1,0 +1,28 @@
+services:
+  postgres:
+    env_file: .env.production
+    volumes:
+      - yara_prod_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    env_file: .env.production
+    volumes:
+      - yara_prod_redis_data:/data
+
+  api:
+    env_file: .env.production
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  worker:
+    env_file: .env.production
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+volumes:
+  yara_prod_postgres_data:
+  yara_prod_redis_data:

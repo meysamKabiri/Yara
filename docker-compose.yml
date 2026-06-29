@@ -1,91 +1,85 @@
-x-backend-env: &backend-env
-  SERVICE_NAME: api
-  DATABASE_URL: postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev
-  REDIS_URL: redis://redis:6379
-  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
-  OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
-  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-120}
-  OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
-  PYTHONUNBUFFERED: "1"
-
-x-worker-env: &worker-env
-  SERVICE_NAME: worker
-  DATABASE_URL: postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev
-  REDIS_URL: redis://redis:6379
-  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
-  OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
-  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-120}
-  OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
-  PYTHONUNBUFFERED: "1"
-
 x-backend-build: &backend-build
   context: ./backend
   dockerfile: Dockerfile
 
-services:
+x-backend-env: &backend-env
+  APP_NAME: ${APP_NAME:-Yara API}
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  DEBUG: ${DEBUG:-true}
+  LOG_LEVEL: ${LOG_LEVEL:-debug}
+  LLM: ${LLM:-local}
+  TRACE_ENABLED: ${TRACE_ENABLED:-true}
+  RECONCILIATION: ${RECONCILIATION:-false}
+  ANOMALY_DETECTION: ${ANOMALY_DETECTION:-false}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  JWT_SECRET: ${JWT_SECRET:-dev-only-yara-secret}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
+  OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
+  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-120}
+  OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
+  RQ_QUEUES: ${RQ_QUEUES:-llm_tasks}
+  PYTHONUNBUFFERED: "1"
 
+services:
   postgres:
     image: postgres:16-alpine
-    container_name: yara_postgres
     environment:
-      POSTGRES_DB: yara_dev
-      POSTGRES_USER: yara
-      POSTGRES_PASSWORD: yara_password
-    ports:
-      - "5433:5432"
-    volumes:
-      - yara_postgres_data:/var/lib/postgresql/data
+      POSTGRES_DB: ${POSTGRES_DB:-yara_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-yara}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yara_password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    container_name: yara_redis
-    ports:
-      - "6380:6379"
-    volumes:
-      - yara_redis_data:/data
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: yara_ollama
-    profiles:
-      - docker-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - yara_ollama_data:/root/.ollama
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   api:
-    build: *backend-build
-    container_name: yara_api
-    ports:
-      - "8000:8000"
+    build:
+      <<: *backend-build
+      args:
+        INSTALL_DEV: ${INSTALL_DEV:-false}
+    image: ${YARA_IMAGE:-yara-backend}:${IMAGE_TAG:-local}
     environment: *backend-env
-    volumes:
-      - ./backend:/app
     depends_on:
-      - postgres
-      - redis
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
   worker:
-    build: *backend-build
-    container_name: yara_worker
-    environment: *worker-env
-    volumes:
-      - ./backend:/app
+    build:
+      <<: *backend-build
+      args:
+        INSTALL_DEV: ${INSTALL_DEV:-false}
+    image: ${YARA_IMAGE:-yara-backend}:${IMAGE_TAG:-local}
+    environment:
+      <<: *backend-env
+      SERVICE_NAME: worker
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: python -m app.scripts.start_worker
     restart: unless-stopped
-
-volumes:
-  yara_ollama_data:
-  yara_postgres_data:
-  yara_redis_data:
