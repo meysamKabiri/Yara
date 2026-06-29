@@ -31,6 +31,7 @@ import { AiProcessingStatus } from "./components/AiProcessingStatus";
 import { AuthPage } from "./features/auth/AuthPage";
 import { authApi, AUTH_TOKEN_KEY } from "./features/auth/authApi";
 import { AuthUser } from "./features/auth/types";
+import YaralogoUrl from './assets/images/Yara_logo.png'
 
 const exampleInputs = [
   "کارفرمای پروژه میثم کبیری است",
@@ -1084,8 +1085,9 @@ function App() {
       <header className="app-header">
         <div className="app-header-inner">
           <div className="brand-block">
-          <strong>Yara</strong>
-          <span className="mobile-page-title">{pageTitle}</span>
+            {/* <strong>Yara</strong> */}
+            <img src={YaralogoUrl} height={30} width={80} />
+            <span className="mobile-page-title">{pageTitle}</span>
           </div>
 
           <nav className="main-nav" aria-label="Primary navigation">
@@ -1170,63 +1172,63 @@ function App() {
       )}
 
       {(pendingTabEditingId || (!reviewModalDismissed && pendingInterpretations.length > 0)) && (
-      <DomainUIController
-        interpretations={pendingTabEditingId
-          ? pendingInterpretations.filter((interpretation) => interpretation.id === pendingTabEditingId)
-          : pendingInterpretations}
-        jobState={naturalInputJobState}
-        jobEvents={[]}
-        jobConnectionState={naturalInputJobId ? "POLLING" : "IDLE"}
-        jobError={naturalInputJob.error}
-        workers={workers}
-        activeProjectId={activeProjectId}
-        projectName={projectDetail?.name ?? null}
-        isLoading={isLoading}
-        setupEditEntities={setupEditEntities}
-        candidateSelections={candidateSelections}
-        unknownEntityForms={unknownEntityForms}
-        setSetupEditEntities={setSetupEditEntities}
-        setCandidateSelections={setCandidateSelections}
-        setUnknownEntityForms={setUnknownEntityForms}
-        onConfirm={async (interpretation, payload) => {
-          await confirmInterpretation(interpretation, payload);
-          setPendingTabEditingId(null);
-        }}
-        onConfirmFinancial={confirmFinancialInterpretation}
-        onConfirmRole={async (interpretation, payload, entityOverride) => {
-          await confirmRoleInterpretation(interpretation, payload, entityOverride);
-          setPendingTabEditingId(null);
-        }}
-        onConfirmCandidate={async (interpretation, payload, entityOverride) => {
-          await confirmCandidateInterpretation(interpretation, payload, entityOverride);
-          setPendingTabEditingId(null);
-        }}
-        onDiscard={async (interpretation) => {
-          await discardInterpretation(interpretation);
-          setPendingTabEditingId(null);
-        }}
-        onResolveUnknownEntity={resolveUnknownEntity}
-        onClose={() => {
-          setReviewModalDismissed(true);
-          setPendingTabEditingId(null);
-        }}
-        onConfirmSetupEntities={async (interpretation, entities) => {
-          await confirmSetupEntities(interpretation, entities);
-          setPendingTabEditingId(null);
-        }}
-        onConfirmFinancialTransaction={async (interpretation, data) => {
-          await confirmFinancialTransaction(interpretation, data);
-          setPendingTabEditingId(null);
-        }}
-        onConfirmMixed={async (interpretation, setup, financial) => {
-          await confirmMixedInterpretation(interpretation, setup, financial);
-          setPendingTabEditingId(null);
-        }}
-        onConfirmEntityUpdate={async (interpretation, data) => {
-          await confirmEntityUpdateAction(interpretation, data);
-          setPendingTabEditingId(null);
-        }}
-      />
+        <DomainUIController
+          interpretations={pendingTabEditingId
+            ? pendingInterpretations.filter((interpretation) => interpretation.id === pendingTabEditingId)
+            : pendingInterpretations}
+          jobState={naturalInputJobState}
+          jobEvents={[]}
+          jobConnectionState={naturalInputJobId ? "POLLING" : "IDLE"}
+          jobError={naturalInputJob.error}
+          workers={workers}
+          activeProjectId={activeProjectId}
+          projectName={projectDetail?.name ?? null}
+          isLoading={isLoading}
+          setupEditEntities={setupEditEntities}
+          candidateSelections={candidateSelections}
+          unknownEntityForms={unknownEntityForms}
+          setSetupEditEntities={setSetupEditEntities}
+          setCandidateSelections={setCandidateSelections}
+          setUnknownEntityForms={setUnknownEntityForms}
+          onConfirm={async (interpretation, payload) => {
+            await confirmInterpretation(interpretation, payload);
+            setPendingTabEditingId(null);
+          }}
+          onConfirmFinancial={confirmFinancialInterpretation}
+          onConfirmRole={async (interpretation, payload, entityOverride) => {
+            await confirmRoleInterpretation(interpretation, payload, entityOverride);
+            setPendingTabEditingId(null);
+          }}
+          onConfirmCandidate={async (interpretation, payload, entityOverride) => {
+            await confirmCandidateInterpretation(interpretation, payload, entityOverride);
+            setPendingTabEditingId(null);
+          }}
+          onDiscard={async (interpretation) => {
+            await discardInterpretation(interpretation);
+            setPendingTabEditingId(null);
+          }}
+          onResolveUnknownEntity={resolveUnknownEntity}
+          onClose={() => {
+            setReviewModalDismissed(true);
+            setPendingTabEditingId(null);
+          }}
+          onConfirmSetupEntities={async (interpretation, entities) => {
+            await confirmSetupEntities(interpretation, entities);
+            setPendingTabEditingId(null);
+          }}
+          onConfirmFinancialTransaction={async (interpretation, data) => {
+            await confirmFinancialTransaction(interpretation, data);
+            setPendingTabEditingId(null);
+          }}
+          onConfirmMixed={async (interpretation, setup, financial) => {
+            await confirmMixedInterpretation(interpretation, setup, financial);
+            setPendingTabEditingId(null);
+          }}
+          onConfirmEntityUpdate={async (interpretation, data) => {
+            await confirmEntityUpdateAction(interpretation, data);
+            setPendingTabEditingId(null);
+          }}
+        />
       )}
     </main>
   );
