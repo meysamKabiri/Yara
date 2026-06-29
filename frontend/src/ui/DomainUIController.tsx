@@ -8,6 +8,14 @@ import { FinancialModal } from "./financial/FinancialModal";
 import { EntityUpdateModal } from "./entity/EntityUpdateModal";
 import { SplitFlowModal } from "./split/SplitFlowModal";
 import { exactEntityIdByName, normalizeEntityName } from "./confirmPayload";
+import {
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+  moneyWithUnit,
+} from "./betaSafety";
 
 type UnknownEntityForm = { workerId: string; name: string; type: string; roleDetail: string };
 type EntityOverride = { name: string; type: string; roleDetail?: string | null };
@@ -245,9 +253,7 @@ function textValue(value: unknown): string | null {
 
 function moneyLabel(value: string | null): string | null {
   if (!value) return null;
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return value;
-  return `${new Intl.NumberFormat("fa-IR").format(numeric)} تومان`;
+  return moneyWithUnit(value);
 }
 
 function workInfo(interpretation: PendingInterpretation): { quantity: string; periodLabel: string; description: string } {
@@ -331,6 +337,8 @@ function WorkLogModal({
         </div>
       </header>
       <div className="modal-body">
+        {isUncertainInterpretation(interpretation) && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+        {looksLikeMultiAction(reviewText(interpretation)) && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
         <div className="confirmation-summary">
           <p><strong>نوع عملیات:</strong> ثبت کارکرد</p>
           <p><strong>شخص / طرف حساب:</strong> {isCreateNew ? (newWorkerName || "نامشخص") : (selectedWorker?.name ?? entityName(interpretation))}</p>
@@ -425,7 +433,7 @@ function interpretationLabel(interpretation: PendingInterpretation): string {
 }
 
 function reviewText(interpretation: PendingInterpretation): string {
-  return interpretation.matched_input_text || interpretation.description || interpretation.raw_input_text;
+  return interpretationText(interpretation);
 }
 
 function roleForCreate(interpretation: PendingInterpretation): string {
@@ -442,6 +450,7 @@ interface MultiInterpretationReviewProps {
 
 function needsReview(interpretation: PendingInterpretation): boolean {
   return (
+    isUncertainInterpretation(interpretation) ||
     (interpretation.confidence !== null && interpretation.confidence < 0.5) ||
     (interpretation.suggested_entity_id === null && entityName(interpretation) === "نامشخص")
   );
@@ -464,6 +473,7 @@ function MultiInterpretationReview({
           const counterparty = entityName(interpretation);
           const isUnknownCounterparty = counterparty === "نامشخص";
           const warning = needsReview(interpretation);
+          const multiActionWarning = looksLikeMultiAction(reviewText(interpretation));
           return (
             <article className="multi-review-card" key={interpretation.id}>
               <div className="multi-review-card-main">
@@ -472,6 +482,8 @@ function MultiInterpretationReview({
                   {warning && <span className="warning-dot" title="نیاز به بررسی">●</span>}
                 </strong>
                 <p className="review-text-preview">{reviewText(interpretation)}</p>
+                {warning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+                {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
                 <dl className="multi-review-meta">
                   {interpretation.extracted_amount && (
                     <>
@@ -679,7 +691,7 @@ export function DomainUIController({
             ) : (
               <>
                 <h2 id="interpretation-title">درخواست شما در صف پردازش است</h2>
-                <p>پردازش غیرهمزمان انجام می‌شود؛ تایید بعد از پایان پردازش فعال می‌شود</p>
+                <p>یارا در حال بررسی متن شماست...</p>
               </>
             )}
           </div>
@@ -693,8 +705,8 @@ export function DomainUIController({
         <div className="modal-body">
           {!isJobDone && isJobActive && (
             <section className="job-loading-panel" aria-live="polite">
-              <h3>در حال بررسی اطلاعات...</h3>
-              <p>لطفاً چند لحظه صبر کنید. نتیجه برای تایید نمایش داده می‌شود.</p>
+              <h3>یارا در حال بررسی متن شماست...</h3>
+              <p>پردازش ممکن است چند لحظه طول بکشد. لطفاً صفحه را نبندید.</p>
               {jobError && <div className="observability-error">{jobError}</div>}
             </section>
           )}
@@ -721,6 +733,14 @@ export function DomainUIController({
             const kind = getModalKind(interpretation);
             const candidates = candidateMatches(interpretation, safeWorkers);
             const isRole = isRoleAssignment(interpretation);
+            const multiActionWarning = looksLikeMultiAction(reviewText(interpretation));
+            const uncertaintyWarning = isUncertainInterpretation(interpretation);
+            const safetyWarnings = (
+              <>
+                {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+                {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
+              </>
+            );
 
             // MIXED
             if (kind === "MIXED") {
@@ -813,6 +833,7 @@ export function DomainUIController({
                       </div>
                     </header>
                     <div className="modal-body">
+                      {safetyWarnings}
                       <div className="edit-grid">
                       <label>
                         نام
@@ -939,6 +960,7 @@ export function DomainUIController({
                       </div>
                     </header>
                     <div className="modal-body">
+                      {safetyWarnings}
                       <div className="edit-grid">
                       <label>
                         انتخاب فرد
@@ -1102,6 +1124,7 @@ export function DomainUIController({
                       </div>
                     </header>
                     <section className="approval-section modal-body">
+                      {safetyWarnings}
                       <div className="edit-grid">
                         {editableEntities.slice(0, 1).map((entity, index) => (
                           <div className="setup-edit-row" key={`role-${interpretation.id}-${index}`}>
@@ -1240,6 +1263,7 @@ export function DomainUIController({
                     </div>
                   </header>
                   <div className="modal-body">
+                    {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
                     <div className="confirmation-summary">
                       <p><strong>نوع عملیات:</strong> یادداشت / سایر</p>
                       <p><strong>برداشت سیستم از متن شما:</strong> {interpretation.description ?? interpretation.raw_input_text}</p>
@@ -1280,6 +1304,7 @@ export function DomainUIController({
                   </div>
                 </header>
                 <div className="modal-body">
+                  {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
                   <div className="confirmation-summary">
                     <p><strong>برداشت سیستم از متن شما:</strong> {interpretation.description ?? interpretation.raw_input_text}</p>
                     <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>

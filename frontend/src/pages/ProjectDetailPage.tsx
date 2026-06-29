@@ -27,6 +27,14 @@ import {
 import { api, HistoryEntry, Invoice, OperatingSummary, PayableCorrectionPayload, Payment, PaymentCorrectionPayload, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog, WorkLogCorrectionPayload } from "../api";
 import { PersianDatePicker } from "../components/PersianDatePicker";
 import { quickReportRange, ReportFilterKey } from "../utils/jalaliDate";
+import {
+  MONEY_UNIT_HELPER,
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+} from "../ui/betaSafety";
 
 type PersonKind = WorkerType | "OTHER";
 
@@ -1027,6 +1035,8 @@ export function ProjectDetailPage({
             <button className="primary-action send-button" type="submit" disabled={isLoading || !text.trim()} aria-label="ارسال"><Send aria-hidden="true" size={20} /></button>
           </div>
         </form>
+        <p className="input-helper-text">{MONEY_UNIT_HELPER}</p>
+        {looksLikeMultiAction(text) && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
       </section>
 
       {successMessage && <div className="success-feedback"><CheckCircle2 aria-hidden="true" size={18} />{successMessage}</div>}
@@ -1290,6 +1300,8 @@ export function ProjectDetailPage({
                     <mark className="role-pill">در انتظار تایید</mark>
                   </div>
                   <p className="pending-text">{pi.matched_input_text || pi.description || pi.raw_input_text}</p>
+                  {isUncertainInterpretation(pi) && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+                  {looksLikeMultiAction(interpretationText(pi)) && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
                   <div className="vpc-meta">
                     {pendingEntityName(pi) && <span>فرد: {pendingEntityName(pi)}</span>}
                     {pi.extracted_amount && <span>مبلغ: {money(pi.extracted_amount)}</span>}

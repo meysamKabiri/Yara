@@ -3,6 +3,14 @@ import type { PendingInterpretation, Worker } from "../../api";
 import { api } from "../../api";
 import { ROLE_OPTIONS } from "../../constants";
 import { buildConfirmPayload, exactEntityIdByName, getCandidateEntityId, normalizeNeedsSelection, type NeedsSelectionCandidate } from "../confirmPayload";
+import {
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+  moneyWithUnit,
+} from "../betaSafety";
 
 const CREATE_NEW_SENTINEL = -1;
 
@@ -286,6 +294,8 @@ export function EntityUpdateModal({
   const isRoleReadOnly = variant !== "GENERAL_PROFILE_UPDATE" && !isCreatingNew;
 
   const isFieldUpdate = hasPhoneUpdate || hasAccountUpdate || hasDailyRateUpdate || hasNotesUpdate;
+  const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
+  const uncertaintyWarning = isUncertainInterpretation(interpretation);
 
   function buildFieldUpdatesFromForm(): Record<string, unknown> {
     const result: Record<string, unknown> = {};
@@ -456,12 +466,14 @@ export function EntityUpdateModal({
             </div>
           </header>
           <section className="approval-section modal-body">
+            {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+            {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
             <div className="confirmation-summary">
               <p><strong>نوع عملیات:</strong> {variantLabel(variant)}</p>
               <p><strong>شخص / طرف حساب:</strong> {name || extractedName || "نامشخص"}</p>
               {showPhone && <p><strong>شماره تماس:</strong> {phone || "ثبت نشده"}</p>}
               {showAccount && <p><strong>شماره حساب:</strong> {accountNumber || "ثبت نشده"}</p>}
-              {showDailyRate && <p><strong>مبلغ:</strong> {dailyRate || "ثبت نشده"}</p>}
+              {showDailyRate && <p><strong>مبلغ:</strong> {moneyWithUnit(dailyRate)}</p>}
               <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
               <p>قبل از تأیید می‌توانید فرد، نام و فیلدهای نمایش‌داده‌شده را اصلاح کنید.</p>
             </div>
@@ -557,6 +569,7 @@ export function EntityUpdateModal({
                   <label>
                     دستمزد روزانه
                     <input value={dailyRate} onChange={(e) => setDailyRate(e.target.value)} />
+                    <small>مبالغ به تومان ثبت می‌شوند.</small>
                   </label>
                 )}
                 {showNotes && (

@@ -2,6 +2,15 @@ import { useState, useMemo } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS, ROLE_OPTIONS, SEMANTIC_ACTION_OPTIONS } from "../../constants";
 import { exactEntityIdByName } from "../confirmPayload";
+import {
+  MONEY_UNIT_HELPER,
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+  moneyWithUnit,
+} from "../betaSafety";
 
 const CREATE_NEW_SENTINEL = -1;
 
@@ -77,9 +86,10 @@ function actionLabel(action: string | null): string {
   return "رویداد مالی";
 }
 
-function directionImpactText(direction: string): string {
-  if (direction === "INCOMING") return "این ثبت بعد از تأیید موجودی نقدی پروژه را افزایش می‌دهد.";
-  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return "این ثبت بعد از تأیید موجودی نقدی پروژه را کاهش می‌دهد.";
+function directionImpactText(direction: string, amount: string): string {
+  const formattedAmount = moneyWithUnit(amount);
+  if (direction === "INCOMING") return `بعد از تأیید، مبلغ ${formattedAmount} به عنوان دریافتی پروژه ثبت می‌شود و موجودی نقدی پروژه افزایش پیدا می‌کند.`;
+  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return `بعد از تأیید، مبلغ ${formattedAmount} به عنوان پرداختی پروژه ثبت می‌شود و موجودی نقدی پروژه کاهش پیدا می‌کند.`;
   return "اثر مالی این ثبت بعد از تأیید مشخص می‌شود؛ جهت مالی را بررسی کنید.";
 }
 
@@ -191,6 +201,8 @@ export function FinancialModal({
   const selectedEntityName = isCreatingNew
     ? newEntityName.trim()
     : (workers.find((worker) => worker.id === entityId)?.name ?? extractedName);
+  const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
+  const uncertaintyWarning = isUncertainInterpretation(interpretation);
 
   function handleConfirm() {
     if (isCreatingNew) {
@@ -229,14 +241,17 @@ export function FinancialModal({
         <div>
           <h3 className="modal-title">ثبت مالی</h3>
           <p>برداشت سیستم از متن شما: مبلغ و طرف حساب را بررسی کنید.</p>
+          <p>{MONEY_UNIT_HELPER}</p>
         </div>
       </header>
       <section className="approval-section modal-body">
+        {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+        {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
         <div className="confirmation-summary">
           <p><strong>نوع عملیات:</strong> {actionLabel(interpretation.semantic_action)}</p>
           <p><strong>شخص / طرف حساب:</strong> {selectedEntityName || "نامشخص"}</p>
-          <p><strong>مبلغ:</strong> {amount ? `${amount} تومان` : "ثبت نشده"}</p>
-          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">{directionImpactText(direction)}</span></p>
+          <p><strong>مبلغ:</strong> {moneyWithUnit(amount)}</p>
+          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">{directionImpactText(direction, amount)}</span></p>
           <p>قبل از تأیید می‌توانید طرف حساب، مبلغ، جهت مالی و توضیحات را اصلاح کنید.</p>
         </div>
         <div className="edit-grid">

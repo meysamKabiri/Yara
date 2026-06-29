@@ -74,6 +74,15 @@ Project:
 - Tester:
 - Date:
 
+## Beta Safety UX Checks
+
+- [ ] All financial amounts show `تومان`.
+- [ ] Financial impact text clearly says whether cash balance increases or decreases.
+- [ ] Low-confidence or uncertain cards show `یارا از این برداشت مطمئن نیست. لطفاً قبل از ثبت بررسی کنید.`
+- [ ] Multi-action input shows `این متن ممکن است شامل چند عملیات باشد. برای دقت بیشتر، هر عملیات را جداگانه وارد کنید.`
+- [ ] Loading state says `یارا در حال بررسی متن شماست...`
+- [ ] No contractor-facing card uses confusing technical terms like `pending`.
+
 ## Core Scenario Checklist
 
 ### Scenario 1 — Create Project Client
@@ -99,7 +108,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 2 — Create Daily Worker From Role After Name
 
@@ -124,7 +135,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 3 — Create Daily Worker From Role Before Name
 
@@ -149,7 +162,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 4 — Create Skilled Worker With Spaced Role
 
@@ -174,7 +189,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 5 — Create Skilled Worker With Compact Role
 
@@ -199,7 +216,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 6 — Update Phone Number
 
@@ -224,7 +243,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 7 — Update Account Number
 
@@ -249,7 +270,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 8 — Incoming Client Payment
 
@@ -274,7 +297,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 9 — Outgoing Worker Payment
 
@@ -299,7 +324,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 10 — Purchase Paid To Vendor
 
@@ -324,7 +351,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 11 — Daily Wage Profile Update
 
@@ -349,7 +378,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 12 — Worker Worked Today
 
@@ -374,7 +405,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 13 — Edit Name Before Confirm
 
@@ -404,7 +437,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 14 — Edit Amount Before Confirm
 
@@ -434,7 +469,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 15 — Corrupted Client Role Spacing
 
@@ -459,7 +496,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 16 — Separator Between Role And Name
 
@@ -484,7 +523,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 17 — Only Phone Number
 
@@ -510,7 +551,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ### Scenario 18 — Empty Input
 
@@ -536,7 +579,9 @@ Must NOT happen:
 Result:
 - [ ] Pass
 - [ ] Fail
-- Notes:
+- Actual result:
+
+Notes:
 
 ## Cross-Scenario Checks
 
@@ -559,7 +604,9 @@ Use this section for tester observations that do not fit a single scenario.
 - Tester:
 - Browser/device:
 - Date:
-- Notes:
+- Actual result:
+
+Notes:
 
 ## Known Beta Limitations
 

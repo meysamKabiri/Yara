@@ -1,6 +1,15 @@
 import { useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { ROLE_OPTIONS, FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS } from "../../constants";
+import {
+  MONEY_UNIT_HELPER,
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+  moneyWithUnit,
+} from "../betaSafety";
 
 interface SplitFlowConfirmData {
   setup: {
@@ -29,6 +38,13 @@ interface SplitFlowModalProps {
 
 function shouldShowRoleDetail(type: string): boolean {
   return type === "SKILLED_WORKER" || type === "OTHER";
+}
+
+function directionImpactText(direction: string, amount: string): string {
+  const formattedAmount = moneyWithUnit(amount);
+  if (direction === "INCOMING") return `بعد از تأیید، مبلغ ${formattedAmount} به عنوان دریافتی پروژه ثبت می‌شود و موجودی نقدی پروژه افزایش پیدا می‌کند.`;
+  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return `بعد از تأیید، مبلغ ${formattedAmount} به عنوان پرداختی پروژه ثبت می‌شود و موجودی نقدی پروژه کاهش پیدا می‌کند.`;
+  return "اثر مالی این ثبت بعد از تأیید مشخص می‌شود؛ جهت مالی را بررسی کنید.";
 }
 
 export function SplitFlowModal({
@@ -64,6 +80,8 @@ export function SplitFlowModal({
   const [amount, setAmount] = useState(interpretation.extracted_amount ?? "");
   const [direction, setDirection] = useState(interpretation.financial_direction ?? "");
   const [paymentMethod, setPaymentMethod] = useState(interpretation.payment_method ?? "");
+  const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
+  const uncertaintyWarning = isUncertainInterpretation(interpretation);
 
   function handleFinalConfirm() {
     if (!financialEntityId) return;
@@ -101,6 +119,8 @@ export function SplitFlowModal({
           </div>
         </header>
         <section className="approval-section modal-body">
+          {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+          {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
           <div className="setup-edit-list">
             <div className="setup-edit-row">
               <label>
@@ -161,9 +181,16 @@ export function SplitFlowModal({
         <div>
           <h3 className="modal-title">ثبت مالی</h3>
           <p>مرحله ۲ از ۲</p>
+          <p>{MONEY_UNIT_HELPER}</p>
         </div>
       </header>
       <section className="approval-section modal-body">
+        {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+        {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
+        <div className="confirmation-summary">
+          <p><strong>مبلغ:</strong> {moneyWithUnit(amount)}</p>
+          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">{directionImpactText(direction, amount)}</span></p>
+        </div>
         <div className="edit-grid">
           <label>
             طرف حساب

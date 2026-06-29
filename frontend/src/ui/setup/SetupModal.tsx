@@ -2,6 +2,13 @@ import { useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { ROLE_OPTIONS } from "../../constants";
 import type { SetupEntity } from "../../types/domain";
+import {
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+} from "../betaSafety";
 
 interface SetupModalProps {
   interpretation: PendingInterpretation;
@@ -74,6 +81,8 @@ export function SetupModal({
   const [roleDetail, setRoleDetail] = useState(defaultEntity.roleDetail ?? "");
   const [phone, setPhone] = useState(defaultEntity.phone ?? "");
   const [accountNumber, setAccountNumber] = useState(defaultEntity.accountNumber ?? "");
+  const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
+  const uncertaintyWarning = isUncertainInterpretation(interpretation);
 
   function handleConfirm() {
     const entity: SetupEntity = {
@@ -97,6 +106,8 @@ export function SetupModal({
         </div>
       </header>
       <section className="approval-section modal-body">
+        {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+        {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
         <div className="confirmation-summary">
           <p><strong>نوع عملیات:</strong> تعریف / به‌روزرسانی فرد در پروژه</p>
           <p><strong>شخص / طرف حساب:</strong> {name || "نامشخص"}</p>

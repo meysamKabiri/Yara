@@ -1,6 +1,7 @@
 import { FormEvent } from "react";
 import { Mic, Send } from "lucide-react";
 import { Project } from "../api";
+import { MONEY_UNIT_HELPER, MULTI_ACTION_WARNING, looksLikeMultiAction } from "../ui/betaSafety";
 
 export type AskInteraction = {
   id: string;
@@ -40,6 +41,8 @@ export function AskYaraPage({ project, text, examples, interactions, isLoading, 
             <button className="primary-action" type="submit" disabled={isLoading || !project || !text.trim()} aria-label="ارسال"><Send aria-hidden="true" size={20} /></button>
           </div>
         </form>
+        <p className="input-helper-text">{MONEY_UNIT_HELPER}</p>
+        {looksLikeMultiAction(text) && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
         <div className="example-chip-list">
           {examples.map((example) => <button key={example} type="button" onClick={() => onTextChange(example)}>{example}</button>)}
         </div>
