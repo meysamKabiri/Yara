@@ -108,6 +108,20 @@ class ReconciliationEventStatus(StrEnum):
     NEEDS_REVIEW = "NEEDS_REVIEW"
 
 
+class InterpretationFeedbackErrorType(StrEnum):
+    WRONG_DOMAIN = "WRONG_DOMAIN"
+    WRONG_ENTITY = "WRONG_ENTITY"
+    WRONG_AMOUNT = "WRONG_AMOUNT"
+    WRONG_ROLE = "WRONG_ROLE"
+    MISSING_EXTRACTION = "MISSING_EXTRACTION"
+
+
+class InterpretationFeedbackSource(StrEnum):
+    USER_EDIT = "USER_EDIT"
+    SYSTEM_FLAG = "SYSTEM_FLAG"
+    RECONCILIATION = "RECONCILIATION"
+
+
 class HistoryChangeType(StrEnum):
     WORK = "WORK"
     PAYMENT = "PAYMENT"
@@ -164,6 +178,9 @@ class Project(TimestampMixin, Base):
     )
     natural_input_jobs: Mapped[list["NaturalInputJob"]] = relationship(back_populates="project")
     reconciliation_events: Mapped[list["ReconciliationEvent"]] = relationship(back_populates="project")
+    interpretation_feedback: Mapped[list["InterpretationFeedback"]] = relationship(
+        back_populates="project"
+    )
 
 
 class RawEntry(TimestampMixin, Base):
@@ -477,6 +494,39 @@ class FinancialMigrationLog(TimestampMixin, Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="financial_migration_logs")
+
+
+class InterpretationFeedback(TimestampMixin, Base):
+    __tablename__ = "interpretation_feedback"
+    __table_args__ = (
+        Index("ix_interpretation_feedback_project_id", "project_id"),
+        Index("ix_interpretation_feedback_trace_id", "trace_id"),
+        UniqueConstraint("submission_hash", name="uq_interpretation_feedback_submission_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    raw_input: Mapped[str] = mapped_column(Text, nullable=False)
+    system_output: Mapped[dict] = mapped_column(
+        JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+    )
+    user_final_state: Mapped[dict] = mapped_column(
+        JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+    )
+    error_types: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(postgresql.ARRAY(String), "postgresql"),
+        nullable=False,
+    )
+    correction_source: Mapped[InterpretationFeedbackSource] = mapped_column(
+        SqlEnum(InterpretationFeedbackSource, native_enum=False, length=30),
+        nullable=False,
+    )
+    submission_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="interpretation_feedback")
 
 
 class TraceEvent(TimestampMixin, Base):

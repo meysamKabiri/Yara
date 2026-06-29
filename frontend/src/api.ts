@@ -402,6 +402,22 @@ export type EntityResolutionResult = {
 
 export type PendingInterpretationConfirmResult = NaturalInputResult | EntityResolutionResult;
 
+export type InterpretationFeedbackPayload = {
+  trace_id?: string | null;
+  project_id: number;
+  raw_input: string;
+  system_output: Record<string, unknown>;
+  user_final_state: Record<string, unknown>;
+  correction_source?: "USER_EDIT" | "SYSTEM_FLAG" | "RECONCILIATION";
+};
+
+export type InterpretationFeedback = InterpretationFeedbackPayload & {
+  id: string;
+  error_types: Array<"WRONG_DOMAIN" | "WRONG_ENTITY" | "WRONG_AMOUNT" | "WRONG_ROLE" | "MISSING_EXTRACTION">;
+  created_at: string;
+  updated_at: string;
+};
+
 export type NaturalInputResult = {
   raw_entry_id: number | null;
   intent: string;
@@ -637,6 +653,12 @@ export const api = {
   discardEvent: (eventId: number) =>
     request<ExtractedEvent>(`/extracted-events/${eventId}/discard`, {
       method: "POST",
+    }),
+
+  submitInterpretationFeedback: (payload: InterpretationFeedbackPayload) =>
+    request<InterpretationFeedback>("/feedback/interpretation", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 
   listWorkers: (projectId: number) =>

@@ -30,6 +30,7 @@ from app.models.core import (
     FinancialDirection,
     HistoryChangeType,
     HistoryEntry,
+    InterpretationFeedbackSource,
     Invoice,
     InvoiceStatus,
     Payment,
@@ -99,6 +100,10 @@ from app.services.financial_summary import (
 from app.services.llm_extraction import extract, extract_graph  # noqa: F401
 from app.services.llm_v2_interpreter import LLMv2Interpreter  # noqa: F401
 from app.services.llm_v2_validator import resolve_candidates
+from app.services.interpretation_feedback import (
+    capture_pending_interpretation_feedback,
+    pending_interpretation_feedback_state,
+)
 from app.services.persian_money_engine import (
     normalize_text,
     parse_persian_money,
@@ -1599,10 +1604,18 @@ def update_pending_interpretation(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
         )
+    system_output = pending_interpretation_feedback_state(interpretation)
     update_data = payload.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(interpretation, key, value)
     interpretation.status = PendingInterpretationStatus.EDITED
+    capture_pending_interpretation_feedback(
+        db,
+        interpretation=interpretation,
+        system_output=system_output,
+        trace_id=get_trace_id(),
+        correction_source=InterpretationFeedbackSource.USER_EDIT,
+    )
     db.commit()
     db.refresh(interpretation)
     return interpretation
@@ -1701,7 +1714,8 @@ def confirm_pending_interpretation(
             "pending_interpretation_lock_acquired",
             extra={"pending_interpretation_id": interpretation.id},
         )
-        result = _execute_pending_interpretation(db, interpretation, payload)
+        system_output = pending_interpretation_feedback_state(interpretation)
+        result = _execute_pending_interpretation(db, interpretation, payload, system_output)
         interpretation.status = PendingInterpretationStatus.CONFIRMED
         db.commit()
         flush_queued_trace_events(db)
@@ -1832,9 +1846,18 @@ def _execute_pending_interpretation(
     db: DbSession,
     interpretation: PendingInterpretation,
     payload: PendingInterpretationConfirm,
+    system_output: dict[str, Any] | None = None,
 ) -> NaturalInputResult:
+    system_output = system_output or pending_interpretation_feedback_state(interpretation)
     _apply_create_new_confirmation_payload(interpretation, payload)
     _apply_confirmation_edit_payload(interpretation, payload)
+    capture_pending_interpretation_feedback(
+        db,
+        interpretation=interpretation,
+        system_output=system_output,
+        trace_id=get_trace_id(),
+        correction_source=InterpretationFeedbackSource.USER_EDIT,
+    )
     route = _domain_route(interpretation, db=db)
     if route["domain"] == DomainType.SETUP.value and _execution_engine_primary_enabled(
         interpretation
