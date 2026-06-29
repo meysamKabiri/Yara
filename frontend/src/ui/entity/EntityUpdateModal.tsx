@@ -94,6 +94,14 @@ function detectVariant(entity: Record<string, unknown>, updates: Record<string, 
   return "GENERAL_PROFILE_UPDATE";
 }
 
+function variantLabel(variant: EntityUpdateVariant): string {
+  if (variant === "PHONE_UPDATE") return "ثبت شماره تماس";
+  if (variant === "ACCOUNT_UPDATE") return "ثبت شماره حساب";
+  if (variant === "DAILY_RATE_UPDATE") return "ثبت دستمزد روزانه";
+  if (variant === "NOTES_UPDATE") return "ثبت توضیحات پروفایل";
+  return "به‌روزرسانی اطلاعات فرد";
+}
+
 function shouldShowRoleDetail(type: string): boolean {
   return type === "SKILLED_WORKER" || type === "OTHER";
 }
@@ -444,10 +452,19 @@ export function EntityUpdateModal({
           <header className="modal-header">
             <div>
               <h3 className="modal-title">به‌روزرسانی اطلاعات فرد</h3>
-              <p>تغییرات فرد را بررسی کنید.</p>
+              <p>برداشت سیستم از متن شما: تغییرات فرد را بررسی کنید.</p>
             </div>
           </header>
           <section className="approval-section modal-body">
+            <div className="confirmation-summary">
+              <p><strong>نوع عملیات:</strong> {variantLabel(variant)}</p>
+              <p><strong>شخص / طرف حساب:</strong> {name || extractedName || "نامشخص"}</p>
+              {showPhone && <p><strong>شماره تماس:</strong> {phone || "ثبت نشده"}</p>}
+              {showAccount && <p><strong>شماره حساب:</strong> {accountNumber || "ثبت نشده"}</p>}
+              {showDailyRate && <p><strong>مبلغ:</strong> {dailyRate || "ثبت نشده"}</p>}
+              <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+              <p>قبل از تأیید می‌توانید فرد، نام و فیلدهای نمایش‌داده‌شده را اصلاح کنید.</p>
+            </div>
             <div className="setup-edit-list">
               <div className="setup-edit-row">
                 <label>
@@ -563,10 +580,10 @@ export function EntityUpdateModal({
                 onClick={handleConfirm}
                 disabled={isLoadingActive || !canConfirm}
               >
-                تایید و ثبت
+                تأیید و ثبت
               </button>
               <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoadingActive}>
-                نادیده گرفتن
+                رد کردن
               </button>
             </div>
           </div>

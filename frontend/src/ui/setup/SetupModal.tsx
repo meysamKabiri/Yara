@@ -29,6 +29,10 @@ function shouldShowRoleDetail(type: string): boolean {
   return type === "SKILLED_WORKER" || type === "OTHER";
 }
 
+function roleLabel(type: string): string {
+  return ROLE_OPTIONS.find((option) => option.value === type)?.label ?? type;
+}
+
 function extractSetupEntities(interpretation: PendingInterpretation): SetupEntity[] {
   return (interpretation.extracted_entities ?? [])
     .map((entity) => {
@@ -89,10 +93,18 @@ export function SetupModal({
       <header className="modal-header">
         <div>
           <h3 className="modal-title">افزودن فرد به پروژه</h3>
-          <p>اطلاعات فرد را بررسی کنید.</p>
+          <p>برداشت سیستم از متن شما: اطلاعات فرد و نقش را بررسی کنید.</p>
         </div>
       </header>
       <section className="approval-section modal-body">
+        <div className="confirmation-summary">
+          <p><strong>نوع عملیات:</strong> تعریف / به‌روزرسانی فرد در پروژه</p>
+          <p><strong>شخص / طرف حساب:</strong> {name || "نامشخص"}</p>
+          <p><strong>نقش / دسته:</strong> {roleLabel(type)}</p>
+          {roleDetail.trim() && <p><strong>توضیح نقش:</strong> {roleDetail}</p>}
+          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+          <p>قبل از تأیید می‌توانید نام، نقش، شماره تماس و شماره حساب را اصلاح کنید.</p>
+        </div>
         <div className="setup-edit-list">
           <div className="setup-edit-row">
             <label>
@@ -136,10 +148,10 @@ export function SetupModal({
             onClick={handleConfirm}
             disabled={isLoading || !canConfirm}
           >
-            تایید
+            تأیید و ثبت
           </button>
           <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-            حذف
+            رد کردن
           </button>
         </div>
       </div>

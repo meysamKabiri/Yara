@@ -1728,6 +1728,31 @@ mark {
   margin: 0;
 }
 
+.confirmation-summary {
+  border: 1px solid #dbe7e2;
+  border-radius: 8px;
+  background: #f8fbf9;
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem;
+}
+
+.confirmation-summary p {
+  color: #40515a;
+  line-height: 1.8;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.confirmation-summary strong {
+  color: #1f3027;
+}
+
+.confirmation-summary .impact-text {
+  color: #27613f;
+  font-weight: 700;
+}
+
 .text-button {
   background: none;
   border: none;

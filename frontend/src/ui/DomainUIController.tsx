@@ -331,6 +331,12 @@ function WorkLogModal({
         </div>
       </header>
       <div className="modal-body">
+        <div className="confirmation-summary">
+          <p><strong>نوع عملیات:</strong> ثبت کارکرد</p>
+          <p><strong>شخص / طرف حساب:</strong> {isCreateNew ? (newWorkerName || "نامشخص") : (selectedWorker?.name ?? entityName(interpretation))}</p>
+          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+          <p>قبل از تأیید می‌توانید کارگر، تعداد روز، بازه و توضیحات را اصلاح کنید.</p>
+        </div>
         <div className="edit-grid">
         <label>
           فرد / کارگر
@@ -375,13 +381,13 @@ function WorkLogModal({
       <div className="modal-footer">
         <div className="modal-actions">
           <button className="primary-action" type="button" onClick={submit} disabled={isLoading || !canConfirm || !quantity.trim()}>
-            تایید
+            تأیید و ثبت
           </button>
           <button type="button" onClick={onLater ?? onDiscard} disabled={isLoading}>
             بعدا بررسی می‌کنم
           </button>
           <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-            نادیده گرفتن
+            رد کردن
           </button>
         </div>
       </div>
@@ -469,7 +475,7 @@ function MultiInterpretationReview({
                 <dl className="multi-review-meta">
                   {interpretation.extracted_amount && (
                     <>
-                      <dt>مقدار</dt>
+                      <dt>مبلغ</dt>
                       <dd className="amount-value">{moneyLabel(interpretation.extracted_amount)}</dd>
                     </>
                   )}
@@ -483,13 +489,13 @@ function MultiInterpretationReview({
               </div>
               <div className="multi-review-actions">
                 <button className={`primary-action${warning ? " primary-action--caution" : ""}`} type="button" onClick={() => onConfirm(interpretation)} disabled={isLoading}>
-                  تایید
+                  تأیید و ثبت
                 </button>
                 <button type="button" onClick={() => onEdit(interpretation)} disabled={isLoading}>
                   ویرایش
                 </button>
                 <button className="danger-action" type="button" onClick={() => onDiscard(interpretation)} disabled={isLoading}>
-                  حذف
+                  رد کردن
                 </button>
               </div>
             </article>
@@ -879,7 +885,7 @@ export function DomainUIController({
                           }}
                           disabled={isLoading || !canContinue}
                         >
-                          تأیید
+                          تأیید و ثبت
                         </button>
                         <button
                           className="danger-action"
@@ -887,7 +893,7 @@ export function DomainUIController({
                           onClick={() => onDiscard(interpretation)}
                           disabled={isLoading}
                         >
-                          حذف
+                          رد کردن
                         </button>
                       </div>
                     </div>
@@ -1065,7 +1071,7 @@ export function DomainUIController({
                           }}
                           disabled={isLoading || !canConfirmCandidate}
                         >
-                          تأیید
+                          تأیید و ثبت
                         </button>
                         {!isRole && (
                           <button
@@ -1074,7 +1080,7 @@ export function DomainUIController({
                             onClick={() => onDiscard(interpretation)}
                             disabled={isLoading}
                           >
-                            حذف
+                            رد کردن
                           </button>
                         )}
                       </div>
@@ -1169,7 +1175,7 @@ export function DomainUIController({
                           }}
                           disabled={isLoading || editableEntities.length === 0 || !editableEntities[0].name.trim()}
                         >
-                          تأیید
+                          تأیید و ثبت
                         </button>
                       </div>
                     </div>
@@ -1230,10 +1236,15 @@ export function DomainUIController({
                   <header className="modal-header">
                     <div>
                       <h3 className="modal-title">یادداشت</h3>
+                      <p>برداشت سیستم از این متن قطعی نیست. لطفاً اطلاعات را بررسی یا اصلاح کنید.</p>
                     </div>
                   </header>
                   <div className="modal-body">
-                    <p>{interpretation.description ?? interpretation.raw_input_text}</p>
+                    <div className="confirmation-summary">
+                      <p><strong>نوع عملیات:</strong> یادداشت / سایر</p>
+                      <p><strong>برداشت سیستم از متن شما:</strong> {interpretation.description ?? interpretation.raw_input_text}</p>
+                      <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+                    </div>
                   </div>
                   <div className="modal-footer">
                     <div className="modal-actions">
@@ -1243,7 +1254,7 @@ export function DomainUIController({
                         onClick={() => onConfirm(interpretation, { confirmed: true })}
                         disabled={isLoading}
                       >
-                        تأیید
+                        تأیید و ثبت
                       </button>
                       <button
                         className="danger-action"
@@ -1251,7 +1262,7 @@ export function DomainUIController({
                         onClick={() => onDiscard(interpretation)}
                         disabled={isLoading}
                       >
-                        حذف
+                        رد کردن
                       </button>
                     </div>
                   </div>
@@ -1265,9 +1276,15 @@ export function DomainUIController({
                 <header className="modal-header">
                   <div>
                     <h3 className="modal-title">نوع ناشناخته</h3>
-                    <p>{interpretation.description ?? interpretation.raw_input_text}</p>
+                    <p>برداشت سیستم از این متن قطعی نیست. لطفاً اطلاعات را بررسی یا اصلاح کنید.</p>
                   </div>
                 </header>
+                <div className="modal-body">
+                  <div className="confirmation-summary">
+                    <p><strong>برداشت سیستم از متن شما:</strong> {interpretation.description ?? interpretation.raw_input_text}</p>
+                    <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+                  </div>
+                </div>
                 <div className="modal-footer">
                   <div className="modal-actions">
                     <button
@@ -1276,7 +1293,7 @@ export function DomainUIController({
                       onClick={() => onConfirm(interpretation, { confirmed: true })}
                       disabled={isLoading}
                     >
-                      تأیید
+                      تأیید و ثبت
                     </button>
                     <button
                       className="danger-action"
@@ -1284,7 +1301,7 @@ export function DomainUIController({
                       onClick={() => onDiscard(interpretation)}
                       disabled={isLoading}
                     >
-                      حذف
+                      رد کردن
                     </button>
                   </div>
                 </div>

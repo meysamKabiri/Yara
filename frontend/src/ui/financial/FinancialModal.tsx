@@ -77,6 +77,12 @@ function actionLabel(action: string | null): string {
   return "رویداد مالی";
 }
 
+function directionImpactText(direction: string): string {
+  if (direction === "INCOMING") return "این ثبت بعد از تأیید موجودی نقدی پروژه را افزایش می‌دهد.";
+  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return "این ثبت بعد از تأیید موجودی نقدی پروژه را کاهش می‌دهد.";
+  return "اثر مالی این ثبت بعد از تأیید مشخص می‌شود؛ جهت مالی را بررسی کنید.";
+}
+
 interface FinancialModalProps {
   interpretation: PendingInterpretation;
   workers: Worker[];
@@ -182,6 +188,9 @@ export function FinancialModal({
   const [dueDate, setDueDate] = useState(interpretation.due_date ?? "");
 
   const isCreatingNew = entityId === CREATE_NEW_SENTINEL;
+  const selectedEntityName = isCreatingNew
+    ? newEntityName.trim()
+    : (workers.find((worker) => worker.id === entityId)?.name ?? extractedName);
 
   function handleConfirm() {
     if (isCreatingNew) {
@@ -219,10 +228,17 @@ export function FinancialModal({
       <header className="modal-header">
         <div>
           <h3 className="modal-title">ثبت مالی</h3>
-          <p>مبلغ و طرف حساب را بررسی کنید.</p>
+          <p>برداشت سیستم از متن شما: مبلغ و طرف حساب را بررسی کنید.</p>
         </div>
       </header>
       <section className="approval-section modal-body">
+        <div className="confirmation-summary">
+          <p><strong>نوع عملیات:</strong> {actionLabel(interpretation.semantic_action)}</p>
+          <p><strong>شخص / طرف حساب:</strong> {selectedEntityName || "نامشخص"}</p>
+          <p><strong>مبلغ:</strong> {amount ? `${amount} تومان` : "ثبت نشده"}</p>
+          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">{directionImpactText(direction)}</span></p>
+          <p>قبل از تأیید می‌توانید طرف حساب، مبلغ، جهت مالی و توضیحات را اصلاح کنید.</p>
+        </div>
         <div className="edit-grid">
           <label>
             نوع ثبت
@@ -318,10 +334,10 @@ export function FinancialModal({
             onClick={handleConfirm}
             disabled={isLoading || !canConfirm}
           >
-            تایید و ثبت
+            تأیید و ثبت مالی
           </button>
           <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-            نادیده گرفتن
+            رد کردن
           </button>
         </div>
       </div>
