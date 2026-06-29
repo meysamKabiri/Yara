@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.core.auth import authenticated_user_id, get_current_user
 from app.dependencies.database import DbSession
 from app.models.core import DeadLetterJob, Project
+from app.services.feedback_intelligence_service import analyze_feedback_intelligence
 from app.services.financial_reconciliation_service import (
     latest_reconciliation_report,
     reconcile_project,
@@ -73,6 +74,16 @@ def recover_confirming(db: DbSession, max_age_minutes: int = 15) -> dict[str, in
 @router.get("/safety-metrics")
 def read_safety_metrics(db: DbSession) -> dict[str, int]:
     return safety_metrics(db, project_ids=_owned_project_ids(db))
+
+
+@router.get("/feedback/intelligence")
+def feedback_intelligence(
+    project_id: int,
+    db: DbSession,
+    days: int = 7,
+) -> dict[str, Any]:
+    _require_owned_project(db, project_id)
+    return analyze_feedback_intelligence(db, project_id=project_id, days=days)
 
 
 def _require_owned_project(db: DbSession, project_id: int) -> Project:
