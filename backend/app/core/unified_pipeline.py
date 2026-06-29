@@ -1,6 +1,5 @@
 import inspect
 import logging
-import os
 import re
 from decimal import Decimal
 from time import perf_counter
@@ -14,17 +13,15 @@ from app.core.feature_flags import get_financial_migration_mode
 from app.core.governance.governance_context_builder import GovernanceContextBuilder
 from app.core.governance.unified_governance_engine import UnifiedGovernanceEngine
 from app.core.llm_cache import get_llm_cache, llm_cache_key, set_llm_cache
-from app.core.observability_service import track_event
 from app.core.observability.decision_logger import (
     flush_decision_logs,
     queue_financial_decision,
     queue_shadow_decision,
 )
-
 from app.core.observability.performance_logger import record_pipeline_performance
+from app.core.observability_service import track_event
 from app.core.runtime.request_cache import RequestCache, new_request_cache
-from app.core.trace_context import get_job_id, get_trace_id
-from app.core.validation.financial_validator import decimal_or_none
+from app.core.trace_context import get_trace_id
 from app.dev_tools.semantic_firewall.firewall import (
     SemanticFirewallError,
     SemanticFirewallService,
@@ -39,13 +36,15 @@ from app.models.core import (
     WorkerType,
 )
 from app.schemas.llm_v2 import LLMv2FinancialDirection, LLMv2PaymentMethod
+from app.services.entity_normalizer import normalize_name
+from app.services.input_normalizer import clean_entity_name, normalize_user_input
 from app.services.llm_v2_interpreter import LLMv2Interpreter
-from app.services.llm_v2_validator import LLMv2Validator, LLMv2ValidationError, resolve_candidates
-from app.services.entity_normalizer import match_score, normalize_name
-from app.services.persian_money_engine import normalize_text
-from app.services.persian_money_engine import parse_persian_money
-from app.services.persian_project_payment import detect_incoming_project_payment
-from app.services.persian_project_payment import detect_purchase_payment
+from app.services.llm_v2_validator import LLMv2ValidationError, LLMv2Validator, resolve_candidates
+from app.services.persian_money_engine import normalize_text, parse_persian_money
+from app.services.persian_project_payment import (
+    detect_incoming_project_payment,
+    detect_purchase_payment,
+)
 from app.services.persian_role_extractor import PersianRoleExtractor
 from app.services.semantic_normalizer import CanonicalEventType, SemanticNormalizerService
 
@@ -172,6 +171,8 @@ def process_input(
         fast_setup is not None
         and not _role_assignment_has_profile_fields(fast_setup)
         and not _is_name_before_role_statement(text)
+        and not _normalizer_has_name_before_role_assignment(text)
+        and not _normalizer_has_worker_role_assignment(text)
     ):
         fast_setup = None
     if fast_setup is not None:
@@ -883,7 +884,6 @@ def _build_one_llm_v2_interpretation(
         LLMv2Action,
         LLMv2FinancialDirection,
         LLMv2Intent,
-        LLMv2PaymentMethod,
     )
 
     _repair_llm_v2_setup_role_from_text(interpretation, raw_text)
@@ -1221,11 +1221,12 @@ def _build_profile_update_interpretation(
     raw_text: str,
     entity_context: list[Worker],
 ) -> PendingInterpretation | None:
+    normalized_input = normalize_user_input(raw_text)
     normalized = normalize_text(raw_text)
     if "اضافه" in normalized and PersianRoleExtractor().extract(raw_text) is not None:
         return None
     updates: dict[str, str | int] = {}
-    phone_match = re.search(r"09\d{9,12}", normalized.replace(" ", ""))
+    phone_match = re.search(r"09\d{5,12}", normalized.replace(" ", ""))
     if phone_match and any(term in normalized for term in ["شماره تماس", "شماره موبایل", "موبایل", "تلفن"]):
         updates["phone"] = phone_match.group()
     account_match = re.search(r"\d{8,26}", normalized.replace(" ", ""))
@@ -1241,8 +1242,9 @@ def _build_profile_update_interpretation(
     if not updates:
         return None
 
-    raw_name = _profile_update_name(raw_text, normalized, updates)
-    name = raw_name or _profile_update_name(raw_text, normalized, updates)
+    normalized_entity = _first_normalized_entity(normalized_input)
+    raw_name = normalized_entity.get("name") if normalized_entity else None
+    name = clean_entity_name(raw_name) or _profile_update_name(raw_text, normalized, updates)
     if not name:
         return None
     resolution = resolve_candidates(name, entity_context)
@@ -1771,31 +1773,63 @@ def _is_phone_or_account_update(interpretation: PendingInterpretation) -> bool:
     return _fast_path_type(interpretation) in {"PHONE_UPDATE", "ACCOUNT_UPDATE"}
 
 
+def _first_normalized_entity(normalized_input: dict[str, Any]) -> dict[str, Any] | None:
+    entities = normalized_input.get("entities")
+    if isinstance(entities, list) and entities and isinstance(entities[0], dict):
+        return entities[0]
+    return None
+
+
 def _build_role_assignment_interpretation(
     project_id: int,
     raw_text: str,
     entity_context: list[Worker],
 ) -> PendingInterpretation | None:
-    if _text_has_financial_signal(raw_text) or not _is_role_assignment_text(raw_text):
+    normalized_input = normalize_user_input(raw_text)
+    normalized_entity = _first_normalized_entity(normalized_input)
+    has_normalized_role = bool(
+        normalized_entity and normalized_entity.get("role") not in {None, "OTHER"}
+    )
+    if _text_has_financial_signal(raw_text) or _has_work_signal(raw_text) or (
+        not _is_role_assignment_text(raw_text) and not has_normalized_role
+    ):
+        return None
+    if _looks_like_multi_person_role_statement(raw_text):
         return None
     normalized = normalize_text(raw_text)
     if any(term in normalized for term in ["کارگرها", "کارگرهای پروژه"]):
         return None
     extracted = PersianRoleExtractor().extract(raw_text)
-    if extracted is None or extracted.confidence < 0.6:
+    normalized_role = _project_role_from_normalized_entity(normalized_entity)
+    if (extracted is None or extracted.confidence < 0.6) and normalized_role is None:
         return None
-    role = extracted.worker_type.value
-    extracted_name = _role_assignment_display_name(raw_text, extracted, entity_context)
+    role = extracted.worker_type.value if extracted is not None else normalized_role
+    if role is None:
+        return None
+    extracted_name = clean_entity_name(
+        normalized_entity.get("name") if normalized_entity else None
+    ) or (
+        _role_assignment_display_name(raw_text, extracted, entity_context)
+        if extracted is not None
+        else None
+    )
+    if not extracted_name:
+        return None
+    confidence = extracted.confidence if extracted is not None else 0.85
     resolution = resolve_candidates(extracted_name, entity_context)
+    normalized_role_token = _normalized_role_token(normalized_input)
+    role_detail = None
+    if role == "SKILLED_WORKER":
+        role_detail = extracted.role_phrase if extracted is not None else normalized_role_token
     entity: dict[str, Any] = {
         "name": extracted_name,
         "kind": "PERSON",
         "project_role": role,
-        "role_detail": extracted.role_phrase if role == "SKILLED_WORKER" else None,
+        "role_detail": role_detail,
         "type": role,
     }
     field_updates: dict[str, str] = {}
-    phone_match = re.search(r"09\d{9,12}", normalize_text(raw_text).replace(" ", ""))
+    phone_match = re.search(r"09\d{5,12}", normalize_text(raw_text).replace(" ", ""))
     if phone_match:
         field_updates["phone"] = phone_match.group()
         entity["phone"] = phone_match.group()
@@ -1820,10 +1854,10 @@ def _build_role_assignment_interpretation(
         },
         "work": {"quantity": None, "unit": None, "description": None},
         "note": {"text": None},
-        "confidence": extracted.confidence,
+        "confidence": confidence,
         "ambiguity": False,
         "missing_fields": [],
-        "reasoning_summary": f"{extracted_name} نقش {extracted.role_phrase} دارد",
+        "reasoning_summary": f"{extracted_name} نقش {normalized_role_token or role} دارد",
     }
     return PendingInterpretation(
         project_id=project_id,
@@ -1839,7 +1873,7 @@ def _build_role_assignment_interpretation(
         financial_direction=None,
         due_date=None,
         description=raw_text,
-        confidence=extracted.confidence,
+        confidence=confidence,
         structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
     )
@@ -1869,6 +1903,39 @@ def _text_has_financial_signal(raw_text: str) -> bool:
     )
 
 
+def _has_work_signal(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text).replace("\u200c", " ")
+    has_quantity = bool(
+        re.search(r"\d|[۰-۹]", normalized)
+        and any(unit in normalized for unit in ["متر", "روز", "عدد", "واحد"])
+    )
+    if has_quantity:
+        return True
+    return any(
+        term in normalized
+        for term in [
+            "اومد",
+            "آمد",
+            "کار کرد",
+            "کار کرده",
+            "جوش زد",
+            "نصب کرد",
+            "اجرا کرد",
+            "ساخت",
+        ]
+    )
+
+
+def _looks_like_multi_person_role_statement(raw_text: str) -> bool:
+    normalized = normalize_text(raw_text).replace("\u200c", " ")
+    if " و " not in normalized:
+        return False
+    if PersianRoleExtractor().extract(raw_text) is None:
+        return False
+    role_markers = (" به عنوان ", " هستند", " می باشند", " کار می کنند")
+    return any(marker in normalized for marker in role_markers)
+
+
 def _role_assignment_has_profile_fields(interpretation: PendingInterpretation) -> bool:
     entities = interpretation.extracted_entities or []
     if not entities:
@@ -1890,6 +1957,60 @@ def _is_name_before_role_statement(raw_text: str) -> bool:
     role_index = normalized.find(extracted.role_phrase)
     name_index = normalized.find(extracted.name)
     return name_index >= 0 and role_index >= 0 and name_index < role_index
+
+
+def _normalizer_has_name_before_role_assignment(raw_text: str) -> bool:
+    normalized_text = normalize_text(raw_text)
+    if "اضافه" in normalized_text:
+        return False
+    normalized_input = normalize_user_input(raw_text)
+    entity = _first_normalized_entity(normalized_input)
+    if not (entity and entity.get("name") and entity.get("role") not in {None, "OTHER"}):
+        return False
+    facts = normalized_input.get("facts") or []
+    role_fact = next(
+        (
+            fact
+            for fact in facts
+            if isinstance(fact, dict) and fact.get("type") in {"ROLE", "ROLE_TOKEN"}
+        ),
+        None,
+    )
+    indicator = None
+    if isinstance(role_fact, dict):
+        indicator = role_fact.get("indicator") or role_fact.get("token")
+    if not isinstance(indicator, str) or not indicator:
+        return False
+    name_index = normalized_text.find(str(entity["name"]))
+    role_index = normalized_text.find(indicator)
+    return name_index >= 0 and role_index >= 0 and name_index < role_index
+
+
+def _normalizer_has_worker_role_assignment(raw_text: str) -> bool:
+    if "اضافه" in normalize_text(raw_text):
+        return False
+    entity = _first_normalized_entity(normalize_user_input(raw_text))
+    return _project_role_from_normalized_entity(entity) in {"DAILY_WORKER", "SKILLED_WORKER"}
+
+
+def _project_role_from_normalized_entity(entity: dict[str, Any] | None) -> str | None:
+    if not entity or not entity.get("name"):
+        return None
+    role = entity.get("role")
+    if role == "SKILLED_WORKER":
+        return "SKILLED_WORKER"
+    if role in {"DAILY_WORKER", "WORKER"}:
+        return "DAILY_WORKER"
+    return None
+
+
+def _normalized_role_token(normalized_input: dict[str, Any]) -> str | None:
+    facts = normalized_input.get("facts") or []
+    for fact in facts:
+        if isinstance(fact, dict) and fact.get("type") in {"ROLE", "ROLE_TOKEN"}:
+            token = fact.get("indicator") or fact.get("token")
+            return str(token) if token else None
+    return None
 
 
 def _dedupe_repeated_name(name: str) -> str:
@@ -1961,7 +2082,7 @@ def _profile_update_name(raw_text: str, normalized: str, updates: dict[str, str 
         text = text.replace(str(value), " ")
     text = re.sub(r"شماره تماس|شماره موبایل|شماره حساب|شماره کارت|دستمزد روزانه|موبایل|تلفن|حساب|کارت|شبا|روزی|روزانه|تومان|ریال|است|می دیم|میدیم|به", " ", text)
     name = re.sub(r"\s+", " ", text).strip()
-    return name or None
+    return clean_entity_name(name)
 
 
 def _repair_llm_v2_setup_role_from_text(interpretation: Any, raw_text: str) -> None:

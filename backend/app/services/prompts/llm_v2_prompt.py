@@ -1,5 +1,7 @@
-from app.services.persian_money_engine import normalize_text
+import json
 
+from app.services.input_normalizer import normalize_user_input
+from app.services.persian_money_engine import normalize_text
 
 QWEN_JSON_MODE_PREFIX = """/no_think
 Return only valid JSON. Do not include reasoning, explanations, markdown, or thinking text."""
@@ -11,7 +13,8 @@ Single-event schema:
 FINANCIAL_SCHEMA = """Return one compact JSON object with only these keys:
 {"intent":"FINANCIAL","action":"PAYMENT_IN|PAYMENT_OUT|PURCHASE_PAID|DEBT_CREATED|CHECK_PAYMENT","entities":[{"name":"string","project_role":"CLIENT|VENDOR|OTHER"}],"financial":{"amount":number,"direction":"IN|OUT","payment_method":"CASH|BANK_TRANSFER|CHECK|OTHER|null"}}"""
 
-COMMON_RULES = """Rules: preserve Persian names; amounts are تومان numbers (5 میلیون=5000000); use only listed enum values; no prose."""
+COMMON_RULES = """Rules: use only listed enum values; no prose. Entity names are pre-extracted and must not be expanded from raw text."""
+STRUCTURED_INPUT_RULES = """Input is normalized JSON. Do not parse a raw sentence. Do not invent or rewrite entity names. Classify domain/action from entities, facts, and financials only."""
 
 FINANCIAL_RULES = """Financial focus:
 - خرید paid now => PURCHASE_PAID, OUT, VENDOR, CASH.
@@ -36,25 +39,37 @@ NOTE_RULES = """Note focus:
 
 
 def build_llm_v2_prompt(raw_text: str, project_id: int) -> tuple[str, str]:
-    domain = detect_prompt_domain(raw_text)
+    structured_input = normalize_user_input(raw_text)
+    domain = detect_prompt_domain(raw_text, structured_input)
     schema = FINANCIAL_SCHEMA if domain == "financial" else LLM_V2_SCHEMA
     prompt = "\n".join(
         part
         for part in [
             QWEN_JSON_MODE_PREFIX,
-            "Extract from a Persian contractor note. Omit optional null fields.",
+            "Classify a normalized contractor input. Omit optional null fields.",
             schema,
             COMMON_RULES,
+            STRUCTURED_INPUT_RULES,
             _domain_rules(domain),
             f"Project ID: {project_id}",
-            f"Note: {raw_text}",
+            "Normalized input JSON:",
+            json.dumps(structured_input, ensure_ascii=False, separators=(",", ":")),
         ]
         if part
     )
     return prompt, domain
 
 
-def detect_prompt_domain(raw_text: str) -> str:
+def detect_prompt_domain(raw_text: str, structured_input: dict | None = None) -> str:
+    structured_input = structured_input or normalize_user_input(raw_text)
+    facts = structured_input.get("facts") or []
+    financials = structured_input.get("financials") or {}
+    if any(isinstance(fact, dict) and fact.get("type") == "AMOUNT" for fact in facts):
+        return "setup"
+    if isinstance(financials, dict) and financials.get("amount") is not None:
+        return "financial"
+    if any(isinstance(fact, dict) and fact.get("type") in {"PHONE", "ACCOUNT_NUMBER", "ROLE_TOKEN"} for fact in facts):
+        return "setup"
     normalized = normalize_text(raw_text)
     if any(separator in normalized for separator in [".", "۔", "؛", "\n"]):
         return "multi"

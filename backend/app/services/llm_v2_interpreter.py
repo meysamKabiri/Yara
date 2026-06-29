@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.observability_service import track_event, track_timed_event
 from app.core.trace_context import get_trace_id
+from app.services.input_normalizer import clean_entity_name
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.prompts.llm_v2_prompt import build_llm_v2_prompt
 
@@ -500,8 +501,9 @@ class LLMv2Interpreter:
         for item in value:
             if not isinstance(item, dict):
                 continue
-            name = item.get("name")
-            if not isinstance(name, str) or not name.strip():
+            raw_name = str(item.get("name") or "").strip()
+            name = clean_entity_name(raw_name) or self._simple_safe_name(raw_name)
+            if not name:
                 continue
             kind = item.get("kind")
             project_role = item.get("project_role")
@@ -513,7 +515,7 @@ class LLMv2Interpreter:
             field_updates = item.get("field_updates")
             entities.append(
                 {
-                    "name": name.strip(),
+                    "name": name,
                     "kind": kind if kind in VALID_ENTITY_KINDS else "UNKNOWN",
                     "project_role": (
                         project_role if project_role in VALID_PROJECT_ROLES else "OTHER"
@@ -543,6 +545,12 @@ class LLMv2Interpreter:
                 }
             )
         return entities
+
+    def _simple_safe_name(self, value: str) -> str | None:
+        if not value or re.search(r"[:：؛;,\-_/|\d]", value):
+            return None
+        normalized = re.sub(r"\s+", " ", value).strip()
+        return normalized if normalized else None
 
     def _number_or_none(self, value: Any) -> int | float | None:
         if isinstance(value, bool) or not isinstance(value, int | float):
@@ -635,7 +643,7 @@ class LLMv2Interpreter:
         return max(candidates, key=len)
 
     def _phone_sequence(self, text: str) -> str | None:
-        match = re.search(r"09\d{9,12}", text)
+        match = re.search(r"09\d{5,12}", text)
         return match.group() if match is not None else None
 
     def _profile_update_name(self, text: str, values: list[str | None]) -> str | None:
