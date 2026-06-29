@@ -8,6 +8,8 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.observability_service import track_event
+from app.core.trace_context import get_trace_id
 from app.models.core import (
     DeadLetterJob,
     FinancialDirection,
@@ -54,6 +56,25 @@ def reconcile_project(db: Session, project_id: int) -> dict[str, Any]:
     db.add(event)
     db.commit()
     db.refresh(event)
+    track_event(
+        db=db,
+        trace_id=get_trace_id(),
+        event_name="RECONCILIATION_COMPLETED",
+        payload={
+            "stage": "DB",
+            "domain": "FINANCIAL",
+            "project_id": project_id,
+            "reconciliation_event_id": event.id,
+            "drift_detected": drift_detected,
+            "status": event.status.value,
+            "input_snapshot": {"project_id": project_id},
+            "output_snapshot": snapshot,
+            "metadata": {
+                "drift_detected": drift_detected,
+                "drift_categories": list(snapshot.get("drift", {}).keys()),
+            },
+        },
+    )
     return {
         **snapshot,
         "reconciliation_event_id": event.id,

@@ -7,6 +7,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.observability_service import queue_trace_event
+from app.core.trace_context import get_trace_id
 from app.models.core import (
     FinancialDirection,
     Invoice,
@@ -91,6 +93,7 @@ class ExecutionEngine:
                 raise ValueError("Resolved entity not found in project")
 
             state = self._locked_state(db, state, worker)
+            state_before = _worker_state_snapshot(state)
             logger.info(
                 "worker_state_lock_acquired",
                 extra={
@@ -156,6 +159,44 @@ class ExecutionEngine:
 
             result = self._result(payments, invoices)
             duration_ms = round((perf_counter() - start) * 1000, 3)
+            state_after = _worker_state_snapshot(state)
+            queue_trace_event(
+                db,
+                trace_id=get_trace_id(),
+                event_name="FINANCIAL_MUTATION_RECORDED",
+                duration_ms=duration_ms,
+                payload={
+                    "stage": "ENGINE",
+                    "domain": "FINANCIAL",
+                    "project_id": confirmed_interpretation.project_id,
+                    "source_pending_interpretation_id": confirmed_interpretation.source_pending_interpretation_id,
+                    "semantic_action": action,
+                    "financial_direction": direction.value if direction is not None else None,
+                    "amount": str(amount),
+                    "entity_resolution_result": {
+                        "entity_id": worker.id,
+                        "entity_name": worker.name,
+                        "worker_state_id": state.id,
+                    },
+                    "worker_state_before": state_before,
+                    "worker_state_after": state_after,
+                    "balance_delta": _decimal_delta(
+                        state_before.get("financial_balance"),
+                        state_after.get("financial_balance"),
+                    ),
+                    "db_write_operations": {
+                        "payment_ids": [payment.id for payment in payments],
+                        "invoice_ids": [invoice.id for invoice in invoices],
+                    },
+                    "input_snapshot": {
+                        "semantic_action": action,
+                        "financial_direction": direction.value if direction is not None else None,
+                        "amount": str(amount),
+                        "entity_id": entity_id,
+                    },
+                    "output_snapshot": result,
+                },
+            )
             logger.info(
                 "financial_transaction_ready_to_commit",
                 extra={
@@ -300,3 +341,19 @@ class ExecutionEngine:
             "description": invoice.description,
             "status": invoice.status.value,
         }
+
+
+def _worker_state_snapshot(state: WorkerState) -> dict[str, Any]:
+    return {
+        "id": state.id,
+        "project_id": state.project_id,
+        "worker_id": state.worker_id,
+        "role": state.role.value if hasattr(state.role, "value") else state.role,
+        "financial_balance": str(state.financial_balance),
+    }
+
+
+def _decimal_delta(before: Any, after: Any) -> str | None:
+    if before is None or after is None:
+        return None
+    return str(Decimal(str(after)) - Decimal(str(before)))

@@ -207,9 +207,24 @@ class LLMv2Interpreter:
             normalize_ms = (perf_counter() - normalize_start) * 1000
 
             _emit_event(db, "INTERPRETATION_NORMALIZED", {
+                "stage": "LLM",
+                "input_snapshot": raw_text,
+                "output_snapshot": result,
+                "normalized_result": result,
                 "semantic_action": result.get("action"),
                 "domain": result.get("intent"),
+                "confidence": result.get("confidence"),
+                "reasoning_summary": result.get("reasoning_summary"),
             }, duration_ms=normalize_ms)
+            if isinstance(result.get("confidence"), int | float) and result["confidence"] < 0.5:
+                _emit_event(db, "LLM_LOW_CONFIDENCE", {
+                    "stage": "LLM",
+                    "input_snapshot": raw_text,
+                    "output_snapshot": result,
+                    "domain": result.get("intent"),
+                    "confidence": result.get("confidence"),
+                    "reasoning_summary": result.get("reasoning_summary"),
+                })
 
             timings = {
                 "normalization_duration_ms": round(normalize_ms, 1),
@@ -217,18 +232,34 @@ class LLMv2Interpreter:
             }
             result["_timings"] = timings
             return result
-        except (OSError, TimeoutError, urllib.error.URLError, TypeError):
+        except (OSError, TimeoutError, urllib.error.URLError, TypeError, LLMOutputParseError) as exc:
+            _emit_event(db, "LLM_FAILED", {
+                "stage": "LLM",
+                "input_snapshot": raw_text,
+                "error_message": str(exc),
+                "failure_type": type(exc).__name__,
+            })
             return self._fallback(raw_text, "shadow interpreter failed")
 
     def _generate(self, raw_text: str, project_id: int, db: Session | None = None) -> Any:
         prompt, prompt_domain = build_llm_v2_prompt(raw_text, project_id)
         _emit_event(db, "LLM_REQUEST_STARTED", {
+            "stage": "LLM",
             "model": OLLAMA_MODEL,
             "timeout": OLLAMA_TIMEOUT_SECONDS,
             "num_predict": OLLAMA_NUM_PREDICT,
             "prompt_length": len(prompt),
+            "prompt": prompt,
             "raw_text_length": len(raw_text),
             "prompt_domain": prompt_domain,
+            "input_snapshot": prompt,
+            "metadata": {
+                "model": OLLAMA_MODEL,
+                "timeout": OLLAMA_TIMEOUT_SECONDS,
+                "num_predict": OLLAMA_NUM_PREDICT,
+                "temperature": OLLAMA_TEMPERATURE,
+                "prompt_domain": prompt_domain,
+            },
         })
         ollama_start = perf_counter()
 
@@ -275,22 +306,38 @@ class LLMv2Interpreter:
         thinking_text = str(ollama_body.get("thinking", ""))
         ollama_stats = _ollama_stats(ollama_body)
         _emit_event(db, "OLLAMA_RESPONSE_RECEIVED", {
+            "stage": "LLM",
             "model": OLLAMA_MODEL,
             "prompt_domain": prompt_domain,
             "prompt_length": len(prompt),
             "response_length": len(response_text),
             "thinking_length": len(thinking_text),
+            "raw_llm_output": response_text or thinking_text,
+            "output_snapshot": response_text or thinking_text,
             **ollama_stats,
         }, duration_ms=ollama_ms)
 
         parse_start = perf_counter()
-        parsed = self._parse_ollama_json(ollama_body)
+        try:
+            parsed = self._parse_ollama_json(ollama_body)
+        except LLMOutputParseError as exc:
+            _emit_event(db, "LLM_JSON_PARSE_FAILED", {
+                "stage": "LLM",
+                "raw_llm_output": response_text or thinking_text,
+                "output_snapshot": response_text or thinking_text,
+                "error_message": str(exc),
+                "failure_type": type(exc).__name__,
+            }, duration_ms=(perf_counter() - parse_start) * 1000)
+            raise
         parse_ms = (perf_counter() - parse_start) * 1000
 
         used_field = "response" if ollama_body.get("response") and str(ollama_body.get("response", "")).strip() else "thinking"
         _emit_event(db, "LLM_JSON_PARSED", {
+            "stage": "LLM",
             "keys_parsed": list(parsed.keys()) if isinstance(parsed, dict) else [],
             "used_response_field": used_field,
+            "parsed_json": parsed,
+            "output_snapshot": parsed,
         }, duration_ms=parse_ms)
 
         self._last_timings = {

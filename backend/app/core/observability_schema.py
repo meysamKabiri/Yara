@@ -17,6 +17,8 @@ OBSERVABILITY_GROUPS: dict[str, list[str]] = {
         "LLM_RETRY",
         "OLLAMA_RESPONSE_RECEIVED",
         "LLM_JSON_PARSED",
+        "LLM_JSON_PARSE_FAILED",
+        "LLM_LOW_CONFIDENCE",
     ],
     "PIPELINE": [
         "DOMAIN_ROUTER_START",
@@ -29,6 +31,11 @@ OBSERVABILITY_GROUPS: dict[str, list[str]] = {
         "ENTITY_RESOLVED",
         "PENDING_INTERPRETATION_SAVED",
         "MULTI_EVENT_SPLIT_APPLIED",
+        "MULTI_EVENT_CHUNK_PROCESSED",
+        "FINANCIAL_MUTATION_RECORDED",
+        "FINANCIAL_MISMATCH",
+        "IDEMPOTENCY_COLLISION",
+        "RECONCILIATION_COMPLETED",
     ],
     "DB": [
         "DB_WRITE_SUCCESS",

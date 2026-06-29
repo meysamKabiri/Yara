@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import authenticated_user_id, get_current_user
 from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
-from app.core.observability_service import track_event, track_timed_event
+from app.core.observability_service import flush_queued_trace_events, track_event, track_timed_event
 from app.core.queue import get_queue
 from app.core.trace_context import get_trace_id
 from app.dependencies.database import DbSession
@@ -1297,6 +1297,20 @@ def process_natural_input(
             select(NaturalInputJob).where(NaturalInputJob.job_id == existing_raw_entry.job_id)
         )
         if existing_job is not None:
+            track_event(
+                db=db,
+                trace_id=existing_job.trace_id,
+                event_name="IDEMPOTENCY_COLLISION",
+                payload={
+                    "stage": "DB",
+                    "project_id": project_id,
+                    "job_id": existing_job.job_id,
+                    "idempotency_key": idempotency_key,
+                    "input_snapshot": payload.text,
+                    "output_snapshot": _natural_input_job_response(existing_job),
+                    "reason": "Duplicate natural input idempotency key reused existing job",
+                },
+            )
             return _natural_input_job_response(existing_job)
 
     job_id = str(uuid.uuid4())
@@ -1317,7 +1331,17 @@ def process_natural_input(
     )
     db.add(raw_entry)
     db.commit()
-    track_event(db=db, event_name="db.job_created", payload={"job_id": job_id, "project_id": project_id})
+    track_event(
+        db=db,
+        event_name="db.job_created",
+        payload={
+            "job_id": job_id,
+            "project_id": project_id,
+            "idempotency_key": idempotency_key,
+            "input_snapshot": payload.text,
+            "output_snapshot": {"job_id": job_id, "status": NaturalInputJobStatus.PENDING.value},
+        },
+    )
 
     queue = get_queue()
     try:
@@ -1337,7 +1361,16 @@ def process_natural_input(
             detail="Failed to enqueue natural input job",
         ) from exc
 
-    track_event(db=db, event_name="db.job_enqueued", payload={"job_id": job_id, "project_id": project_id})
+    track_event(
+        db=db,
+        event_name="db.job_enqueued",
+        payload={
+            "job_id": job_id,
+            "project_id": project_id,
+            "idempotency_key": idempotency_key,
+            "input_snapshot": payload.text,
+        },
+    )
     return _natural_input_job_response(job)
 
 
@@ -1671,6 +1704,7 @@ def confirm_pending_interpretation(
         result = _execute_pending_interpretation(db, interpretation, payload)
         interpretation.status = PendingInterpretationStatus.CONFIRMED
         db.commit()
+        flush_queued_trace_events(db)
         confirmation_duration_ms = round((perf_counter() - db_write_start) * 1000, 3)
         logger.info(
             "financial_confirmation_transaction_committed",

@@ -109,33 +109,67 @@ class DomainRouterService:
 
         if work_intent and financial_score == 0:
             result = self._result(DomainType.WORK, 0.9)
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if has_profile_update and financial_score == 0:
             result = self._result(DomainType.ENTITY_UPDATE, min(0.95, 0.75 + setup_score * 0.05))
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if financial_intent and financial_score > 0 and not self._has_explicit_setup_declaration(text):
             result = self._result(DomainType.FINANCIAL, min(0.95, 0.75 + financial_score * 0.05))
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if setup_score > 0 and financial_score > 0:
             result = self._result(DomainType.MIXED, 0.9)
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if financial_score > 0:
             result = self._result(DomainType.FINANCIAL, min(0.95, 0.75 + financial_score * 0.05))
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         result = self._result(DomainType.SETUP, min(0.95, 0.75 + max(setup_score, 1) * 0.05))
-        if db is not None:
-            track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+        self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
         return result
+
+    def _emit_route_event(
+        self,
+        db: Session | None,
+        start: float,
+        raw_user_text: str,
+        interpretation: dict[str, Any],
+        result: dict[str, Any],
+        setup_score: int,
+        financial_score: int,
+    ) -> None:
+        if db is None:
+            return
+        track_event(
+            db=db,
+            event_name="DOMAIN_ROUTED",
+            duration_ms=round((perf_counter() - start) * 1000, 3),
+            payload={
+                **result,
+                "stage": "ROUTER",
+                "input_snapshot": raw_user_text,
+                "output_snapshot": result,
+                "detected_domain": interpretation.get("intent"),
+                "final_domain": result.get("domain"),
+                "llm_decision": {
+                    "intent": interpretation.get("intent"),
+                    "action": interpretation.get("action") or interpretation.get("semantic_action"),
+                    "confidence": interpretation.get("confidence"),
+                    "reasoning_summary": interpretation.get("reasoning_summary"),
+                },
+                "confidence": result.get("confidence"),
+                "reasoning_summary": _route_reasoning(result, setup_score, financial_score),
+                "metadata": {
+                    "setup_score": setup_score,
+                    "financial_score": financial_score,
+                    "required_schema": result.get("required_schema"),
+                    "ui_mode": result.get("ui_mode"),
+                },
+            },
+        )
 
     def _setup_score(self, text: str, interpretation: dict[str, Any]) -> int:
         score = 0
@@ -262,3 +296,10 @@ class DomainRouterService:
 
     def _normalize(self, text: str) -> str:
         return " ".join((text or "").replace("\u200c", " ").lower().split())
+
+
+def _route_reasoning(result: dict[str, Any], setup_score: int, financial_score: int) -> str:
+    return (
+        f"Selected {result.get('domain')} with setup_score={setup_score} "
+        f"and financial_score={financial_score}."
+    )

@@ -1,6 +1,7 @@
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from app.core.event_tracker import track_event as _db_track_event
 from app.core.trace_context import get_trace_id
@@ -15,15 +16,23 @@ def track_event(
     payload: dict[str, Any] | None = None,
     duration_ms: float | None = None,
 ) -> dict[str, Any]:
-    event = _db_track_event(
-        db=db,
-        trace_id=trace_id,
-        event_name=event_name,
-        payload=payload,
-        duration_ms=duration_ms,
-    )
-    _publish(event)
-    return event
+    try:
+        event = _db_track_event(
+            db=db,
+            trace_id=trace_id,
+            event_name=event_name,
+            payload=payload,
+            duration_ms=duration_ms,
+        )
+        _publish(event)
+        return event
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug("observability_track_event_failed", exc_info=True)
+        return {}
 
 
 def track_timed_event(
@@ -57,6 +66,41 @@ def track_timed_event(
     )
     _publish(event)
     return result
+
+
+def queue_trace_event(
+    db,
+    *,
+    trace_id: str | None = None,
+    event_name: str | None = None,
+    payload: dict[str, Any] | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    queued = db.info.setdefault("queued_trace_events", [])
+    queued.append(
+        {
+            "trace_id": trace_id,
+            "event_name": event_name,
+            "payload": payload or {},
+            "duration_ms": duration_ms,
+        }
+    )
+
+
+def flush_queued_trace_events(db) -> list[dict[str, Any]]:
+    queued = list(db.info.pop("queued_trace_events", []))
+    emitted: list[dict[str, Any]] = []
+    for item in queued:
+        emitted.append(
+            track_event(
+                db=db,
+                trace_id=item.get("trace_id"),
+                event_name=item.get("event_name"),
+                payload=item.get("payload"),
+                duration_ms=item.get("duration_ms"),
+            )
+        )
+    return emitted
 
 
 def _publish(event: dict[str, Any]) -> None:

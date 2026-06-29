@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy import Enum as SqlEnum
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base, TimestampMixin
@@ -487,7 +488,10 @@ class TraceEvent(TimestampMixin, Base):
     event_group: Mapped[str] = mapped_column(String, nullable=False)
     event_index: Mapped[int] = mapped_column(Integer, nullable=False)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
-    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("ix_trace_events_trace_id_idx", "trace_id", "event_index"),
