@@ -31,6 +31,7 @@ ROLE_TOKEN_MAP: dict[str, str] = {
     "رنگ زن": "SKILLED_WORKER",
     "سرامیک کار": "SKILLED_WORKER",
     "جوشکار": "SKILLED_WORKER",
+    "ساده": "OTHER",
 }
 
 ROLE_PRIORITY = {
@@ -44,6 +45,7 @@ ROLE_PRIORITY = {
 CONTACT_TERMS = ("شماره تماس", "شماره موبایل", "موبایل", "تلفن")
 ACCOUNT_TERMS = ("شماره حساب", "شماره کارت", "حساب", "کارت", "شبا")
 VALUE_TERMS = ("دستمزد", "حقوق")
+MONEY_TERMS = ("تومان", "تومن", "ریال", "هزار", "میلیون", "میلیارد")
 ENTITY_NOISE_TERMS = ("کابینت کار", "گچ کار")
 FILLER_TERMS = (
     "است",
@@ -66,17 +68,30 @@ class NormalizedInput:
     financials: dict[str, int | str | None]
     facts: list[dict[str, Any]]
     clean_text: str
+    name_candidates: list[str]
+    role_candidates: list[dict[str, str]]
+    amount_candidates: list[int]
+    phone_candidates: list[str]
+    account_candidates: list[str]
+    separator_detected: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "clean_text": self.clean_text,
+            "name_candidates": self.name_candidates,
+            "role_candidates": self.role_candidates,
+            "amount_candidates": self.amount_candidates,
+            "phone_candidates": self.phone_candidates,
+            "account_candidates": self.account_candidates,
+            "separator_detected": self.separator_detected,
+            "facts": self.facts,
             "entities": self.entities,
             "financials": self.financials,
-            "facts": self.facts,
-            "clean_text": self.clean_text,
         }
 
 
 def normalize_user_input(raw_text: str) -> dict[str, Any]:
+    separator_detected = _has_separator(raw_text)
     clean_text = clean_text_layer(raw_text)
     normalized_text = normalize_tokens(clean_text)
     role_token, role = _extract_role(normalized_text)
@@ -88,6 +103,11 @@ def normalize_user_input(raw_text: str) -> dict[str, Any]:
         role_token=role_token if role not in {None, "PAYMENT"} else None,
         values=[phone, account_number, amount],
     )
+    name_candidates = [name] if name else []
+    role_candidates = _role_candidates(normalized_text)
+    amount_candidates = [amount] if amount is not None else []
+    phone_candidates = [phone] if phone else []
+    account_candidates = [account_number] if account_number else []
 
     entities: list[dict[str, Any]] = []
     if name:
@@ -118,6 +138,12 @@ def normalize_user_input(raw_text: str) -> dict[str, Any]:
         },
         facts=facts,
         clean_text=normalized_text,
+        name_candidates=name_candidates,
+        role_candidates=role_candidates,
+        amount_candidates=amount_candidates,
+        phone_candidates=phone_candidates,
+        account_candidates=account_candidates,
+        separator_detected=separator_detected,
     ).as_dict()
 
 
@@ -171,7 +197,7 @@ def clean_entity_name(value: str | None) -> str | None:
     name = _strip_values(name)
     for token in sorted((*ROLE_TOKEN_MAP.keys(), *ENTITY_NOISE_TERMS), key=len, reverse=True):
         name = name.replace(token, " ")
-    for filler in (*CONTACT_TERMS, *ACCOUNT_TERMS, *VALUE_TERMS, *FILLER_TERMS):
+    for filler in (*CONTACT_TERMS, *ACCOUNT_TERMS, *VALUE_TERMS, *MONEY_TERMS, *FILLER_TERMS):
         name = name.replace(filler, " ")
     name = re.sub(r"[^\u0600-\u06FF\s]", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -218,6 +244,24 @@ def _extract_role(text: str) -> tuple[str | None, str | None]:
     return max(detected, key=lambda item: (ROLE_PRIORITY.get(item[1], 0), len(item[0])))
 
 
+def _role_candidates(text: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    for token, role in sorted(ROLE_TOKEN_MAP.items(), key=lambda item: len(item[0]), reverse=True):
+        if role == "PAYMENT":
+            continue
+        if token in text.split() or token in text:
+            candidates.append({"token": token, "project_role": _contract_role(role)})
+    return candidates
+
+
+def _contract_role(role: str) -> str:
+    if role == "WORKER":
+        return "DAILY_WORKER"
+    if role in {"CLIENT", "VENDOR", "DAILY_WORKER", "SKILLED_WORKER", "OTHER"}:
+        return role
+    return "OTHER"
+
+
 def _extract_name(
     text: str,
     *,
@@ -242,7 +286,7 @@ def _extract_name_from_candidate(
 ) -> str | None:
     for term in sorted((*ROLE_TOKEN_MAP.keys(), *ENTITY_NOISE_TERMS), key=len, reverse=True):
         candidate = candidate.replace(term, " ")
-    for term in (*CONTACT_TERMS, *ACCOUNT_TERMS, *VALUE_TERMS):
+    for term in (*CONTACT_TERMS, *ACCOUNT_TERMS, *VALUE_TERMS, *MONEY_TERMS):
         candidate = candidate.replace(term, " ")
     for value in values:
         if value is not None:
@@ -306,3 +350,7 @@ def _last_persian_name_segment(value: str) -> str:
 
 def _has_any(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
+
+
+def _has_separator(text: str) -> bool:
+    return bool(re.search(r"[:：؛;،,\-_/|]", text or ""))

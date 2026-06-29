@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.core.observability_service import track_event, track_timed_event
 from app.core.trace_context import get_trace_id
-from app.services.input_normalizer import clean_entity_name
+from app.services.input_normalizer import clean_entity_name, normalize_user_input
+from app.services.llm_classification_contract import (
+    controlled_to_llm_v2_schema,
+    validate_controlled_classification,
+)
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.prompts.llm_v2_prompt import build_llm_v2_prompt
 
@@ -396,6 +400,10 @@ class LLMv2Interpreter:
         return self._coerce_single(value, raw_text)
 
     def _coerce_single(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
+        if self._is_controlled_contract_output(value):
+            normalized_input = normalize_user_input(raw_text)
+            classification = validate_controlled_classification(value, normalized_input)
+            value = controlled_to_llm_v2_schema(classification, raw_text)
         if _is_bare_entity(value):
             value = _wrap_bare_entity(value, raw_text)
         intent = value.get("intent")
@@ -482,6 +490,17 @@ class LLMv2Interpreter:
         if value.get("matched_text"):
             result["matched_text"] = value["matched_text"]
         return result
+
+    def _is_controlled_contract_output(self, value: dict[str, Any]) -> bool:
+        return any(
+            key in value
+            for key in (
+                "domain",
+                "entity_type",
+                "selected_name",
+                "financial_direction",
+            )
+        )
 
     def _action_for_intent(self, intent: Any) -> str:
         if intent == "SET_ROLE":
