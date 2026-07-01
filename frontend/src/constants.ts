@@ -1,4 +1,4 @@
-import type { FinancialDirection, PaymentType, WorkerType } from "./api";
+import type { FinancialDirection, PaymentType, RoleRegistryResponse, WorkerType } from "./api";
 
 export const ROLE_OPTIONS: Array<{ value: WorkerType; label: string }> = [
   { value: "CLIENT", label: "کارفرما" },
@@ -7,6 +7,15 @@ export const ROLE_OPTIONS: Array<{ value: WorkerType; label: string }> = [
   { value: "SKILLED_WORKER", label: "استادکار" },
   { value: "OTHER", label: "سایر" },
 ];
+
+export function applyRoleRegistry(registry: RoleRegistryResponse): void {
+  if (!registry.frontend_options.length) return;
+  ROLE_OPTIONS.splice(0, ROLE_OPTIONS.length, ...registry.frontend_options);
+}
+
+export function roleLabel(value: WorkerType | string | null | undefined): string {
+  return ROLE_OPTIONS.find((option) => option.value === value)?.label ?? "سایر";
+}
 
 export const PAYMENT_METHOD_OPTIONS: Array<{ value: PaymentType | ""; label: string }> = [
   { value: "", label: "انتخاب نشده" },

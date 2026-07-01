@@ -53,11 +53,12 @@ export function AiProcessingStatus({ jobState, error, onRetry, onClose }: AiProc
               {isDone && "تحلیل کامل شد"}
               {isFailed && "پردازش با خطا مواجه شد"}
             </h2>
-            <p>
-              {isProcessing && "پردازش ممکن است چند لحظه طول بکشد. لطفاً صفحه را نبندید."}
-              {isDone && "موارد استخراج‌شده آماده بررسی هستند"}
-              {isFailed && "امکان پردازش نوشته وجود نداشت"}
-            </p>
+            {!isProcessing && (
+              <p>
+                {isDone && "موارد استخراج‌شده آماده بررسی هستند"}
+                {isFailed && "امکان پردازش نوشته وجود نداشت"}
+              </p>
+            )}
           </div>
           {!isProcessing && (
             <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
