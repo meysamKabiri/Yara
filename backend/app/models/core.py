@@ -2,13 +2,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 import uuid
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, Uuid
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy import Enum as SqlEnum
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base, TimestampMixin
+
+LEGACY_OWNER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 class RawEntryStatus(StrEnum):
@@ -39,6 +42,7 @@ class ExtractedEventStatus(StrEnum):
 
 class PendingInterpretationStatus(StrEnum):
     PENDING = "PENDING"
+    CONFIRMING = "CONFIRMING"
     CONFIRMED = "CONFIRMED"
     EDITED = "EDITED"
     DISCARDED = "DISCARDED"
@@ -94,6 +98,30 @@ class WorkerStateRole(StrEnum):
     CLIENT = "CLIENT"
 
 
+class ReconciliationStatus(StrEnum):
+    OK = "OK"
+    DRIFT_DETECTED = "DRIFT_DETECTED"
+
+
+class ReconciliationEventStatus(StrEnum):
+    OK = "OK"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class InterpretationFeedbackErrorType(StrEnum):
+    WRONG_DOMAIN = "WRONG_DOMAIN"
+    WRONG_ENTITY = "WRONG_ENTITY"
+    WRONG_AMOUNT = "WRONG_AMOUNT"
+    WRONG_ROLE = "WRONG_ROLE"
+    MISSING_EXTRACTION = "MISSING_EXTRACTION"
+
+
+class InterpretationFeedbackSource(StrEnum):
+    USER_EDIT = "USER_EDIT"
+    SYSTEM_FLAG = "SYSTEM_FLAG"
+    RECONCILIATION = "RECONCILIATION"
+
+
 class HistoryChangeType(StrEnum):
     WORK = "WORK"
     PAYMENT = "PAYMENT"
@@ -103,12 +131,35 @@ class HistoryChangeType(StrEnum):
     NOTE = "NOTE"
 
 
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    projects: Mapped[list["Project"]] = relationship(back_populates="owner")
+
+
 class Project(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id"),
+        default=LEGACY_OWNER_ID,
+        nullable=False,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reconciliation_status: Mapped[ReconciliationStatus] = mapped_column(
+        SqlEnum(ReconciliationStatus, native_enum=False, length=30),
+        default=ReconciliationStatus.OK,
+        nullable=False,
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     raw_entries: Mapped[list["RawEntry"]] = relationship(back_populates="project")
+    owner: Mapped[User] = relationship(back_populates="projects")
     extracted_events: Mapped[list["ExtractedEvent"]] = relationship(back_populates="project")
     workers: Mapped[list["Worker"]] = relationship(back_populates="project")
     work_logs: Mapped[list["WorkLog"]] = relationship(back_populates="project")
@@ -126,11 +177,21 @@ class Project(TimestampMixin, Base):
         back_populates="project"
     )
     natural_input_jobs: Mapped[list["NaturalInputJob"]] = relationship(back_populates="project")
+    reconciliation_events: Mapped[list["ReconciliationEvent"]] = relationship(back_populates="project")
+    interpretation_feedback: Mapped[list["InterpretationFeedback"]] = relationship(
+        back_populates="project"
+    )
 
 
 class RawEntry(TimestampMixin, Base):
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_rawentry_project_idempotency_key"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[RawEntryStatus] = mapped_column(
         SqlEnum(RawEntryStatus, native_enum=False, length=20),
@@ -238,10 +299,38 @@ class WorkLog(TimestampMixin, Base):
     worker: Mapped[Worker] = relationship(back_populates="work_logs")
 
 
+class ProjectTask(TimestampMixin, Base):
+    __tablename__ = "project_task"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assignee_id: Mapped[int | None] = mapped_column(ForeignKey("worker.id"), nullable=True, index=True)
+    assignee_suggestion: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    suggestion_source: Mapped[str] = mapped_column(String(30), default="none", nullable=False)
+    assignment_status: Mapped[str] = mapped_column(String(30), default="unassigned", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_task_object: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(nullable=True)
+    due_date_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    due_date_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    project: Mapped[Project] = relationship()
+    assignee: Mapped[Worker | None] = relationship()
+
+
 class Invoice(TimestampMixin, Base):
+    __table_args__ = (
+        UniqueConstraint("source_pending_interpretation_id", name="uq_invoice_source_pending_interpretation"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
     vendor_id: Mapped[int] = mapped_column(ForeignKey("worker.id"), nullable=False, index=True)
+    source_pending_interpretation_id: Mapped[int | None] = mapped_column(ForeignKey("pendinginterpretation.id"), nullable=True, index=True)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[InvoiceStatus] = mapped_column(
@@ -261,9 +350,14 @@ class Invoice(TimestampMixin, Base):
 
 
 class Payment(TimestampMixin, Base):
+    __table_args__ = (
+        UniqueConstraint("source_pending_interpretation_id", name="uq_payment_source_pending_interpretation"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
     entity_id: Mapped[int] = mapped_column(ForeignKey("worker.id"), nullable=False, index=True)
+    source_pending_interpretation_id: Mapped[int | None] = mapped_column(ForeignKey("pendinginterpretation.id"), nullable=True, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     related_invoice_id: Mapped[int | None] = mapped_column(
         ForeignKey("invoice.id"),
@@ -359,6 +453,7 @@ class PendingInterpretation(TimestampMixin, Base):
     semantic_explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     structured_interpretation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    domain_route: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[PendingInterpretationStatus] = mapped_column(
         SqlEnum(PendingInterpretationStatus, native_enum=False, length=20),
         default=PendingInterpretationStatus.PENDING,
@@ -425,6 +520,39 @@ class FinancialMigrationLog(TimestampMixin, Base):
     project: Mapped[Project] = relationship(back_populates="financial_migration_logs")
 
 
+class InterpretationFeedback(TimestampMixin, Base):
+    __tablename__ = "interpretation_feedback"
+    __table_args__ = (
+        Index("ix_interpretation_feedback_project_id", "project_id"),
+        Index("ix_interpretation_feedback_trace_id", "trace_id"),
+        UniqueConstraint("submission_hash", name="uq_interpretation_feedback_submission_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    raw_input: Mapped[str] = mapped_column(Text, nullable=False)
+    system_output: Mapped[dict] = mapped_column(
+        JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+    )
+    user_final_state: Mapped[dict] = mapped_column(
+        JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+    )
+    error_types: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(postgresql.ARRAY(String), "postgresql"),
+        nullable=False,
+    )
+    correction_source: Mapped[InterpretationFeedbackSource] = mapped_column(
+        SqlEnum(InterpretationFeedbackSource, native_enum=False, length=30),
+        nullable=False,
+    )
+    submission_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="interpretation_feedback")
+
+
 class TraceEvent(TimestampMixin, Base):
     __tablename__ = "trace_events"
 
@@ -434,7 +562,10 @@ class TraceEvent(TimestampMixin, Base):
     event_group: Mapped[str] = mapped_column(String, nullable=False)
     event_index: Mapped[int] = mapped_column(Integer, nullable=False)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
-    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("ix_trace_events_trace_id_idx", "trace_id", "event_index"),
@@ -446,3 +577,30 @@ class TraceEventCounter(Base):
 
     trace_id: Mapped[str] = mapped_column(String, primary_key=True)
     counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ReconciliationEvent(TimestampMixin, Base):
+    __tablename__ = "reconciliation_event"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    status: Mapped[ReconciliationEventStatus] = mapped_column(
+        SqlEnum(ReconciliationEventStatus, native_enum=False, length=30),
+        nullable=False,
+    )
+    drift_detected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="reconciliation_events")
+
+
+class DeadLetterJob(TimestampMixin, Base):
+    __tablename__ = "dead_letter_job"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("project.id"), nullable=True, index=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_trace: Mapped[str] = mapped_column(Text, nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source: Mapped[str] = mapped_column(String(80), default="natural_input", nullable=False)

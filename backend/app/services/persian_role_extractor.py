@@ -13,6 +13,7 @@ Example:
 import re
 from dataclasses import dataclass
 
+from app.core.role_registry import ROLE_REGISTRY, registry_key_to_project_role
 from app.models.core import WorkerType
 from app.services.persian_money_engine import normalize_text
 
@@ -36,34 +37,14 @@ class ExtractedRole:
     confidence: float
 
 
-# Role phrases ordered by specificity (most specific first)
 ROLE_PHRASES: list[RolePhrase] = [
-    # Client/Owner roles
-    RolePhrase("مالک پروژه", WorkerType.CLIENT, priority=10),
-    RolePhrase("کارفرمای پروژه", WorkerType.CLIENT, priority=10),
-    RolePhrase("صاحب کار", WorkerType.CLIENT, priority=9),
-    RolePhrase("کارفرما", WorkerType.CLIENT, priority=8),
-    RolePhrase("کار فرما", WorkerType.CLIENT, priority=8),  # Handle separated form
-    # Skilled worker roles (trade-specific)
-    RolePhrase("جوشکار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("برقکار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("برق کار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("لوله کش", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("تاسیساتی", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("نقاش", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("کابینت کار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("کناف کار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("نما کار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("گچ کار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("رنگ کار", WorkerType.SKILLED_WORKER, priority=7),
-    RolePhrase("سرامیک کار", WorkerType.SKILLED_WORKER, priority=7),
-    # Vendor roles
-    RolePhrase("فروشنده", WorkerType.VENDOR, priority=6),
-    RolePhrase("مغازه دار", WorkerType.VENDOR, priority=6),
-    RolePhrase("وندور", WorkerType.VENDOR, priority=6),
-    # Generic worker roles (lower priority)
-    RolePhrase("کارگر ساده", WorkerType.DAILY_WORKER, priority=5),
-    RolePhrase("کارگر", WorkerType.DAILY_WORKER, priority=4),
+    RolePhrase(
+        phrase=str(label),
+        worker_type=WorkerType(registry_key_to_project_role(str(role["key"]))),
+        priority=int(role.get("priority", 0)),
+    )
+    for role in ROLE_REGISTRY
+    for label in role.get("labels", [])
 ]
 
 # Filler words to remove from extracted names
@@ -96,7 +77,7 @@ class PersianRoleExtractor:
     """
 
     def __init__(self) -> None:
-        self.role_phrases = sorted(ROLE_PHRASES, key=lambda r: r.priority, reverse=True)
+        self.role_phrases = sorted(ROLE_PHRASES, key=lambda r: (r.priority, len(r.phrase)), reverse=True)
         self.filler_words = FILLER_WORDS
 
     def extract(self, text: str) -> ExtractedRole | None:

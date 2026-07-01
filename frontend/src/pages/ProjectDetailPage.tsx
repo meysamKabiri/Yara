@@ -3,6 +3,7 @@ import {
   ArrowDownCircle,
   ArrowUpCircle,
   Banknote,
+  Calendar,
   CheckCircle2,
   ChevronRight,
   ChevronDown,
@@ -24,21 +25,20 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { api, HistoryEntry, Invoice, OperatingSummary, PayableCorrectionPayload, Payment, PaymentCorrectionPayload, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog, WorkLogCorrectionPayload } from "../api";
+import { api, HistoryEntry, Invoice, OperatingSummary, PayableCorrectionPayload, Payment, PaymentCorrectionPayload, PayableReportRow, PendingInterpretation, ProjectDetail, ProjectReportResponse, ProjectTask, RawEntry, Worker, WorkerReportRow, WorkerType, WorkLog, WorkLogCorrectionPayload } from "../api";
 import { PersianDatePicker } from "../components/PersianDatePicker";
+import { ROLE_OPTIONS, roleLabel } from "../constants";
 import { quickReportRange, ReportFilterKey } from "../utils/jalaliDate";
+import {
+  MONEY_UNIT_HELPER,
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+} from "../ui/betaSafety";
 
 type PersonKind = WorkerType | "OTHER";
-
-const ROLE_LABELS: Record<PersonKind, string> = {
-  CLIENT: "کارفرما",
-  DAILY_WORKER: "کارگر روزمزد",
-  SKILLED_WORKER: "نیروی متخصص",
-  VENDOR: "فروشنده / تامین‌کننده",
-  OTHER: "سایر",
-};
-
-const ROLE_ORDER: PersonKind[] = ["CLIENT", "SKILLED_WORKER", "DAILY_WORKER", "VENDOR", "OTHER"];
 
 const DIRECTION_LABELS: Record<string, string> = {
   INCOMING: "دریافتی",
@@ -62,7 +62,7 @@ const REPORT_PAYABLE_KIND_LABELS: Record<PayableReportRow["kind"], string> = {
   worker_labor: "کارکرد پرداخت‌نشده",
 };
 
-type TabKey = "summary" | "people" | "labor" | "financial" | "payables" | "notes" | "reports" | "pending";
+type TabKey = "summary" | "people" | "tasks" | "labor" | "financial" | "payables" | "notes" | "reports" | "pending";
 type CorrectionTarget =
   | { kind: "payment"; record: Payment }
   | { kind: "workLog"; record: WorkLog }
@@ -85,6 +85,7 @@ type ProjectDetailPageProps = {
   workers: Worker[];
   pendingInterpretations: PendingInterpretation[];
   workLogs: WorkLog[];
+  projectTasks: ProjectTask[];
   payments: Payment[];
   invoices: Invoice[];
   history: HistoryEntry[];
@@ -110,6 +111,7 @@ type ProjectDetailPageProps = {
   onCorrectNote: (projectId: number, noteId: number, payload: { text: string; correction_note?: string | null }) => Promise<void>;
   onVoidNote: (projectId: number, noteId: number, reason?: string | null) => Promise<void>;
   onUpdateProject: (projectId: number, payload: { name: string; description?: string | null }) => Promise<void>;
+  onOpenTasks: (projectId: number) => void;
   requestedTab?: string | null;
 };
 
@@ -172,16 +174,16 @@ type LaborStats = {
 };
 
 function PersonCard({ worker, laborStats, onOpen }: { worker: Worker; laborStats?: LaborStats; onOpen: (workerId: number) => void }) {
-  const roleLabel = ROLE_LABELS[personKind(worker)] ?? ROLE_LABELS.OTHER;
+  const displayRole = roleLabel(personKind(worker));
   const showLabor = worker.type === "DAILY_WORKER" && laborStats && (laborStats.totalDays > 0 || laborStats.totalCost > 0 || laborStats.paidOut > 0);
   return (
     <button className="visibility-person-card clickable-card" type="button" onClick={() => onOpen(worker.id)}>
       <div className="vpc-head">
         <strong>{worker.name}</strong>
-        <mark className="role-pill">{roleLabel}</mark>
+        <mark className="role-pill">{displayRole}</mark>
       </div>
       <div className="vpc-detail-list">
-        <span>نقش: {roleLabel}</span>
+        <span>نقش: {displayRole}</span>
         {worker.role_detail && <span>تخصص/توضیح: {worker.role_detail}</span>}
       </div>
       <div className="vpc-meta">
@@ -295,7 +297,7 @@ function WorkLogGroupCard({ worker, logs, laborStats, onEditLog, onVoidLog }: { 
       <div className="worker-labor-head">
         <div>
           <strong>{worker.name}</strong>
-          <span>{ROLE_LABELS[personKind(worker)] ?? "کارگر"}</span>
+          <span>{roleLabel(personKind(worker))}</span>
         </div>
         <mark className="role-pill">{worker.daily_rate ? `دستمزد: ${money(worker.daily_rate)}` : "دستمزد ثبت نشده"}</mark>
       </div>
@@ -357,9 +359,9 @@ function PersonDetailDrawer({
       <aside className="person-drawer" onClick={(event) => event.stopPropagation()}>
         <header className="drawer-header">
           <div>
-            <span className="eyebrow">{ROLE_LABELS[kind] ?? "فرد"}</span>
+            <span className="eyebrow">{roleLabel(kind)}</span>
             <h2>{worker.name}</h2>
-            <p>{worker.role_detail || ROLE_LABELS[kind] || "نقش ثبت نشده"}</p>
+            <p>{worker.role_detail || roleLabel(kind) || "نقش ثبت نشده"}</p>
           </div>
           <button className="modal-close icon-button" type="button" onClick={onClose} aria-label="بستن">
             <X aria-hidden="true" size={20} />
@@ -586,12 +588,20 @@ function EmptyState({ children }: { children: string }) {
 }
 
 function pendingTitle(pi: PendingInterpretation): string {
-  if (pi.semantic_action === "SET_ROLE") return "تعریف طرف حساب";
-  if (pi.semantic_action === "WORK_LOG" || pi.canonical_event_type === "WORK_EVENT") return "ثبت کارکرد کارگر";
-  if (pi.semantic_action === "ENTITY_UPDATE" || pi.domain_route?.domain === "ENTITY_UPDATE") return "به‌روزرسانی اطلاعات فرد";
-  if (pi.canonical_event_type === "FINANCIAL_EVENT") return "ثبت مالی";
-  if (pi.semantic_action === "NOTE") return "یادداشت";
-  return "مورد در انتظار بررسی";
+  switch (pi.domain_route?.ui_mode) {
+    case "SetupModal":
+      return "تعریف طرف حساب";
+    case "TaskDashboard":
+      return "ثبت کارکرد کارگر";
+    case "EntityUpdateModal":
+      return "به‌روزرسانی اطلاعات فرد";
+    case "FinancialModal":
+      return "ثبت مالی";
+    case "NoteFallback":
+      return "یادداشت";
+    default:
+      return "مورد در انتظار بررسی";
+  }
 }
 
 function pendingEntityName(pi: PendingInterpretation): string | null {
@@ -813,12 +823,12 @@ function PayableReportSection({ payables }: { payables: PayableReportRow[] }) {
 
 export function ProjectDetailPage({
   project, summary, workers, pendingInterpretations, workLogs, payments, invoices, history,
-  rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
+  projectTasks, rawEntries, text, examples, isLoading, onBack, onTextChange, onSubmit,
   onVoicePlaceholder, onAttachPlaceholder, successMessage,
   onConfirmPending, onEditPending, onDiscardPending, requestedTab,
   onCorrectPayment, onVoidPayment, onCorrectWorkLog, onVoidWorkLog,
   onCorrectPayable, onVoidPayable, onCorrectNote, onVoidNote,
-  onUpdateProject,
+  onUpdateProject, onOpenTasks,
 }: ProjectDetailPageProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("summary");
   const [selectedPersonId, setSelectedPersonId] = useState<number | null>(null);
@@ -828,7 +838,7 @@ export function ProjectDetailPage({
 
   useEffect(() => {
     if (!requestedTab) return;
-    if (["summary", "people", "labor", "financial", "payables", "notes", "reports", "pending"].includes(requestedTab)) {
+    if (["summary", "people", "tasks", "labor", "financial", "payables", "notes", "reports", "pending"].includes(requestedTab)) {
       setActiveTab(requestedTab as TabKey);
     }
   }, [requestedTab]);
@@ -926,6 +936,7 @@ export function ProjectDetailPage({
   const tabs = [
     { key: "summary" as TabKey, label: "خلاصه" },
     { key: "people" as TabKey, label: "افراد", count: workers.length },
+    { key: "tasks" as TabKey, label: "کارها", count: projectTasks.length },
     { key: "labor" as TabKey, label: "کارکرد کارگران", count: activeWorkLogs.length },
     { key: "financial" as TabKey, label: "مالی", count: activePayments.length },
     { key: "payables" as TabKey, label: "بدهی‌ها / چک‌ها", count: openInvoices.length + deferredPayments.length },
@@ -1027,6 +1038,8 @@ export function ProjectDetailPage({
             <button className="primary-action send-button" type="submit" disabled={isLoading || !text.trim()} aria-label="ارسال"><Send aria-hidden="true" size={20} /></button>
           </div>
         </form>
+        <p className="input-helper-text">{MONEY_UNIT_HELPER}</p>
+        {looksLikeMultiAction(text) && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
       </section>
 
       {successMessage && <div className="success-feedback"><CheckCircle2 aria-hidden="true" size={18} />{successMessage}</div>}
@@ -1099,14 +1112,14 @@ export function ProjectDetailPage({
             <EmptyState>هیچ شخصی ثبت نشده است</EmptyState>
           ) : (
             <div className="visibility-people-grid">
-              {ROLE_ORDER.map((role) => {
+              {ROLE_OPTIONS.map((option) => option.value).map((role) => {
                 const roleWorkers = groupedPeople[role];
                 if (!roleWorkers || roleWorkers.length === 0) return null;
                 return (
                   <div key={role} className="visibility-role-group">
                     <h4 className="role-group-title">
                       <Users size={14} />
-                      {ROLE_LABELS[role] ?? "سایر"}
+                      {roleLabel(role)}
                       <mark>{roleWorkers.length.toLocaleString("fa-IR")}</mark>
                     </h4>
                     <div className="visibility-people-list">
@@ -1117,6 +1130,21 @@ export function ProjectDetailPage({
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === "tasks" && (
+        <div className="detail-tab-content">
+          <div className="section-title compact-title">
+            <div>
+              <span className="eyebrow">کارهای پروژه</span>
+              <h2>کارهای قابل پیگیری</h2>
+            </div>
+            <button className="primary-action with-icon" type="button" onClick={() => onOpenTasks(project.id)}>
+              Go to Tasks
+            </button>
+          </div>
+          <EmptyState>مدیریت کارها فقط از مسیر یکپارچه پروژه انجام می‌شود.</EmptyState>
         </div>
       )}
 
@@ -1290,6 +1318,8 @@ export function ProjectDetailPage({
                     <mark className="role-pill">در انتظار تایید</mark>
                   </div>
                   <p className="pending-text">{pi.matched_input_text || pi.description || pi.raw_input_text}</p>
+                  {isUncertainInterpretation(pi) && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+                  {looksLikeMultiAction(interpretationText(pi)) && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
                   <div className="vpc-meta">
                     {pendingEntityName(pi) && <span>فرد: {pendingEntityName(pi)}</span>}
                     {pi.extracted_amount && <span>مبلغ: {money(pi.extracted_amount)}</span>}

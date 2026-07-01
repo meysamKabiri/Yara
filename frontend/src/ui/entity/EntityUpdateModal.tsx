@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { api } from "../../api";
-import { ROLE_OPTIONS } from "../../constants";
+import { ROLE_OPTIONS, roleLabel } from "../../constants";
 import { buildConfirmPayload, exactEntityIdByName, getCandidateEntityId, normalizeNeedsSelection, type NeedsSelectionCandidate } from "../confirmPayload";
+import {
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+  moneyWithUnit,
+} from "../betaSafety";
 
 const CREATE_NEW_SENTINEL = -1;
 
@@ -11,12 +19,7 @@ function firstEntity(interpretation: PendingInterpretation): Record<string, unkn
 }
 
 function roleLabelFromType(type: string | undefined): string {
-  if (type === "CLIENT") return "کارفرما";
-  if (type === "VENDOR") return "فروشنده";
-  if (type === "SKILLED_WORKER") return "استادکار";
-  if (type === "DAILY_WORKER") return "کارگر";
-  if (type === "OTHER") return "سایر";
-  return "فرد";
+  return type ? roleLabel(type) : "فرد";
 }
 
 function createNewLabel(name: string, role: string): string {
@@ -92,6 +95,14 @@ function detectVariant(entity: Record<string, unknown>, updates: Record<string, 
   if (hasDailyRate) return "DAILY_RATE_UPDATE";
   if (hasNotes) return "NOTES_UPDATE";
   return "GENERAL_PROFILE_UPDATE";
+}
+
+function variantLabel(variant: EntityUpdateVariant): string {
+  if (variant === "PHONE_UPDATE") return "ثبت شماره تماس";
+  if (variant === "ACCOUNT_UPDATE") return "ثبت شماره حساب";
+  if (variant === "DAILY_RATE_UPDATE") return "ثبت دستمزد روزانه";
+  if (variant === "NOTES_UPDATE") return "ثبت توضیحات پروفایل";
+  return "به‌روزرسانی اطلاعات فرد";
 }
 
 function shouldShowRoleDetail(type: string): boolean {
@@ -278,6 +289,8 @@ export function EntityUpdateModal({
   const isRoleReadOnly = variant !== "GENERAL_PROFILE_UPDATE" && !isCreatingNew;
 
   const isFieldUpdate = hasPhoneUpdate || hasAccountUpdate || hasDailyRateUpdate || hasNotesUpdate;
+  const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
+  const uncertaintyWarning = isUncertainInterpretation(interpretation);
 
   function buildFieldUpdatesFromForm(): Record<string, unknown> {
     const result: Record<string, unknown> = {};
@@ -444,10 +457,21 @@ export function EntityUpdateModal({
           <header className="modal-header">
             <div>
               <h3 className="modal-title">به‌روزرسانی اطلاعات فرد</h3>
-              <p>تغییرات فرد را بررسی کنید.</p>
+              <p>برداشت سیستم از متن شما: تغییرات فرد را بررسی کنید.</p>
             </div>
           </header>
           <section className="approval-section modal-body">
+            {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+            {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
+            <div className="confirmation-summary">
+              <p><strong>نوع عملیات:</strong> {variantLabel(variant)}</p>
+              <p><strong>شخص / طرف حساب:</strong> {name || extractedName || "نامشخص"}</p>
+              {showPhone && <p><strong>شماره تماس:</strong> {phone || "ثبت نشده"}</p>}
+              {showAccount && <p><strong>شماره حساب:</strong> {accountNumber || "ثبت نشده"}</p>}
+              {showDailyRate && <p><strong>مبلغ:</strong> {moneyWithUnit(dailyRate)}</p>}
+              <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+              <p>قبل از تأیید می‌توانید فرد، نام و فیلدهای نمایش‌داده‌شده را اصلاح کنید.</p>
+            </div>
             <div className="setup-edit-list">
               <div className="setup-edit-row">
                 <label>
@@ -540,6 +564,7 @@ export function EntityUpdateModal({
                   <label>
                     دستمزد روزانه
                     <input value={dailyRate} onChange={(e) => setDailyRate(e.target.value)} />
+                    <small>مبالغ به تومان ثبت می‌شوند.</small>
                   </label>
                 )}
                 {showNotes && (
@@ -563,10 +588,10 @@ export function EntityUpdateModal({
                 onClick={handleConfirm}
                 disabled={isLoadingActive || !canConfirm}
               >
-                تایید و ثبت
+                تأیید و ثبت
               </button>
               <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoadingActive}>
-                نادیده گرفتن
+                رد کردن
               </button>
             </div>
           </div>

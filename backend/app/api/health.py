@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.schemas.health import HealthCheck
 
 logger = logging.getLogger(__name__)
@@ -24,18 +25,33 @@ def _check_database() -> str:
 
 def _check_redis() -> str:
     try:
-        from app.core.queue import get_redis_connection
+        from redis import Redis
 
-        get_redis_connection().ping()
+        conn = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
+        conn.ping()
+        conn.close()
         return "ok"
     except Exception as e:
         logger.debug("Health check — redis unavailable: %s", e)
         return "unavailable"
 
 
+def _check_worker() -> str:
+    try:
+        from redis import Redis
+        from rq import Worker
+
+        conn = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
+        workers = Worker.all(connection=conn)
+        conn.close()
+        return "ok" if workers else "unavailable"
+    except Exception as e:
+        logger.debug("Health check — worker unavailable: %s", e)
+        return "unavailable"
+
+
 def _check_ollama() -> str:
     try:
-        import json
         import urllib.request
 
         from app.services.llm_v2_interpreter import OLLAMA_BASE_URL
@@ -55,11 +71,17 @@ def _check_ollama() -> str:
 def health_check() -> HealthCheck:
     db_status = _check_database()
     redis_status = _check_redis()
+    worker_status = _check_worker()
     ollama_status = _check_ollama()
-    overall = "ok" if db_status == "ok" else "degraded"
+    overall = (
+        "ok"
+        if db_status == "ok" and redis_status == "ok" and worker_status == "ok"
+        else "degraded"
+    )
     return HealthCheck(
         status=overall,
         database=db_status,
         redis=redis_status,
+        worker=worker_status,
         ollama=ollama_status,
     )

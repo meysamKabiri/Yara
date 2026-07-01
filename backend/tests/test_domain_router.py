@@ -49,7 +49,7 @@ def test_project_account_deposit_with_client_word_routes_to_financial_schema() -
     assert route["ui_mode"] == "FinancialModal"
 
 
-def test_work_log_routes_to_work_schema_even_with_daily_rate_snapshot() -> None:
+def test_work_log_routes_to_task_schema_even_with_daily_rate_snapshot() -> None:
     route = DomainRouterService().route(
         "اکبر امروز کار کرد",
         {
@@ -60,9 +60,37 @@ def test_work_log_routes_to_work_schema_even_with_daily_rate_snapshot() -> None:
         },
     )
 
-    assert route["domain"] == DomainType.WORK.value
-    assert route["required_schema"] == "work_log_confirmation"
-    assert route["ui_mode"] == "WorkLogModal"
+    assert route["domain"] == DomainType.TASK.value
+    assert route["required_schema"] == "task_confirmation"
+    assert route["ui_mode"] == "TaskDashboard"
+
+
+def test_task_execution_sentence_routes_to_task_without_llm_interpretation() -> None:
+    route = DomainRouterService().route("امروز مش رحیم بیاد نخاله ها را جمع کنه")
+
+    assert route["domain"] == DomainType.TASK.value
+    assert route["required_schema"] == "task_confirmation"
+    assert route["ui_mode"] == "TaskDashboard"
+
+
+def test_work_semantic_action_is_never_setup() -> None:
+    route = DomainRouterService().route(
+        "مش رحیم کار نخاله ها را انجام بده",
+        {"semantic_action": "WORK", "intent": "SETUP"},
+    )
+
+    assert route["domain"] == DomainType.TASK.value
+    assert route["ui_mode"] == "TaskDashboard"
+
+
+def test_work_event_is_never_setup_even_with_worker_role_word() -> None:
+    route = DomainRouterService().route(
+        "امروز کارگر بیاد نخاله ها را جمع کنه",
+        {"canonical_event_type": "WORK_EVENT", "semantic_action": "SETUP"},
+    )
+
+    assert route["domain"] == DomainType.TASK.value
+    assert route["ui_mode"] == "TaskDashboard"
 
 
 def test_profile_update_fields_route_to_entity_update_schema_even_if_action_is_set_role() -> None:

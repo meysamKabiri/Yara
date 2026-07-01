@@ -9,8 +9,14 @@ from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
+from app.core.domain_fallback_policy import DEFAULT_FALLBACK, is_strong_setup_signal
 from app.core.observability_service import track_event, track_timed_event
 from app.core.trace_context import get_trace_id
+from app.services.input_normalizer import clean_entity_name, normalize_user_input
+from app.services.llm_classification_contract import (
+    controlled_to_llm_v2_schema,
+    validate_controlled_classification,
+)
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 from app.services.prompts.llm_v2_prompt import build_llm_v2_prompt
 
@@ -132,7 +138,7 @@ def _wrap_bare_entity(value: dict, raw_text: str = "") -> dict:
     supported = {"name", "kind", "project_role", "role_detail", "phone", "account_number", "daily_rate", "notes", "field_updates"}
     clean = {k: v for k, v in value.items() if k in supported}
 
-    if _has_profile_fields(value):
+    if _has_profile_fields(value) and is_strong_setup_signal({"raw_text": raw_text, "interpretation": value}):
         return {
             "intent": "SETUP",
             "action": "UPDATE_ENTITY",
@@ -168,13 +174,30 @@ def _wrap_bare_entity(value: dict, raw_text: str = "") -> dict:
             "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
         }
 
+    project_role = str(value.get("project_role") or "").upper()
+    if is_strong_setup_signal({"raw_text": raw_text, "interpretation": value}) and (
+        value.get("role_detail") or project_role in {"CLIENT", "DAILY_WORKER", "SKILLED_WORKER", "VENDOR"}
+    ):
+        return {
+            "intent": "SET_ROLE",
+            "action": "SET_ROLE",
+            "entities": [clean],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": float(value.get("confidence", 0.8) or 0.8),
+            "ambiguity": bool(value.get("ambiguity")),
+            "missing_fields": [],
+            "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
+        }
+
     return {
-        "intent": "SET_ROLE",
-        "action": "SET_ROLE",
+        "intent": DEFAULT_FALLBACK,
+        "action": DEFAULT_FALLBACK,
         "entities": [clean],
         "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
         "work": {"quantity": None, "unit": None, "description": None},
-        "note": {"text": None},
+        "note": {"text": raw_text or None},
         "confidence": float(value.get("confidence", 0.8) or 0.8),
         "ambiguity": bool(value.get("ambiguity")),
         "missing_fields": [],
@@ -207,9 +230,24 @@ class LLMv2Interpreter:
             normalize_ms = (perf_counter() - normalize_start) * 1000
 
             _emit_event(db, "INTERPRETATION_NORMALIZED", {
+                "stage": "LLM",
+                "input_snapshot": raw_text,
+                "output_snapshot": result,
+                "normalized_result": result,
                 "semantic_action": result.get("action"),
                 "domain": result.get("intent"),
+                "confidence": result.get("confidence"),
+                "reasoning_summary": result.get("reasoning_summary"),
             }, duration_ms=normalize_ms)
+            if isinstance(result.get("confidence"), int | float) and result["confidence"] < 0.5:
+                _emit_event(db, "LLM_LOW_CONFIDENCE", {
+                    "stage": "LLM",
+                    "input_snapshot": raw_text,
+                    "output_snapshot": result,
+                    "domain": result.get("intent"),
+                    "confidence": result.get("confidence"),
+                    "reasoning_summary": result.get("reasoning_summary"),
+                })
 
             timings = {
                 "normalization_duration_ms": round(normalize_ms, 1),
@@ -217,18 +255,34 @@ class LLMv2Interpreter:
             }
             result["_timings"] = timings
             return result
-        except (OSError, TimeoutError, urllib.error.URLError, TypeError):
+        except (OSError, TimeoutError, urllib.error.URLError, TypeError, LLMOutputParseError) as exc:
+            _emit_event(db, "LLM_FAILED", {
+                "stage": "LLM",
+                "input_snapshot": raw_text,
+                "error_message": str(exc),
+                "failure_type": type(exc).__name__,
+            })
             return self._fallback(raw_text, "shadow interpreter failed")
 
     def _generate(self, raw_text: str, project_id: int, db: Session | None = None) -> Any:
         prompt, prompt_domain = build_llm_v2_prompt(raw_text, project_id)
         _emit_event(db, "LLM_REQUEST_STARTED", {
+            "stage": "LLM",
             "model": OLLAMA_MODEL,
             "timeout": OLLAMA_TIMEOUT_SECONDS,
             "num_predict": OLLAMA_NUM_PREDICT,
             "prompt_length": len(prompt),
+            "prompt": prompt,
             "raw_text_length": len(raw_text),
             "prompt_domain": prompt_domain,
+            "input_snapshot": prompt,
+            "metadata": {
+                "model": OLLAMA_MODEL,
+                "timeout": OLLAMA_TIMEOUT_SECONDS,
+                "num_predict": OLLAMA_NUM_PREDICT,
+                "temperature": OLLAMA_TEMPERATURE,
+                "prompt_domain": prompt_domain,
+            },
         })
         ollama_start = perf_counter()
 
@@ -275,22 +329,38 @@ class LLMv2Interpreter:
         thinking_text = str(ollama_body.get("thinking", ""))
         ollama_stats = _ollama_stats(ollama_body)
         _emit_event(db, "OLLAMA_RESPONSE_RECEIVED", {
+            "stage": "LLM",
             "model": OLLAMA_MODEL,
             "prompt_domain": prompt_domain,
             "prompt_length": len(prompt),
             "response_length": len(response_text),
             "thinking_length": len(thinking_text),
+            "raw_llm_output": response_text or thinking_text,
+            "output_snapshot": response_text or thinking_text,
             **ollama_stats,
         }, duration_ms=ollama_ms)
 
         parse_start = perf_counter()
-        parsed = self._parse_ollama_json(ollama_body)
+        try:
+            parsed = self._parse_ollama_json(ollama_body)
+        except LLMOutputParseError as exc:
+            _emit_event(db, "LLM_JSON_PARSE_FAILED", {
+                "stage": "LLM",
+                "raw_llm_output": response_text or thinking_text,
+                "output_snapshot": response_text or thinking_text,
+                "error_message": str(exc),
+                "failure_type": type(exc).__name__,
+            }, duration_ms=(perf_counter() - parse_start) * 1000)
+            raise
         parse_ms = (perf_counter() - parse_start) * 1000
 
         used_field = "response" if ollama_body.get("response") and str(ollama_body.get("response", "")).strip() else "thinking"
         _emit_event(db, "LLM_JSON_PARSED", {
+            "stage": "LLM",
             "keys_parsed": list(parsed.keys()) if isinstance(parsed, dict) else [],
             "used_response_field": used_field,
+            "parsed_json": parsed,
+            "output_snapshot": parsed,
         }, duration_ms=parse_ms)
 
         self._last_timings = {
@@ -348,6 +418,10 @@ class LLMv2Interpreter:
         return self._coerce_single(value, raw_text)
 
     def _coerce_single(self, value: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
+        if self._is_controlled_contract_output(value):
+            normalized_input = normalize_user_input(raw_text)
+            classification = validate_controlled_classification(value, normalized_input)
+            value = controlled_to_llm_v2_schema(classification, raw_text)
         if _is_bare_entity(value):
             value = _wrap_bare_entity(value, raw_text)
         intent = value.get("intent")
@@ -391,7 +465,7 @@ class LLMv2Interpreter:
                         entities[0]["project_role"] = "VENDOR"
 
         result = {
-            "intent": intent if intent in VALID_INTENTS else "NOTE",
+            "intent": intent if intent in VALID_INTENTS else DEFAULT_FALLBACK,
             "action": action if action in VALID_ACTIONS else self._action_for_intent(intent),
             "entities": entities,
             "financial": {
@@ -435,6 +509,17 @@ class LLMv2Interpreter:
             result["matched_text"] = value["matched_text"]
         return result
 
+    def _is_controlled_contract_output(self, value: dict[str, Any]) -> bool:
+        return any(
+            key in value
+            for key in (
+                "domain",
+                "entity_type",
+                "selected_name",
+                "financial_direction",
+            )
+        )
+
     def _action_for_intent(self, intent: Any) -> str:
         if intent == "SET_ROLE":
             return "SET_ROLE"
@@ -444,7 +529,7 @@ class LLMv2Interpreter:
             return "WORK_LOG"
         if intent == "FINANCIAL":
             return "PAYMENT_OUT"
-        return "NOTE"
+        return DEFAULT_FALLBACK
 
     def _entities(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):
@@ -453,8 +538,9 @@ class LLMv2Interpreter:
         for item in value:
             if not isinstance(item, dict):
                 continue
-            name = item.get("name")
-            if not isinstance(name, str) or not name.strip():
+            raw_name = str(item.get("name") or "").strip()
+            name = clean_entity_name(raw_name) or self._simple_safe_name(raw_name)
+            if not name:
                 continue
             kind = item.get("kind")
             project_role = item.get("project_role")
@@ -466,7 +552,7 @@ class LLMv2Interpreter:
             field_updates = item.get("field_updates")
             entities.append(
                 {
-                    "name": name.strip(),
+                    "name": name,
                     "kind": kind if kind in VALID_ENTITY_KINDS else "UNKNOWN",
                     "project_role": (
                         project_role if project_role in VALID_PROJECT_ROLES else "OTHER"
@@ -496,6 +582,12 @@ class LLMv2Interpreter:
                 }
             )
         return entities
+
+    def _simple_safe_name(self, value: str) -> str | None:
+        if not value or re.search(r"[:：؛;,\-_/|\d]", value):
+            return None
+        normalized = re.sub(r"\s+", " ", value).strip()
+        return normalized if normalized else None
 
     def _number_or_none(self, value: Any) -> int | float | None:
         if isinstance(value, bool) or not isinstance(value, int | float):
@@ -588,7 +680,7 @@ class LLMv2Interpreter:
         return max(candidates, key=len)
 
     def _phone_sequence(self, text: str) -> str | None:
-        match = re.search(r"09\d{9,12}", text)
+        match = re.search(r"09\d{5,12}", text)
         return match.group() if match is not None else None
 
     def _profile_update_name(self, text: str, values: list[str | None]) -> str | None:
@@ -608,8 +700,8 @@ class LLMv2Interpreter:
 
     def _fallback(self, raw_text: str, reason: str) -> dict[str, Any]:
         return {
-            "intent": "NOTE",
-            "action": "NOTE",
+            "intent": DEFAULT_FALLBACK,
+            "action": DEFAULT_FALLBACK,
             "entities": [],
             "financial": {
                 "amount": None, "direction": "NONE",

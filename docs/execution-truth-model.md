@@ -223,8 +223,8 @@ No financial or work tables are touched.
 
 | Transition | Trigger | Where |
 |------------|---------|-------|
-| `PENDING` → `PROCESSED` | After successful pipeline execution | `projects.py` natural-input handler |
-| `PENDING` → `FAILED` | Pipeline raises exception before raw entry status set | `projects.py` |
+| `PENDING` → `PROCESSED` | After successful pipeline execution | `natural_input_job.py` worker |
+| `PENDING` → `FAILED` | Pipeline raises exception before completion | `natural_input_job.py` worker |
 
 ### 2.3 PendingInterpretation Lifecycle
 
@@ -575,14 +575,72 @@ class ConfirmedFinancialInterpretation:
 
 ### 5.4 Idempotency
 
-The engine does **not** enforce idempotency keys. Duplicate confirmations of the same PendingInterpretation are prevented by the `CONFIRMED` status check at the API layer:
+The engine does **not** enforce natural-input idempotency keys. Those keys are enforced before the engine runs.
 
-```python
-if interpretation.status not in {PENDING, EDITED}:
-    raise HTTPException(status_code=409, detail="Interpretation is closed")
-```
+Natural input submission is idempotent at `POST /projects/{project_id}/natural-input`:
 
-### 5.5 Consistency Guarantees
+- The request accepts `idempotency_key`.
+- `rawentry` stores the key with `project_id`.
+- The database enforces `UNIQUE(project_id, idempotency_key)`.
+- A duplicate `(project_id, idempotency_key)` returns the existing `NaturalInputJob` response and does not create another `RawEntry` or enqueue another RQ job.
+
+Worker retry handling is idempotent for already-known jobs:
+
+- If `process_natural_input_job()` sees the job is already `DONE` or `FAILED`, it returns the stored job result/error and does not run extraction again.
+- A pending job is claimed with an atomic `UPDATE ... WHERE status = PENDING` before the pipeline runs. A parallel worker that loses that claim returns the current job state and does not process the input.
+- If an RQ retry sees a job that was already `RUNNING`, it first reuses existing pending interpretations for the same project and input text instead of creating another set.
+- `RawEntry.status` moves to `PROCESSED` only after a successful job and to `FAILED` only when the job fails.
+
+Duplicate confirmations of the same PendingInterpretation are prevented by the confirmation transaction:
+
+- The confirmation endpoint locks the `pendinginterpretation` row with `SELECT FOR UPDATE`.
+- The row is claimed as `CONFIRMING` inside the transaction and only becomes `CONFIRMED` at the final commit.
+- `payment.source_pending_interpretation_id` and `invoice.source_pending_interpretation_id` have unique constraints. If a database or test environment does not enforce row locks, the second financial insert still fails and returns `409`.
+- `ExecutionEngine` locks the target `workerstate` row with `SELECT FOR UPDATE` before balance math.
+- DB-backed observability events are not written from inside the uncommitted financial transaction; this prevents logging from committing partial financial state.
+
+#### Guarantees
+
+- The same natural input submission retried with the same key creates at most one `RawEntry` and one `NaturalInputJob`.
+- Fast client retries and duplicate HTTP submissions with the same key do not enqueue duplicate jobs.
+- Retrying a terminal worker job does not recreate `PendingInterpretation`, `Payment`, `Invoice`, `WorkLog`, or `HistoryEntry` rows.
+- Reconfirming an already closed interpretation returns `409` before financial writes, so balances and financial records change at most once per interpretation.
+- Payment/invoice writes created from confirmation are tied to the source `PendingInterpretation`, and the database rejects duplicate source writes.
+- Payment/invoice/worker_state/history writes for confirmation commit together. If history creation or any later step fails, the transaction rolls back and the transient `CONFIRMING` claim is restored to an open state.
+
+#### Not Yet Guaranteed
+
+- The retry reuse path for a recovered `RUNNING` job matches by project and raw input text because `PendingInterpretation` does not yet store `job_id` or `raw_entry_id`. This prevents the known retry duplicate path, but a future schema link from `PendingInterpretation` to `NaturalInputJob` would make the guarantee stricter and easier to audit.
+
+### 5.5 Reconciliation and Safety Monitoring
+
+Reconciliation is a read-only safety layer by default. It recomputes financial truth from source records and stores a review snapshot; it never silently overwrites balances, payments, invoices, work logs, or history.
+
+`financial_reconciliation_service.py` computes:
+
+- `expected_worker_balance` from non-voided payments, invoices, and financially relevant work logs.
+- `expected_project_balance` from incoming payments minus real outgoing payments.
+- `expected_payables` from open vendor invoices plus unpaid worker balances.
+- drift snapshots comparing recomputed values to `worker_state.financial_balance` and project-level totals.
+
+When drift is detected:
+
+- `project.reconciliation_status` becomes `DRIFT_DETECTED`.
+- a `reconciliation_event` row is written with status `NEEDS_REVIEW`.
+- the snapshot stores stored values, recomputed values, and differences for audit.
+- no automatic financial correction is applied in the MVP.
+
+Safety recovery:
+
+- failed natural-input jobs are copied to `dead_letter_job` with job id, payload, error trace, retry count, source, and timestamp.
+- `GET /admin/dlq-jobs` exposes failed jobs so worker failures are not silent.
+- `recover_stuck_confirming_interpretations()` finds stale `CONFIRMING` rows. If committed financial records exist, it marks them `CONFIRMED`; otherwise it rolls them back to `PENDING`.
+- `GET /admin/reconciliation-report/{project_id}` returns stored balances, recomputed balances, drift differences, and the last reconciliation timestamp.
+- `GET /admin/safety-metrics` reports processed financial events, drift events, DLQ count, current stuck `CONFIRMING` count, and duplicate-prevention count.
+
+**Guarantee**: The system is eventually consistent via reconciliation and review. Reconciliation detects silent drift and records evidence, but destructive correction remains an explicit future admin action.
+
+### 5.6 Consistency Guarantees
 
 ```
 Within a single db.commit() after ExecutionEngine runs:
@@ -595,7 +653,7 @@ Within a single db.commit() after ExecutionEngine runs:
 All or nothing: any failure before commit rolls back everything.
 ```
 
-### 5.6 Amount Handling
+### 5.7 Amount Handling
 
 ```python
 def _amount(self, value: Decimal | int | str | None) -> Decimal | None:

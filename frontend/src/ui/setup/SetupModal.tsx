@@ -1,7 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
-import { ROLE_OPTIONS } from "../../constants";
+import { ROLE_OPTIONS, roleLabel } from "../../constants";
 import type { SetupEntity } from "../../types/domain";
+import {
+  MULTI_ACTION_WARNING,
+  UNCERTAIN_INTERPRETATION_MESSAGE,
+  interpretationText,
+  isUncertainInterpretation,
+  looksLikeMultiAction,
+} from "../betaSafety";
 
 interface SetupModalProps {
   interpretation: PendingInterpretation;
@@ -70,6 +77,16 @@ export function SetupModal({
   const [roleDetail, setRoleDetail] = useState(defaultEntity.roleDetail ?? "");
   const [phone, setPhone] = useState(defaultEntity.phone ?? "");
   const [accountNumber, setAccountNumber] = useState(defaultEntity.accountNumber ?? "");
+  const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
+  const uncertaintyWarning = isUncertainInterpretation(interpretation);
+
+  useEffect(() => {
+    setName(defaultEntity.name);
+    setType(defaultEntity.type);
+    setRoleDetail(defaultEntity.roleDetail ?? "");
+    setPhone(defaultEntity.phone ?? "");
+    setAccountNumber(defaultEntity.accountNumber ?? "");
+  }, [interpretation.id, defaultEntity.name, defaultEntity.type, defaultEntity.roleDetail, defaultEntity.phone, defaultEntity.accountNumber]);
 
   function handleConfirm() {
     const entity: SetupEntity = {
@@ -89,10 +106,20 @@ export function SetupModal({
       <header className="modal-header">
         <div>
           <h3 className="modal-title">افزودن فرد به پروژه</h3>
-          <p>اطلاعات فرد را بررسی کنید.</p>
+          <p>برداشت سیستم از متن شما: اطلاعات فرد و نقش را بررسی کنید.</p>
         </div>
       </header>
       <section className="approval-section modal-body">
+        {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+        {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
+        <div className="confirmation-summary">
+          <p><strong>نوع عملیات:</strong> تعریف / به‌روزرسانی فرد در پروژه</p>
+          <p><strong>شخص / طرف حساب:</strong> {name || "نامشخص"}</p>
+          <p><strong>نقش / دسته:</strong> {roleLabel(type)}</p>
+          {roleDetail.trim() && <p><strong>توضیح نقش:</strong> {roleDetail}</p>}
+          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.</span></p>
+          <p>قبل از تأیید می‌توانید نام، نقش، شماره تماس و شماره حساب را اصلاح کنید.</p>
+        </div>
         <div className="setup-edit-list">
           <div className="setup-edit-row">
             <label>
@@ -136,10 +163,10 @@ export function SetupModal({
             onClick={handleConfirm}
             disabled={isLoading || !canConfirm}
           >
-            تایید
+            تأیید و ثبت
           </button>
           <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
-            حذف
+            رد کردن
           </button>
         </div>
       </div>

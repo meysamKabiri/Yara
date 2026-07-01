@@ -6,9 +6,11 @@ from fastapi.testclient import TestClient
 from app.core.job_event_bus import job_event_channel, publish_job_event
 from app.core.event_tracker import get_trace_events
 from app.jobs import natural_input_job
+from app.schemas.projects import PendingInterpretationRead
 from app.services.llm_v2_interpreter import LLMv2Interpreter
+from app.services.domain_router_service import DomainRouterService
 from tests.mocks.fake_queue import FakeQueue
-from tests.natural_input_helpers import run_enqueued_natural_input_job
+from tests.natural_input_helpers import natural_input_interpretation, run_enqueued_natural_input_job
 from app.models.core import (
     FinancialDirection,
     NaturalInputJob,
@@ -172,6 +174,158 @@ def test_account_number_update_uses_fast_path_without_llm(client: TestClient, mo
     assert fast_event["payload"]["skipped_llm"] is True
     assert "LLM_STARTED" not in event_names
     assert "OLLAMA_RESPONSE_RECEIVED" not in event_names
+
+
+def test_new_pending_interpretation_persists_domain_route(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("profile update fast path should not call LLM")
+
+    monkeypatch.setattr(LLMv2Interpreter, "interpret", fail_llm)
+
+    response = client.post(
+        f"/projects/{project['id']}/natural-input",
+        json={"text": "شماره حساب میثم 6037991234567890"},
+    )
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    run_enqueued_natural_input_job(client, job_id)
+
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        interpretation = db.query(PendingInterpretation).filter_by(project_id=project["id"]).one()
+        assert interpretation.domain_route == {
+            "domain": "ENTITY_UPDATE",
+            "confidence": 0.95,
+            "required_schema": "entity_update_confirmation",
+            "ui_mode": "EntityUpdateModal",
+        }
+
+
+def test_schema_returns_stored_domain_route_without_recomputing(client: TestClient, monkeypatch) -> None:
+    project = _project(client)
+    stored_route = {
+        "domain": "NOTE",
+        "confidence": 0.44,
+        "required_schema": "note_confirmation",
+        "ui_mode": "NoteFallback",
+    }
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        interpretation = PendingInterpretation(
+            project_id=project["id"],
+            raw_input_text="از علی 50 میلیون گرفتم",
+            canonical_event_type="FINANCIAL_EVENT",
+            semantic_action="PAYMENT",
+            extracted_amount="50000000",
+            domain_route=stored_route,
+            status=PendingInterpretationStatus.PENDING,
+        )
+        db.add(interpretation)
+        db.commit()
+        db.refresh(interpretation)
+
+        monkeypatch.setattr(
+            DomainRouterService,
+            "route",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stored route should not be recomputed")),
+        )
+
+        body = PendingInterpretationRead.model_validate(interpretation).model_dump(mode="json")
+
+    assert body["domain_route"] == stored_route
+
+
+def test_old_pending_interpretation_without_domain_route_uses_legacy_schema_fallback(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    project = _project(client)
+    legacy_route = {
+        "domain": "SETUP",
+        "confidence": 0.5,
+        "required_schema": "setup_confirmation",
+        "ui_mode": "SetupModal",
+    }
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        interpretation = PendingInterpretation(
+            project_id=project["id"],
+            raw_input_text="علی کارفرمای پروژه است",
+            canonical_event_type="SETUP_EVENT",
+            semantic_action="SET_ROLE",
+            status=PendingInterpretationStatus.PENDING,
+        )
+        db.add(interpretation)
+        db.commit()
+        db.refresh(interpretation)
+
+        monkeypatch.setattr(DomainRouterService, "route", lambda *args, **kwargs: legacy_route)
+
+        body = PendingInterpretationRead.model_validate(interpretation).model_dump(mode="json")
+
+    assert body["domain_route"] == legacy_route
+
+
+def test_stored_domain_route_is_immutable_when_semantic_action_changes(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    project = _project(client)
+    stored_route = {
+        "domain": "SETUP",
+        "confidence": 0.9,
+        "required_schema": "setup_confirmation",
+        "ui_mode": "SetupModal",
+    }
+    session_factory = client.app.state.testing_session_factory
+    with session_factory() as db:
+        interpretation = PendingInterpretation(
+            project_id=project["id"],
+            raw_input_text="علی کارفرمای پروژه است",
+            canonical_event_type="SETUP_EVENT",
+            semantic_action="SET_ROLE",
+            domain_route=stored_route,
+            status=PendingInterpretationStatus.PENDING,
+        )
+        db.add(interpretation)
+        db.commit()
+        db.refresh(interpretation)
+        interpretation.semantic_action = "PAYMENT"
+
+        monkeypatch.setattr(
+            DomainRouterService,
+            "route",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stored route should not be recomputed")),
+        )
+
+        body = PendingInterpretationRead.model_validate(interpretation).model_dump(mode="json")
+
+    assert body["semantic_action"] == "PAYMENT"
+    assert body["domain_route"] == stored_route
+
+
+def test_skilled_worker_project_join_semantics_align_with_router(client: TestClient) -> None:
+    project = _project(client)
+
+    for text in (
+        "رحمانی گچ کار به پروژه اضافه شد",
+        "کاظمی نقاش به پروژه اضافه شد",
+        "صادقی کابینت کار به پروژه اضافه شد",
+        "علی کارگر به پروژه اضافه شد",
+    ):
+        interpretation = natural_input_interpretation(client, project["id"], text)
+        explanation = interpretation["semantic_explanation"]
+
+        assert interpretation["canonical_event_type"] == "SETUP_EVENT"
+        assert interpretation["semantic_action"] == "SETUP"
+        assert interpretation["domain_route"]["domain"] == "SETUP"
+        assert explanation["event_type"] == "SETUP_EVENT"
+        assert explanation["semantic_action"] == "SETUP"
+        assert explanation["triggered_rule"] == "SETUP_SKILLED_WORKER_RULE"
+        assert explanation["confidence"] >= 0.8
 
 
 def test_phone_update_job_result_is_entity_update_when_llm_returns_note(client: TestClient, monkeypatch) -> None:

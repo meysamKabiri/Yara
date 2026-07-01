@@ -1,0 +1,36 @@
+name: staging
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  docker-staging-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: yara_staging_ci
+      IMAGE_TAG: staging-ci-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build staging stack
+        run: docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml build
+
+      - name: Start staging dependencies
+        run: docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml up -d postgres redis api worker
+
+      - name: Run backend E2E tests
+        run: docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml --profile test run --rm e2e
+
+      - name: Validate health endpoint
+        run: curl -fsS http://localhost:18080/health
+
+      - name: Tear down staging stack
+        if: always()
+        run: docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml down -v

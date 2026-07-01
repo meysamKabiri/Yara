@@ -13,6 +13,7 @@ import {
 import { FormEvent, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Invoice, OperatingSummary, Payment, Project, Worker, WorkerState, WorkLog, WorkerType } from "../api";
+import { ROLE_OPTIONS, roleLabel } from "../constants";
 
 type PeoplePageProps = {
   projects: Project[];
@@ -36,17 +37,6 @@ function money(value: string | number | null | undefined): string {
   return `${Number(value ?? 0).toLocaleString("fa-IR")} تومان`;
 }
 
-function roleTitle(type: PersonKind): string {
-  const labels: Record<PersonKind, string> = {
-    CLIENT: "کارفرما",
-    DAILY_WORKER: "کارگر ساده / روزمزد",
-    SKILLED_WORKER: "استادکار",
-    VENDOR: "فروشنده",
-    OTHER: "سایر",
-  };
-  return labels[type] ?? labels.OTHER;
-}
-
 function personKind(worker: Worker): PersonKind {
   if (["CLIENT", "DAILY_WORKER", "SKILLED_WORKER", "VENDOR"].includes(worker.type)) {
     return worker.type;
@@ -63,9 +53,7 @@ function personDisplayRole(worker: Worker): string {
   if ((kind === "SKILLED_WORKER" || kind === "OTHER") && worker.role_detail?.trim()) {
     return worker.role_detail.trim();
   }
-  if (kind === "SKILLED_WORKER") return "استادکار";
-  if (kind === "OTHER") return "سایر";
-  return roleTitle(kind);
+  return roleLabel(kind);
 }
 
 function paymentTotal(payments: Payment[], directions: Payment["direction"][]): number {
@@ -258,7 +246,7 @@ export function PeoplePage({
             <div className="section-title"><div><span className="eyebrow">ویرایش پروفایل</span><h2>اطلاعات فرد</h2></div></div>
             <div className="edit-grid">
               <label>نام<input value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label>
-              <label>نقش<select value={profileForm.type} onChange={(event) => setProfileForm({ ...profileForm, type: event.target.value as WorkerType })}><option value="CLIENT">کارفرما</option><option value="DAILY_WORKER">کارگر ساده</option><option value="SKILLED_WORKER">استادکار</option><option value="VENDOR">فروشنده</option><option value="OTHER">سایر</option></select></label>
+              <label>نقش<select value={profileForm.type} onChange={(event) => setProfileForm({ ...profileForm, type: event.target.value as WorkerType })}>{ROLE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
               {(profileForm.type === "SKILLED_WORKER" || profileForm.type === "OTHER") && <label>تخصص / توضیح نقش<input value={profileForm.role_detail} onChange={(event) => setProfileForm({ ...profileForm, role_detail: event.target.value })} /></label>}
               <label>شماره موبایل<input value={profileForm.phone} onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })} /></label>
               <label>شماره حساب<input value={profileForm.account_number} onChange={(event) => setProfileForm({ ...profileForm, account_number: event.target.value })} /></label>

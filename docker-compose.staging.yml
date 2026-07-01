@@ -1,0 +1,61 @@
+services:
+  postgres:
+    env_file: .env.staging
+    ports:
+      - "15432:5432"
+    volumes:
+      - yara_staging_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    env_file: .env.staging
+    ports:
+      - "16379:6379"
+    volumes:
+      - yara_staging_redis_data:/data
+
+  api:
+    env_file: .env.staging
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: "${INSTALL_DEV:?INSTALL_DEV is required}"
+    image: "${YARA_IMAGE:?YARA_IMAGE is required}:${IMAGE_TAG:?IMAGE_TAG is required}"
+    ports:
+      - "18080:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    env_file: .env.staging
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: "${INSTALL_DEV:?INSTALL_DEV is required}"
+    image: "${YARA_IMAGE:?YARA_IMAGE is required}:${IMAGE_TAG:?IMAGE_TAG is required}"
+    command: python -m app.scripts.start_worker
+
+  e2e:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: "true"
+    image: ${YARA_IMAGE:-yara-backend}:${IMAGE_TAG:-staging}-test
+    env_file: .env.staging
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    command: python -m pytest tests/e2e
+    profiles:
+      - test
+
+volumes:
+  yara_staging_postgres_data:
+  yara_staging_redis_data:

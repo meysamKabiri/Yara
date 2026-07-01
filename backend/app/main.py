@@ -3,7 +3,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin import router as admin_router
+from app.api.auth import router as auth_router
 from app.api.financial_migration import router as financial_migration_router
+from app.api.feedback import router as feedback_router
 from app.api.health import router as health_router
 from app.api.job_websockets import router as job_websockets_router
 from app.api.metrics import router as metrics_router
@@ -13,6 +16,7 @@ from app.api.shadow_analytics import router as shadow_analytics_router
 from app.api.shadow_migration import router as shadow_migration_router
 from app.api.traces import router as traces_router
 from app.core.config import settings
+from app.core.auth import AuthContextMiddleware
 from app.core.logger import configure_logging, log_event
 from app.core.trace_context import TraceContextMiddleware
 
@@ -47,10 +51,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(AuthContextMiddleware)
     app.add_middleware(TraceContextMiddleware)
+    app.include_router(auth_router)
+    app.include_router(admin_router)
     app.include_router(health_router)
     app.include_router(job_websockets_router)
     app.include_router(financial_migration_router)
+    app.include_router(feedback_router)
     app.include_router(metrics_router)
     app.include_router(projects_router)
     app.include_router(sandbox_router)

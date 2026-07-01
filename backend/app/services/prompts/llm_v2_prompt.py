@@ -1,17 +1,36 @@
-from app.services.persian_money_engine import normalize_text
+import json
 
+from app.core.role_registry import role_token_map
+from app.services.input_normalizer import normalize_user_input
+from app.services.llm_classification_contract import (
+    ALLOWED_ACTIONS,
+    ALLOWED_DOMAINS,
+    ALLOWED_ENTITY_TYPES,
+    ALLOWED_FINANCIAL_DIRECTIONS,
+    ALLOWED_PROJECT_ROLES,
+)
+from app.services.persian_money_engine import normalize_text
 
 QWEN_JSON_MODE_PREFIX = """/no_think
 Return only valid JSON. Do not include reasoning, explanations, markdown, or thinking text."""
 
 LLM_V2_SCHEMA = """Return compact minified JSON only.
-Single-event schema:
-{"intent":"SET_ROLE|SETUP|WORK|FINANCIAL|NOTE|DOCUMENT","action":"SET_ROLE|ADD_ENTITY|UPDATE_ENTITY|WORK_LOG|PAYMENT_IN|PAYMENT_OUT|PURCHASE_PAID|DEBT_CREATED|CHECK_PAYMENT|NOTE","matched_text":"exact source span","entities":[{"name":"string","kind":"PERSON|COMPANY|UNKNOWN","project_role":"CLIENT|DAILY_WORKER|SKILLED_WORKER|VENDOR|OTHER","role_detail":null,"phone":null,"account_number":null,"daily_rate":null,"notes":null,"field_updates":null}],"financial":{"amount":null,"direction":"IN|OUT|NONE","payment_method":null,"due_date_text":null},"work":{"quantity":null,"unit":null,"description":null},"note":{"text":null},"confidence":0.9,"ambiguity":false,"missing_fields":[],"reasoning_summary":"short"}"""
+Controlled classification schema:
+{"domain":"SETUP|FINANCIAL|WORK|CONTACT|ACCOUNT|NOTE|OTHER","action":"CREATE_OR_UPDATE_PROFILE|UPDATE_PHONE|UPDATE_ACCOUNT|REGISTER_PAYMENT|REGISTER_INVOICE|REGISTER_WORK_LOG|ADD_NOTE|OTHER","entity_type":"PERSON|COMPANY|UNKNOWN","project_role":"CLIENT|VENDOR|DAILY_WORKER|SKILLED_WORKER|OTHER","selected_name":null,"role_detail":null,"financial_direction":"INCOMING|OUTGOING|NONE|UNKNOWN","amount":null,"phone":null,"account_number":null,"confidence":0.9}"""
 
 FINANCIAL_SCHEMA = """Return one compact JSON object with only these keys:
 {"intent":"FINANCIAL","action":"PAYMENT_IN|PAYMENT_OUT|PURCHASE_PAID|DEBT_CREATED|CHECK_PAYMENT","entities":[{"name":"string","project_role":"CLIENT|VENDOR|OTHER"}],"financial":{"amount":number,"direction":"IN|OUT","payment_method":"CASH|BANK_TRANSFER|CHECK|OTHER|null"}}"""
 
-COMMON_RULES = """Rules: preserve Persian names; amounts are تومان numbers (5 میلیون=5000000); use only listed enum values; no prose."""
+COMMON_RULES = """Rules:
+- Use only listed enum values.
+- You are NOT allowed to invent enum values.
+- You are NOT allowed to invent person names.
+- Prefer selected_name from name_candidates.
+- Never include role words inside selected_name.
+- If uncertain, return OTHER instead of guessing.
+- Keep role_detail separate from selected_name.
+- No prose."""
+STRUCTURED_INPUT_RULES = """Input is normalized evidence JSON. raw_input is for reference only. Do not parse a raw sentence. Select names only from name_candidates unless no candidate exists. Classify domain/action from evidence, facts, and financials only."""
 
 FINANCIAL_RULES = """Financial focus:
 - خرید paid now => PURCHASE_PAID, OUT, VENDOR, CASH.
@@ -36,31 +55,50 @@ NOTE_RULES = """Note focus:
 
 
 def build_llm_v2_prompt(raw_text: str, project_id: int) -> tuple[str, str]:
-    domain = detect_prompt_domain(raw_text)
-    schema = FINANCIAL_SCHEMA if domain == "financial" else LLM_V2_SCHEMA
+    structured_input = normalize_user_input(raw_text)
+    domain = detect_prompt_domain(raw_text, structured_input)
+    schema = LLM_V2_SCHEMA
     prompt = "\n".join(
         part
         for part in [
             QWEN_JSON_MODE_PREFIX,
-            "Extract from a Persian contractor note. Omit optional null fields.",
+            "Classify a normalized contractor input using the controlled classification contract.",
             schema,
+            "Allowed domain values: " + ", ".join(sorted(ALLOWED_DOMAINS)),
+            "Allowed action values: " + ", ".join(sorted(ALLOWED_ACTIONS)),
+            "Allowed entity_type values: " + ", ".join(sorted(ALLOWED_ENTITY_TYPES)),
+            "Allowed project_role values: " + ", ".join(sorted(ALLOWED_PROJECT_ROLES)),
+            "Allowed financial_direction values: " + ", ".join(sorted(ALLOWED_FINANCIAL_DIRECTIONS)),
             COMMON_RULES,
+            STRUCTURED_INPUT_RULES,
             _domain_rules(domain),
             f"Project ID: {project_id}",
-            f"Note: {raw_text}",
+            f"raw_input for reference only: {raw_text}",
+            "Normalized input JSON:",
+            json.dumps(structured_input, ensure_ascii=False, separators=(",", ":")),
         ]
         if part
     )
     return prompt, domain
 
 
-def detect_prompt_domain(raw_text: str) -> str:
+def detect_prompt_domain(raw_text: str, structured_input: dict | None = None) -> str:
+    structured_input = structured_input or normalize_user_input(raw_text)
+    facts = structured_input.get("facts") or []
+    financials = structured_input.get("financials") or {}
+    if any(isinstance(fact, dict) and fact.get("type") == "AMOUNT" for fact in facts):
+        return "setup"
+    if isinstance(financials, dict) and financials.get("amount") is not None:
+        return "financial"
+    if any(isinstance(fact, dict) and fact.get("type") in {"PHONE", "ACCOUNT_NUMBER", "ROLE_TOKEN"} for fact in facts):
+        return "setup"
     normalized = normalize_text(raw_text)
     if any(separator in normalized for separator in [".", "۔", "؛", "\n"]):
         return "multi"
     if _has_financial_signal(normalized):
         return "financial"
-    if any(term in normalized for term in ["شماره", "حساب", "کارت", "موبایل", "تلفن", "دستمزد", "روزی", "کارفرما", "مالک", "فروشنده", "کارگر", "جوشکار"]):
+    setup_terms = ["شماره", "حساب", "کارت", "موبایل", "تلفن", "دستمزد", "روزی", *role_token_map().keys()]
+    if any(term in normalized for term in setup_terms):
         return "setup"
     if any(term in normalized for term in ["متر", "روز", "کار کرد", "کارکرد", "اومد", "آمد"]):
         return "work"

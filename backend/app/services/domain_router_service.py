@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import Any
 from sqlalchemy.orm import Session
 
+from app.core.domain_fallback_policy import resolve_fallback
 from app.core.observability_service import track_event, track_timed_event
 
 
@@ -20,11 +21,13 @@ def _field_updates_has_profile_keys(field_updates: dict) -> bool:
 
 
 class DomainType(StrEnum):
+    TASK = "TASK"
     SETUP = "SETUP"
     FINANCIAL = "FINANCIAL"
     WORK = "WORK"
     MIXED = "MIXED"
     ENTITY_UPDATE = "ENTITY_UPDATE"
+    NOTE = "NOTE"
 
 
 class DomainRouterService:
@@ -36,12 +39,14 @@ class DomainRouterService:
 
     SETUP_SCHEMA = "setup_confirmation"
     FINANCIAL_SCHEMA = "financial_confirmation"
+    TASK_SCHEMA = "task_confirmation"
     WORK_SCHEMA = "work_log_confirmation"
     MIXED_SCHEMA = "split_confirmation"
     ENTITY_UPDATE_SCHEMA = "entity_update_confirmation"
 
     SETUP_UI = "SetupModal"
     FINANCIAL_UI = "FinancialModal"
+    TASK_UI = "TaskDashboard"
     WORK_UI = "WorkLogModal"
     MIXED_UI = "SplitFlow"
     ENTITY_UPDATE_UI = "EntityUpdateModal"
@@ -87,6 +92,19 @@ class DomainRouterService:
         "gereft",
         "kharid",
     )
+    _TASK_ACTION_PATTERNS = (
+        "بیاد",
+        "بیا",
+        "انجام بده",
+        "انجام بدهد",
+        "جمع کنه",
+        "جمع کند",
+        "جوش بده",
+        "جوش بدهد",
+        "کار کنه",
+        "کمک کنه",
+    )
+    _TIME_HINT_PATTERNS = ("امروز", "فردا", "پس فردا")
 
     def route(self, raw_user_text: str, llm_interpretation: dict[str, Any] | None = None, db: Session | None = None) -> dict[str, Any]:
         if db is None:
@@ -107,35 +125,73 @@ class DomainRouterService:
         financial_intent = self._has_financial_intent(interpretation)
         work_intent = self._has_work_intent(interpretation)
 
-        if work_intent and financial_score == 0:
-            result = self._result(DomainType.WORK, 0.9)
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+        if work_intent or self._has_task_execution_text(text):
+            result = self._result(DomainType.TASK, 0.95)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if has_profile_update and financial_score == 0:
             result = self._result(DomainType.ENTITY_UPDATE, min(0.95, 0.75 + setup_score * 0.05))
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if financial_intent and financial_score > 0 and not self._has_explicit_setup_declaration(text):
             result = self._result(DomainType.FINANCIAL, min(0.95, 0.75 + financial_score * 0.05))
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if setup_score > 0 and financial_score > 0:
             result = self._result(DomainType.MIXED, 0.9)
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
         if financial_score > 0:
             result = self._result(DomainType.FINANCIAL, min(0.95, 0.75 + financial_score * 0.05))
-            if db is not None:
-                track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
             return result
-        result = self._result(DomainType.SETUP, min(0.95, 0.75 + max(setup_score, 1) * 0.05))
-        if db is not None:
-            track_event(db=db, event_name="DOMAIN_ROUTED", duration_ms=round((perf_counter() - start) * 1000, 3), payload=result)
+        if setup_score > 0 and self._has_explicit_setup_declaration(text):
+            result = self._result(DomainType.SETUP, min(0.95, 0.75 + setup_score * 0.05))
+            self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
+            return result
+        result = self._result(DomainType(resolve_fallback(context={"raw_text": raw_user_text, "interpretation": interpretation})), 0.5)
+        self._emit_route_event(db, start, raw_user_text, interpretation, result, setup_score, financial_score)
         return result
+
+    def _emit_route_event(
+        self,
+        db: Session | None,
+        start: float,
+        raw_user_text: str,
+        interpretation: dict[str, Any],
+        result: dict[str, Any],
+        setup_score: int,
+        financial_score: int,
+    ) -> None:
+        if db is None:
+            return
+        track_event(
+            db=db,
+            event_name="DOMAIN_ROUTED",
+            duration_ms=round((perf_counter() - start) * 1000, 3),
+            payload={
+                **result,
+                "stage": "ROUTER",
+                "input_snapshot": raw_user_text,
+                "output_snapshot": result,
+                "detected_domain": interpretation.get("intent"),
+                "final_domain": result.get("domain"),
+                "llm_decision": {
+                    "intent": interpretation.get("intent"),
+                    "action": interpretation.get("action") or interpretation.get("semantic_action"),
+                    "confidence": interpretation.get("confidence"),
+                    "reasoning_summary": interpretation.get("reasoning_summary"),
+                },
+                "confidence": result.get("confidence"),
+                "reasoning_summary": _route_reasoning(result, setup_score, financial_score),
+                "metadata": {
+                    "setup_score": setup_score,
+                    "financial_score": financial_score,
+                    "required_schema": result.get("required_schema"),
+                    "ui_mode": result.get("ui_mode"),
+                },
+            },
+        )
 
     def _setup_score(self, text: str, interpretation: dict[str, Any]) -> int:
         score = 0
@@ -205,10 +261,26 @@ class DomainRouterService:
     def _has_work_intent(self, interpretation: dict[str, Any]) -> bool:
         action = str(interpretation.get("action") or interpretation.get("semantic_action") or "").upper()
         intent = str(interpretation.get("intent") or "").upper()
-        if action == "WORK_LOG" or intent == "WORK":
+        event_type = str(
+            interpretation.get("canonical_event_type")
+            or interpretation.get("event_type")
+            or interpretation.get("type")
+            or ""
+        ).upper()
+        if action in {"WORK", "WORK_LOG", "DAILY_WORK", "REGISTER_WORK_LOG"}:
+            return True
+        if intent in {"WORK", "WORK_EVENT", "TASK"} or event_type == "WORK_EVENT":
             return True
         work = interpretation.get("work")
         return isinstance(work, dict) and work.get("quantity") is not None
+
+    def _has_task_execution_text(self, text: str) -> bool:
+        has_action = any(pattern in text for pattern in self._TASK_ACTION_PATTERNS)
+        if has_action:
+            return True
+        return any(pattern in text for pattern in self._TIME_HINT_PATTERNS) and any(
+            term in text for term in ("کار", "نخاله", "جمع", "جوش", "کمک", "بیاد")
+        )
 
     def _has_explicit_setup_declaration(self, text: str) -> bool:
         declaration_terms = (
@@ -216,7 +288,11 @@ class DomainRouterService:
             "کارفرما است",
             "کارگر پروژه است",
             "به پروژه اضافه",
+            "اضافه",
             "اضافه شد",
+            "به عنوان",
+            "نقش",
+            "تخصیص داده شد",
             "شماره تماس",
             "شماره موبایل",
             "شماره حساب",
@@ -239,6 +315,13 @@ class DomainRouterService:
                 "required_schema": self.FINANCIAL_SCHEMA,
                 "ui_mode": self.FINANCIAL_UI,
             }
+        if domain == DomainType.TASK:
+            return {
+                "domain": domain.value,
+                "confidence": confidence,
+                "required_schema": self.TASK_SCHEMA,
+                "ui_mode": self.TASK_UI,
+            }
         if domain == DomainType.WORK:
             return {
                 "domain": domain.value,
@@ -253,6 +336,13 @@ class DomainRouterService:
                 "required_schema": self.MIXED_SCHEMA,
                 "ui_mode": self.MIXED_UI,
             }
+        if domain == DomainType.NOTE:
+            return {
+                "domain": domain.value,
+                "confidence": confidence,
+                "required_schema": "note_confirmation",
+                "ui_mode": "NoteFallback",
+            }
         return {
             "domain": domain.value,
             "confidence": confidence,
@@ -261,4 +351,11 @@ class DomainRouterService:
         }
 
     def _normalize(self, text: str) -> str:
-        return " ".join((text or "").replace("\u200c", " ").lower().split())
+        return " ".join((text or "").replace("\u200c", " ").replace("ي", "ی").replace("ك", "ک").lower().split())
+
+
+def _route_reasoning(result: dict[str, Any], setup_score: int, financial_score: int) -> str:
+    return (
+        f"Selected {result.get('domain')} with setup_score={setup_score} "
+        f"and financial_score={financial_score}."
+    )

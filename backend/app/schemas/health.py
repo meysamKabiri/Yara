@@ -5,4 +5,5 @@ class HealthCheck(BaseModel):
     status: str
     database: str = "unavailable"
     redis: str = "unavailable"
+    worker: str = "unavailable"
     ollama: str = "unavailable"

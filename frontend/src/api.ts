@@ -1,3 +1,5 @@
+import { AUTH_TOKEN_KEY } from "./features/auth/authApi";
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 /* =========================================================
@@ -116,6 +118,19 @@ export type WorkerType =
   | "CLIENT"
   | "OTHER";
 
+export type RoleRegistryEntry = {
+  key: string;
+  labels: string[];
+  category: string;
+  worker_type: WorkerType;
+  priority: number;
+};
+
+export type RoleRegistryResponse = {
+  roles: RoleRegistryEntry[];
+  frontend_options: Array<{ value: WorkerType; label: string }>;
+};
+
 export type WorkUnit = "meter" | "day" | "item" | "project" | "custom";
 export type PaymentType = "CASH" | "BANK_TRANSFER" | "CHECK" | "OTHER";
 export type FinancialDirection = "INCOMING" | "OUTGOING" | "DEBT" | "DEFERRED";
@@ -225,6 +240,96 @@ export type WorkLogCorrectionPayload = Partial<{
   description: string | null;
   correction_note: string | null;
 }>;
+
+export type TaskAssignmentSuggestion = {
+  suggested_person: {
+    id: number;
+    name: string;
+    role?: WorkerType;
+    role_detail?: string | null;
+    confidence: number;
+  } | null;
+  source: "name_match" | "role_match" | "recent_assignment" | "none";
+  candidates: Array<{
+    id: number;
+    name: string;
+    role?: WorkerType;
+    role_detail?: string | null;
+    confidence: number;
+  }>;
+};
+
+export type ProjectTask = {
+  id: number;
+  project_id: number;
+  title: string;
+  description: string | null;
+  raw_text: string | null;
+  assignee_id: number | null;
+  assignee_suggestion: TaskAssignmentSuggestion | null;
+  suggestion_source: string;
+  assignment_status: "unassigned" | "suggested" | "confirmed";
+  status: "PENDING" | "CONFIRMED" | string;
+  confidence: number | null;
+  final_task_object?: FinalTaskObject | null;
+  due_date: string | null;
+  due_date_confidence: number | null;
+  due_date_source: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProjectTaskCreatePayload = {
+  title: string;
+  raw_text?: string | null;
+  extracted_actor?: string | null;
+  assign_to_person?: boolean;
+  assignee_id?: number | null;
+  due_date?: string | null;
+};
+
+export type ProjectTaskUpdatePayload = Partial<{
+  status: "PENDING" | "CONFIRMED" | "COMPLETED" | string;
+  assignee_id: number | null;
+  due_date: string | null;
+}>;
+
+export type ProjectTaskCreateResponse = {
+  final_task_object?: Record<string, unknown> | null;
+  task_id?: number | null;
+  task: ProjectTask;
+  assignment_suggestion: TaskAssignmentSuggestion;
+  interpretations?: Array<Record<string, unknown>>;
+  interpretations_deprecated?: boolean;
+};
+
+export type FinalTaskObject = {
+  title?: string | null;
+  description?: string | null;
+  domain?: "TASK" | "FINANCIAL" | "SETUP" | "NOTE" | string;
+  ui_mode?: "TaskDashboard" | string | null;
+  assignee?: {
+    id?: number | null;
+    name?: string | null;
+    confidence?: number;
+    source?: string;
+  } | null;
+  due_date?: string | {
+    value?: string | null;
+    hint?: string | null;
+    confidence?: number;
+    source?: string | null;
+  } | null;
+  due_date_source?: string | null;
+  due_date_confidence?: number | null;
+  confidence?: number | null;
+  flags?: {
+    needs_user_confirmation?: boolean;
+    low_confidence_time?: boolean;
+    ambiguous_assignment?: boolean;
+  } | null;
+  context?: Record<string, unknown>;
+};
 
 export type PayableCorrectionPayload = Partial<{
   vendor_id: number;
@@ -361,10 +466,10 @@ export type PendingInterpretation = {
   confidence: number | null;
   structured_interpretation: Record<string, unknown> | null;
   domain_route: {
-    domain: "SETUP" | "FINANCIAL" | "WORK" | "ENTITY_UPDATE" | "MIXED";
+    domain: "SETUP" | "FINANCIAL" | "WORK" | "TASK" | "ENTITY_UPDATE" | "MIXED" | "NOTE";
     confidence: number;
-    required_schema: "setup_confirmation" | "entity_update_confirmation" | "financial_confirmation" | "split_confirmation";
-    ui_mode: "SetupModal" | "EntityUpdateModal" | "FinancialModal" | "SplitFlow";
+    required_schema: "setup_confirmation" | "entity_update_confirmation" | "financial_confirmation" | "split_confirmation" | "task_confirmation" | "note_confirmation";
+    ui_mode: "SetupModal" | "EntityUpdateModal" | "FinancialModal" | "SplitFlow" | "TaskDashboard" | "NoteFallback";
   } | null;
   status: PendingInterpretationStatus;
   created_at: string;
@@ -399,6 +504,22 @@ export type EntityResolutionResult = {
 };
 
 export type PendingInterpretationConfirmResult = NaturalInputResult | EntityResolutionResult;
+
+export type InterpretationFeedbackPayload = {
+  trace_id?: string | null;
+  project_id: number;
+  raw_input: string;
+  system_output: Record<string, unknown>;
+  user_final_state: Record<string, unknown>;
+  correction_source?: "USER_EDIT" | "SYSTEM_FLAG" | "RECONCILIATION";
+};
+
+export type InterpretationFeedback = InterpretationFeedbackPayload & {
+  id: string;
+  error_types: Array<"WRONG_DOMAIN" | "WRONG_ENTITY" | "WRONG_AMOUNT" | "WRONG_ROLE" | "MISSING_EXTRACTION">;
+  created_at: string;
+  updated_at: string;
+};
 
 export type NaturalInputResult = {
   raw_entry_id: number | null;
@@ -539,9 +660,11 @@ export function normalizeMetricTraceEvent(raw: unknown, index = 0): MetricTraceE
 ========================================================= */
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     },
     ...options,
@@ -574,6 +697,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 ========================================================= */
 
 export const api = {
+  getRoleRegistry: () => request<RoleRegistryResponse>("/role-registry"),
+
   listProjects: () => request<Project[]>("/projects"),
 
   createProject: (name: string) =>
@@ -635,6 +760,12 @@ export const api = {
       method: "POST",
     }),
 
+  submitInterpretationFeedback: (payload: InterpretationFeedbackPayload) =>
+    request<InterpretationFeedback>("/feedback/interpretation", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   listWorkers: (projectId: number) =>
     request<Worker[]>(`/projects/${projectId}/workers`),
 
@@ -658,6 +789,27 @@ export const api = {
 
   listWorkLogs: (projectId: number) =>
     request<WorkLog[]>(`/projects/${projectId}/work-logs`),
+
+  listProjectTasks: (projectId: number) =>
+    request<ProjectTask[]>(`/projects/${projectId}/tasks`),
+
+  suggestTaskAssignee: (projectId: number, payload: Pick<ProjectTaskCreatePayload, "title" | "raw_text" | "extracted_actor">) =>
+    request<TaskAssignmentSuggestion>(`/projects/${projectId}/tasks/suggest`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  createProjectTask: (projectId: number, payload: ProjectTaskCreatePayload) =>
+    request<ProjectTaskCreateResponse>(`/projects/${projectId}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateProjectTask: (taskId: number, payload: ProjectTaskUpdatePayload) =>
+    request<ProjectTask>(`/tasks/${taskId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
 
   createWorkLog: (projectId: number, payload: { worker_id: number; task_name: string; unit: WorkUnit; quantity: string; rate_per_unit?: string | null; description?: string | null }) =>
     request<WorkLog>(`/projects/${projectId}/work-logs`, {
@@ -771,10 +923,10 @@ export const api = {
     return events.map((event, index) => normalizeTraceEvent(event, index));
   },
 
-  processNaturalInput: (projectId: number, text: string) =>
+  processNaturalInput: (projectId: number, text: string, idempotencyKey?: string) =>
     request<NaturalInputJobRecord>(`/projects/${projectId}/natural-input`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, idempotency_key: idempotencyKey }),
     }),
 
   updatePendingInterpretation: (id: number, payload: PendingInterpretationUpdate) =>

@@ -10,13 +10,24 @@ from enum import StrEnum
 from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.auth import authenticated_user_id, get_current_user
+from app.core.domain_fallback_policy import DEFAULT_FALLBACK
 from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
-from app.core.observability_service import track_event, track_timed_event
+from app.core.observability_service import flush_queued_trace_events, track_event, track_timed_event
+from app.core.pending_domain_route import resolve_pending_domain_route, stamp_pending_domain_route
 from app.core.queue import get_queue
+from app.core.role_registry import (
+    ROLE_REGISTRY,
+    frontend_role_options,
+    is_skilled_role_text,
+    registry_key_to_project_role,
+    role_label_for_worker_type,
+)
 from app.core.trace_context import get_trace_id
 from app.dependencies.database import DbSession
 from app.models.core import (
@@ -28,6 +39,7 @@ from app.models.core import (
     FinancialDirection,
     HistoryChangeType,
     HistoryEntry,
+    InterpretationFeedbackSource,
     Invoice,
     InvoiceStatus,
     Payment,
@@ -37,6 +49,7 @@ from app.models.core import (
     PendingInterpretation,
     PendingInterpretationStatus,
     Project,
+    ProjectTask,
     RawEntry,
     RawEntryStatus,
     Worker,
@@ -68,10 +81,17 @@ from app.schemas.projects import (
     ProjectDetailWithSummary,
     ProjectRead,
     ProjectSummary,
+    ProjectTaskCreate,
+    ProjectTaskCreateResponse,
+    ProjectTaskRead,
+    ProjectTaskSuggestRequest,
+    ProjectTaskUpdate,
+    ProjectTaskUpdateResponse,
     ProjectTotals,
     ProjectUpdate,
     RawEntryCreate,
     RawEntryRead,
+    TaskAssigneeSuggestion,
     NoteUpdate,
     VoidPayload,
     WorkerCreate,
@@ -97,6 +117,10 @@ from app.services.financial_summary import (
 from app.services.llm_extraction import extract, extract_graph  # noqa: F401
 from app.services.llm_v2_interpreter import LLMv2Interpreter  # noqa: F401
 from app.services.llm_v2_validator import resolve_candidates
+from app.services.interpretation_feedback import (
+    capture_pending_interpretation_feedback,
+    pending_interpretation_feedback_state,
+)
 from app.services.persian_money_engine import (
     normalize_text,
     parse_persian_money,
@@ -111,8 +135,10 @@ from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
 )
+from app.services.task_assignment_suggester import suggest_assignee
+from app.services.task_orchestrator import TaskOrchestrator
 
-router = APIRouter(tags=["projects"])
+router = APIRouter(tags=["projects"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger(__name__)
 
 # Feature flag controlling which financial write engine is primary.
@@ -134,16 +160,12 @@ def _get_project(db: DbSession, project_id: int) -> Project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
         )
+    if project.owner_id != authenticated_user_id():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Project access forbidden"
+        )
     return project
 
-
-ROLE_LABELS = {
-    WorkerType.CLIENT: "کارفرما",
-    WorkerType.DAILY_WORKER: "کارگر روزمزد",
-    WorkerType.SKILLED_WORKER: "نیروی متخصص",
-    WorkerType.VENDOR: "فروشنده / تامین‌کننده",
-    WorkerType.OTHER: "سایر",
-}
 
 DIRECTION_LABELS = {
     FinancialDirection.INCOMING: "دریافتی",
@@ -158,6 +180,14 @@ PAYMENT_TYPE_LABELS = {
     PaymentType.CHECK: "چک",
     PaymentType.OTHER: "سایر",
 }
+
+
+@router.get("/role-registry")
+def get_role_registry() -> dict[str, Any]:
+    return {
+        "roles": ROLE_REGISTRY,
+        "frontend_options": frontend_role_options(),
+    }
 
 PAYABLE_KIND_LABELS = {
     "vendor_payable": "بدهی فروشنده",
@@ -214,6 +244,7 @@ def _apply_datetime_range(statement, column, from_date: date | None, to_date: da
 
 
 def _get_raw_entry(db: DbSession, project_id: int, raw_entry_id: int) -> RawEntry:
+    _get_project(db, project_id)
     raw_entry = db.get(RawEntry, raw_entry_id)
     if raw_entry is None or raw_entry.project_id != project_id:
         raise HTTPException(
@@ -229,10 +260,12 @@ def _get_event(db: DbSession, event_id: int) -> ExtractedEvent:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Extracted event not found",
         )
+    _get_project(db, event.project_id)
     return event
 
 
 def _get_worker(db: DbSession, project_id: int, worker_id: int) -> Worker:
+    _get_project(db, project_id)
     worker = db.get(Worker, worker_id)
     if worker is None or worker.project_id != project_id:
         raise HTTPException(
@@ -247,6 +280,7 @@ def _get_work_log(db: DbSession, work_log_id: int) -> WorkLog:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Work log not found"
         )
+    _get_project(db, work_log.project_id)
     return work_log
 
 
@@ -260,6 +294,7 @@ def _get_project_work_log(db: DbSession, project_id: int, work_log_id: int) -> W
 
 
 def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
+    _get_project(db, project_id)
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.project_id != project_id:
         raise HTTPException(
@@ -269,6 +304,7 @@ def _get_invoice(db: DbSession, project_id: int, invoice_id: int) -> Invoice:
 
 
 def _get_payment(db: DbSession, project_id: int, payment_id: int) -> Payment:
+    _get_project(db, project_id)
     payment = db.get(Payment, payment_id)
     if payment is None or payment.project_id != project_id:
         raise HTTPException(
@@ -278,6 +314,7 @@ def _get_payment(db: DbSession, project_id: int, payment_id: int) -> Payment:
 
 
 def _get_note(db: DbSession, project_id: int, note_id: int) -> HistoryEntry:
+    _get_project(db, project_id)
     note = db.get(HistoryEntry, note_id)
     if note is None or note.project_id != project_id or note.change_type != HistoryChangeType.NOTE:
         raise HTTPException(
@@ -377,37 +414,8 @@ def _daily_worker_wage(worker: Worker | None, quantity: Decimal) -> Decimal | No
     return Decimal(str(quantity)) * Decimal(str(worker.daily_rate))
 
 
-SKILLED_ROLE_TERMS = {
-    "welder",
-    "electrician",
-    "plumber",
-    "painter",
-    "tiler",
-    "جوشکار",
-    "برقکار",
-    "گچ کار",
-    "گچکار",
-    "گچ‌کار",
-    "رنگ کار",
-    "رنگکار",
-    "رنگ‌کار",
-    "سرامیک کار",
-    "سرامیککار",
-    "سرامیک‌کار",
-    "لوله کش",
-    "لولهکش",
-    "لوله‌کش",
-    "سنگ کار",
-    "سنگکار",
-    "سنگ‌کار",
-}
-
-
 def _has_skilled_role(value: str | None) -> bool:
-    if not value:
-        return False
-    normalized = normalize_text(value)
-    return any(term in normalized for term in SKILLED_ROLE_TERMS)
+    return is_skilled_role_text(value)
 
 
 def _display_worker_type(worker: Worker) -> WorkerType:
@@ -447,17 +455,11 @@ def _refresh_invoice_status(db: DbSession, invoice: Invoice) -> None:
 
 
 def _role_to_worker_type(role: str | None, event_type: str | None = None) -> WorkerType:
-    if role == "CLIENT":
-        return WorkerType.CLIENT
-    if role == "VENDOR" or event_type == "INVOICE":
+    if event_type == "INVOICE":
         return WorkerType.VENDOR
-    if role in {"SKILLED", "SKILLED_WORKER"}:
-        return WorkerType.SKILLED_WORKER
-    if role == "OTHER":
-        return WorkerType.OTHER
-    if role == "WORKER" or event_type == "WORK_LOG":
+    if event_type == "WORK_LOG" and role is None:
         return WorkerType.DAILY_WORKER
-    return WorkerType.OTHER
+    return WorkerType(registry_key_to_project_role(role))
 
 
 def _worker_type_for_entity(
@@ -543,7 +545,7 @@ def _find_or_create_worker_state(
             WorkerState.project_id == project_id,
             WorkerState.name == normalized_name,
             WorkerState.role == role,
-        )
+        ).with_for_update()
     )
     if state is not None:
         return state
@@ -552,7 +554,7 @@ def _find_or_create_worker_state(
             select(WorkerState).where(
                 WorkerState.project_id == project_id,
                 WorkerState.name == normalized_name,
-            )
+            ).with_for_update()
         )
         if state is not None:
             return state
@@ -683,11 +685,17 @@ def _build_pending_interpretations(
                 event_graph["quantity_text"] = raw_event.get("quantity_text")
         effective_action = canonical_event.action
         effective_type = canonical_event.type
-        if effective_type == CanonicalEventType.NOTE and _graph_setup_entities(
-            event_graph
-        ):
-            effective_type = CanonicalEventType.SETUP
-            effective_action = "SETUP"
+        if effective_type == CanonicalEventType.NOTE:
+            routed_domain = DomainRouterService().route(
+                raw_text,
+                {
+                    "graph": event_graph,
+                    "entities": _graph_setup_entities(event_graph),
+                },
+            )
+            if routed_domain.get("domain") == "SETUP":
+                effective_type = CanonicalEventType.SETUP
+                effective_action = "SETUP"
         if (
             detect_purchase_payment(raw_text) is not None
             and effective_action == "PAYMENT"
@@ -754,7 +762,7 @@ def _build_pending_interpretations(
                 "project_role": resolved_entity.type.value,
             }
         interpretations.append(
-            PendingInterpretation(
+            stamp_pending_domain_route(PendingInterpretation(
                 project_id=project_id,
                 raw_input_text=raw_text,
                 canonical_event_type=effective_type.value,
@@ -790,7 +798,7 @@ def _build_pending_interpretations(
                 ),
                 confidence=canonical_event.metadata.get("confidence"),
                 status=PendingInterpretationStatus.PENDING,
-            )
+            ))
         )
     return interpretations
 
@@ -1076,7 +1084,7 @@ def _draft_description(graph: dict[str, Any], raw_text: str) -> str:
 
 def _fallback_note_event(text: str) -> dict[str, Any]:
     return {
-        "type": "NOTE",
+        "type": DEFAULT_FALLBACK,
         "amount_text": None,
         "counterparty_name": None,
         "counterparty_type": "UNKNOWN",
@@ -1181,7 +1189,11 @@ def _correction_value(value: Any) -> str | int | float | None:
     "/projects", response_model=ProjectRead, status_code=status.HTTP_201_CREATED
 )
 def create_project(payload: ProjectCreate, db: DbSession) -> Project:
-    project = Project(name=payload.name, description=payload.description)
+    project = Project(
+        name=payload.name,
+        description=payload.description,
+        owner_id=authenticated_user_id(),
+    )
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -1193,7 +1205,9 @@ def create_project(payload: ProjectCreate, db: DbSession) -> Project:
 def list_projects(db: DbSession) -> list[Project]:
     return list(
         db.scalars(
-            select(Project).order_by(Project.created_at.desc(), Project.id.desc())
+            select(Project)
+            .where(Project.owner_id == authenticated_user_id())
+            .order_by(Project.created_at.desc(), Project.id.desc())
         )
     )
 
@@ -1232,7 +1246,11 @@ def create_raw_entry(
     project_id: int, payload: RawEntryCreate, db: DbSession
 ) -> RawEntry:
     _get_project(db, project_id)
-    raw_entry = RawEntry(project_id=project_id, text=payload.text)
+    raw_entry = RawEntry(
+        project_id=project_id,
+        text=payload.text,
+        idempotency_key=payload.idempotency_key,
+    )
     db.add(raw_entry)
     db.commit()
     db.refresh(raw_entry)
@@ -1262,6 +1280,34 @@ def process_natural_input(
 ):
     _get_project(db, project_id)
 
+    idempotency_key = (payload.idempotency_key or "").strip() or str(uuid.uuid4())
+    existing_raw_entry = db.scalar(
+        select(RawEntry).where(
+            RawEntry.project_id == project_id,
+            RawEntry.idempotency_key == idempotency_key,
+        )
+    )
+    if existing_raw_entry is not None and existing_raw_entry.job_id:
+        existing_job = db.scalar(
+            select(NaturalInputJob).where(NaturalInputJob.job_id == existing_raw_entry.job_id)
+        )
+        if existing_job is not None:
+            track_event(
+                db=db,
+                trace_id=existing_job.trace_id,
+                event_name="IDEMPOTENCY_COLLISION",
+                payload={
+                    "stage": "DB",
+                    "project_id": project_id,
+                    "job_id": existing_job.job_id,
+                    "idempotency_key": idempotency_key,
+                    "input_snapshot": payload.text,
+                    "output_snapshot": _natural_input_job_response(existing_job),
+                    "reason": "Duplicate natural input idempotency key reused existing job",
+                },
+            )
+            return _natural_input_job_response(existing_job)
+
     job_id = str(uuid.uuid4())
     trace_id = get_trace_id() or str(uuid.uuid4())
     job = NaturalInputJob(
@@ -1271,8 +1317,26 @@ def process_natural_input(
         status=NaturalInputJobStatus.PENDING,
     )
     db.add(job)
+    raw_entry = RawEntry(
+        project_id=project_id,
+        job_id=job_id,
+        idempotency_key=idempotency_key,
+        text=payload.text,
+        status=RawEntryStatus.PENDING,
+    )
+    db.add(raw_entry)
     db.commit()
-    track_event(db=db, event_name="db.job_created", payload={"job_id": job_id, "project_id": project_id})
+    track_event(
+        db=db,
+        event_name="db.job_created",
+        payload={
+            "job_id": job_id,
+            "project_id": project_id,
+            "idempotency_key": idempotency_key,
+            "input_snapshot": payload.text,
+            "output_snapshot": {"job_id": job_id, "status": NaturalInputJobStatus.PENDING.value},
+        },
+    )
 
     queue = get_queue()
     try:
@@ -1292,19 +1356,34 @@ def process_natural_input(
             detail="Failed to enqueue natural input job",
         ) from exc
 
-    track_event(db=db, event_name="db.job_enqueued", payload={"job_id": job_id, "project_id": project_id})
-    return {"job_id": job_id, "status": "PENDING", "trace_id": trace_id}
+    track_event(
+        db=db,
+        event_name="db.job_enqueued",
+        payload={
+            "job_id": job_id,
+            "project_id": project_id,
+            "idempotency_key": idempotency_key,
+            "input_snapshot": payload.text,
+        },
+    )
+    return _natural_input_job_response(job)
 
 
 @router.get("/natural-input-jobs/{job_id}")
 def get_natural_input_job(job_id: str, db: DbSession) -> dict[str, Any]:
-    mark_stale_natural_input_jobs_failed(db)
     job = db.query(NaturalInputJob).filter(NaturalInputJob.job_id == job_id).one_or_none()
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    _get_project(db, job.project_id)
+    mark_stale_natural_input_jobs_failed(db, project_ids={job.project_id})
+    db.refresh(job)
+    return _natural_input_job_response(job)
+
+
+def _natural_input_job_response(job: NaturalInputJob) -> dict[str, Any]:
     response: dict[str, Any] = {
         "job_id": job.job_id,
         "status": job.status.value if hasattr(job.status, "value") else job.status,
@@ -1319,10 +1398,17 @@ def get_natural_input_job(job_id: str, db: DbSession) -> dict[str, Any]:
 
 @router.get("/jobs")
 def list_natural_input_jobs(db: DbSession) -> list[dict[str, Any]]:
-    mark_stale_natural_input_jobs_failed(db)
+    owner_id = authenticated_user_id()
+    owned_project_ids = set(
+        db.scalars(select(Project.id).where(Project.owner_id == owner_id))
+    )
+    mark_stale_natural_input_jobs_failed(db, project_ids=owned_project_ids)
     jobs = list(
         db.scalars(
-            select(NaturalInputJob).order_by(
+            select(NaturalInputJob)
+            .join(Project, NaturalInputJob.project_id == Project.id)
+            .where(Project.owner_id == owner_id)
+            .order_by(
                 NaturalInputJob.created_at.desc(),
                 NaturalInputJob.id.desc(),
             )
@@ -1339,6 +1425,7 @@ def get_natural_input_job_events(job_id: str, db: DbSession) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
+    _get_project(db, job.project_id)
     events = _job_persisted_events(job)
     if not events and job.trace_id is not None:
         from app.core.event_tracker import get_trace_events
@@ -1354,19 +1441,25 @@ def get_natural_input_job_events(job_id: str, db: DbSession) -> dict[str, Any]:
 def mark_stale_natural_input_jobs_failed(
     db: DbSession,
     max_age_minutes: int = 15,
+    project_ids: set[int] | None = None,
 ) -> int:
+    if project_ids is not None and not project_ids:
+        return 0
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=max_age_minutes)
+    statement = select(NaturalInputJob).where(
+        NaturalInputJob.status.in_(
+            [
+                NaturalInputJobStatus.PENDING,
+                NaturalInputJobStatus.RUNNING,
+            ]
+        ),
+        NaturalInputJob.updated_at < cutoff,
+    )
+    if project_ids is not None:
+        statement = statement.where(NaturalInputJob.project_id.in_(project_ids))
     stale_jobs = list(
         db.scalars(
-            select(NaturalInputJob).where(
-                NaturalInputJob.status.in_(
-                    [
-                        NaturalInputJobStatus.PENDING,
-                        NaturalInputJobStatus.RUNNING,
-                    ]
-                ),
-                NaturalInputJob.updated_at < cutoff,
-            )
+            statement
         )
     )
     for job in stale_jobs:
@@ -1501,10 +1594,18 @@ def update_pending_interpretation(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
         )
+    system_output = pending_interpretation_feedback_state(interpretation)
     update_data = payload.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(interpretation, key, value)
     interpretation.status = PendingInterpretationStatus.EDITED
+    capture_pending_interpretation_feedback(
+        db,
+        interpretation=interpretation,
+        system_output=system_output,
+        trace_id=get_trace_id(),
+        correction_source=InterpretationFeedbackSource.USER_EDIT,
+    )
     db.commit()
     db.refresh(interpretation)
     return interpretation
@@ -1543,11 +1644,22 @@ def confirm_pending_interpretation(
         payload = PendingInterpretationConfirm()
     try:
         _normalize_confirm_identity_payload(payload)
-        interpretation = _get_pending_interpretation(db, interpretation_id)
+        logger.info(
+            "financial_confirmation_transaction_started",
+            extra={"pending_interpretation_id": interpretation_id},
+        )
+        interpretation = _get_pending_interpretation_for_confirmation(db, interpretation_id)
         if interpretation.status not in {
             PendingInterpretationStatus.PENDING,
             PendingInterpretationStatus.EDITED,
         }:
+            logger.info(
+                "financial_confirmation_conflict",
+                extra={
+                    "pending_interpretation_id": interpretation_id,
+                    "status": interpretation.status.value,
+                },
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Interpretation is closed"
             )
@@ -1586,13 +1698,45 @@ def confirm_pending_interpretation(
                 role=resolution_result["role"],
                 requires_confirmation=False,
             )
-        result = _execute_pending_interpretation(db, interpretation, payload)
+        interpretation.status = PendingInterpretationStatus.CONFIRMING
+        db.flush()
+        logger.info(
+            "pending_interpretation_lock_acquired",
+            extra={"pending_interpretation_id": interpretation.id},
+        )
+        system_output = pending_interpretation_feedback_state(interpretation)
+        result = _execute_pending_interpretation(db, interpretation, payload, system_output)
         interpretation.status = PendingInterpretationStatus.CONFIRMED
         db.commit()
+        flush_queued_trace_events(db)
+        confirmation_duration_ms = round((perf_counter() - db_write_start) * 1000, 3)
+        logger.info(
+            "financial_confirmation_transaction_committed",
+            extra={"pending_interpretation_id": interpretation.id},
+        )
+        track_event(
+            db=db,
+            event_name="EXECUTION_STARTED",
+            payload={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+                "post_commit": True,
+            },
+        )
+        track_event(
+            db=db,
+            event_name="EXECUTION_COMPLETED",
+            duration_ms=confirmation_duration_ms,
+            payload={
+                "pending_interpretation_id": interpretation.id,
+                "project_id": interpretation.project_id,
+                "post_commit": True,
+            },
+        )
         track_event(
             db=db,
             event_name="DB_WRITE_SUCCESS",
-            duration_ms=round((perf_counter() - db_write_start) * 1000, 3),
+            duration_ms=confirmation_duration_ms,
             payload={"pending_interpretation_id": interpretation.id, "stage": "confirmation"},
         )
         db.refresh(interpretation)
@@ -1604,9 +1748,26 @@ def confirm_pending_interpretation(
         if not _execution_engine_primary_enabled(interpretation):
             _run_execution_engine_shadow(db, interpretation, payload, result)
         return result
+    except IntegrityError as exc:
+        db.rollback()
+        db.expire_all()
+        _reconcile_duplicate_confirmation_after_rollback(db, interpretation_id)
+        logger.info(
+            "financial_confirmation_conflict",
+            extra={"pending_interpretation_id": interpretation_id, "reason": "duplicate_source_interpretation"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Interpretation is already confirmed",
+        ) from exc
     except Exception as exc:
-        track_event(db=db, event_name="db.confirmation_failed", payload={"interpretation_id": interpretation_id, "error": str(exc)})
-        track_event(db=db, event_name="ERROR_OCCURRED", payload={"pending_interpretation_id": interpretation_id, "error_message": str(exc)})
+        db.rollback()
+        db.expire_all()
+        _reset_confirming_interpretation_after_rollback(db, interpretation_id)
+        logger.exception(
+            "financial_confirmation_transaction_rolled_back",
+            extra={"pending_interpretation_id": interpretation_id},
+        )
         raise
 
 
@@ -1619,16 +1780,74 @@ def _get_pending_interpretation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Interpretation not found",
         )
+    _get_project(db, interpretation.project_id)
     return interpretation
+
+
+def _get_pending_interpretation_for_confirmation(
+    db: DbSession, interpretation_id: int
+) -> PendingInterpretation:
+    interpretation = db.scalar(
+        select(PendingInterpretation)
+        .where(PendingInterpretation.id == interpretation_id)
+        .with_for_update()
+    )
+    if interpretation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Interpretation not found",
+        )
+    _get_project(db, interpretation.project_id)
+    return interpretation
+
+
+def _reset_confirming_interpretation_after_rollback(
+    db: DbSession, interpretation_id: int
+) -> None:
+    interpretation = db.get(PendingInterpretation, interpretation_id)
+    if interpretation is None:
+        return
+    if interpretation.status != PendingInterpretationStatus.CONFIRMING:
+        return
+    interpretation.status = PendingInterpretationStatus.PENDING
+    db.commit()
+
+
+def _reconcile_duplicate_confirmation_after_rollback(
+    db: DbSession, interpretation_id: int
+) -> None:
+    interpretation = db.get(PendingInterpretation, interpretation_id)
+    if interpretation is None or interpretation.status != PendingInterpretationStatus.CONFIRMING:
+        return
+    has_financial_record = db.scalar(
+        select(Payment.id).where(Payment.source_pending_interpretation_id == interpretation_id)
+    ) or db.scalar(
+        select(Invoice.id).where(Invoice.source_pending_interpretation_id == interpretation_id)
+    )
+    interpretation.status = (
+        PendingInterpretationStatus.CONFIRMED
+        if has_financial_record
+        else PendingInterpretationStatus.PENDING
+    )
+    db.commit()
 
 
 def _execute_pending_interpretation(
     db: DbSession,
     interpretation: PendingInterpretation,
     payload: PendingInterpretationConfirm,
+    system_output: dict[str, Any] | None = None,
 ) -> NaturalInputResult:
+    system_output = system_output or pending_interpretation_feedback_state(interpretation)
     _apply_create_new_confirmation_payload(interpretation, payload)
     _apply_confirmation_edit_payload(interpretation, payload)
+    capture_pending_interpretation_feedback(
+        db,
+        interpretation=interpretation,
+        system_output=system_output,
+        trace_id=get_trace_id(),
+        correction_source=InterpretationFeedbackSource.USER_EDIT,
+    )
     route = _domain_route(interpretation, db=db)
     if route["domain"] == DomainType.SETUP.value and _execution_engine_primary_enabled(
         interpretation
@@ -1840,29 +2059,7 @@ def _resolve_entity_phase_if_needed(
 
 
 def _domain_route(interpretation: PendingInterpretation, db: Session | None = None) -> dict[str, Any]:
-    route_input: dict[str, Any] = {
-        "semantic_action": interpretation.semantic_action,
-        "action": interpretation.semantic_action,
-        "entities": interpretation.extracted_entities or [],
-        "extracted_entities": interpretation.extracted_entities or [],
-        "financial": {
-            "amount": interpretation.extracted_amount,
-            "direction": interpretation.financial_direction.value if interpretation.financial_direction is not None else None,
-        },
-    }
-    if isinstance(interpretation.structured_interpretation, dict):
-        route_input.update(interpretation.structured_interpretation)
-        route_input.setdefault("semantic_action", interpretation.semantic_action)
-        route_input.setdefault("action", interpretation.semantic_action)
-        if not route_input.get("entities"):
-            route_input["entities"] = interpretation.extracted_entities or []
-        if not route_input.get("extracted_entities"):
-            route_input["extracted_entities"] = interpretation.extracted_entities or []
-    return DomainRouterService().route(
-        interpretation.raw_input_text,
-        route_input,
-        db=db,
-    )
+    return resolve_pending_domain_route(interpretation, db=db)
 
 
 def _resolve_entity_phase(
@@ -1991,6 +2188,7 @@ def _execute_with_execution_engine_primary(
             payment_method=interpretation.payment_method,
             due_date=interpretation.due_date,
             description=interpretation.description,
+            source_pending_interpretation_id=interpretation.id,
         ),
     )
     confirmed = ConfirmedFinancialInterpretation(
@@ -2002,6 +2200,7 @@ def _execute_with_execution_engine_primary(
         payment_method=interpretation.payment_method,
         due_date=interpretation.due_date,
         description=interpretation.description,
+        source_pending_interpretation_id=interpretation.id,
     )
     engine_result = ExecutionEngine().execute_confirmed_interpretation(
         confirmed,
@@ -2239,7 +2438,7 @@ def _shadow_state_for_confirmed_person(
         select(WorkerState).where(
             WorkerState.project_id == confirmed.project_id,
             WorkerState.worker_id == confirmed.entity_id,
-        )
+        ).with_for_update()
     )
 
 
@@ -3589,7 +3788,7 @@ def _graph_intent(graph: dict[str, Any]) -> str:
             return "WORK"
         if event_type in {"PAYMENT", "INVOICE"}:
             return str(event_type)
-    return "NOTE"
+    return DEFAULT_FALLBACK
 
 
 def _execution_intent(
@@ -3605,7 +3804,7 @@ def _execution_intent(
         )
     if canonical_type == CanonicalEventType.WORK:
         return "WORK"
-    return "NOTE"
+    return DEFAULT_FALLBACK
 
 
 def _entity_snapshot(entity: Worker) -> dict[str, Any]:
@@ -3854,6 +4053,7 @@ def update_worker(worker_id: int, payload: WorkerUpdate, db: DbSession) -> Worke
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Worker not found"
         )
+    _get_project(db, worker.project_id)
     values = payload.model_dump(exclude_unset=True)
     target_type = values.get("type") or worker.type
     if target_type != WorkerType.DAILY_WORKER:
@@ -3921,6 +4121,235 @@ def list_history_entries(project_id: int, db: DbSession) -> list[HistoryEntry]:
             .order_by(HistoryEntry.created_at.desc(), HistoryEntry.id.desc())
         )
     )
+
+
+@router.post(
+    "/projects/{project_id}/tasks/suggest",
+    response_model=TaskAssigneeSuggestion,
+)
+def suggest_project_task_assignee(
+    project_id: int,
+    payload: ProjectTaskSuggestRequest,
+    db: DbSession,
+) -> dict[str, Any]:
+    _get_project(db, project_id)
+    return suggest_assignee(
+        db,
+        task_input=payload.raw_text or payload.title,
+        project_id=project_id,
+        extracted_actor=payload.extracted_actor,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/tasks",
+    response_model=ProjectTaskCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_project_task(
+    project_id: int,
+    payload: ProjectTaskCreate,
+    db: DbSession,
+    debug: bool = False,
+) -> ProjectTaskCreateResponse:
+    _get_project(db, project_id)
+    task_text = (payload.raw_text or payload.title).strip()
+    due_date_was_provided = "due_date" in payload.model_fields_set
+    orchestrator = TaskOrchestrator()
+    final_task = orchestrator.build_task(
+        task_text,
+        {
+            "db": db,
+            "project_id": project_id,
+            "extracted_actor": payload.extracted_actor,
+            **({"due_date_override": payload.due_date} if due_date_was_provided else {}),
+        },
+    )
+    detected_domain = str(final_task.get("domain") or "NOTE")
+    if detected_domain != "TASK":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detected_domain": detected_domain,
+                "message": "Only TASK domain inputs can be created through the task endpoint.",
+            },
+        )
+    final_task = _serialize_task_final_object(final_task)
+    logger.info(
+        "TaskOrchestrator used successfully for task creation",
+        extra={"project_id": project_id, "task_domain": final_task.get("domain")},
+    )
+    suggestion = final_task.get("context", {}).get("assignment") or {
+        "suggested_person": None,
+        "source": "none",
+        "candidates": [],
+    }
+    due_date_value: date | None = None
+    if final_task.get("due_date"):
+        due_date_value = date.fromisoformat(str(final_task["due_date"]))
+    due_date_confidence = final_task.get("due_date_confidence")
+    due_date_source = final_task.get("due_date_source")
+
+    assignee_id: int | None = None
+    assignment_status = "suggested" if suggestion.get("suggested_person") else "unassigned"
+    if payload.assign_to_person:
+        if payload.assignee_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="assignee_id is required when assign_to_person is true",
+            )
+        _get_worker(db, project_id, payload.assignee_id)
+        assignee_id = payload.assignee_id
+        assignment_status = "confirmed"
+
+    task = ProjectTask(
+        project_id=project_id,
+        title=str(final_task.get("title") or payload.title).strip(),
+        description=str(final_task.get("description") or task_text).strip() or None,
+        raw_text=task_text or None,
+        assignee_id=assignee_id,
+        assignee_suggestion=suggestion,
+        suggestion_source=str(suggestion.get("source") or "none"),
+        assignment_status=assignment_status,
+        status="CONFIRMED" if assignment_status == "confirmed" else "PENDING",
+        confidence=final_task.get("confidence") if isinstance(final_task.get("confidence"), int | float) else None,
+        final_task_object=final_task,
+        due_date=due_date_value,
+        due_date_confidence=due_date_confidence,
+        due_date_source=str(due_date_source) if due_date_source else None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    legacy_interpretations = [
+        {
+            "deprecated": True,
+            "source": "legacy_task_response",
+            "task": ProjectTaskRead.model_validate(task).model_dump(mode="json"),
+            "assignment_suggestion": TaskAssigneeSuggestion.model_validate(suggestion).model_dump(mode="json"),
+        }
+    ] if debug else []
+    return ProjectTaskCreateResponse(
+        final_task_object=final_task,
+        task_id=task.id,
+        task=ProjectTaskRead.model_validate(task),
+        assignment_suggestion=TaskAssigneeSuggestion.model_validate(suggestion),
+        interpretations=legacy_interpretations,
+    )
+
+
+@router.get("/projects/{project_id}/tasks", response_model=list[ProjectTaskRead])
+def list_project_tasks(project_id: int, db: DbSession) -> list[ProjectTask]:
+    _get_project(db, project_id)
+    return list(
+        db.scalars(
+            select(ProjectTask)
+            .where(ProjectTask.project_id == project_id)
+            .order_by(ProjectTask.created_at.desc(), ProjectTask.id.desc())
+        )
+    )
+
+
+@router.patch("/tasks/{task_id}", response_model=ProjectTaskUpdateResponse)
+def update_project_task(
+    task_id: int,
+    payload: ProjectTaskUpdate,
+    db: DbSession,
+) -> ProjectTaskUpdateResponse:
+    task = db.get(ProjectTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    _get_project(db, task.project_id)
+
+    provided = payload.model_fields_set
+    if "status" in provided:
+        if payload.status not in {"PENDING", "COMPLETED"}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task status")
+        task.status = payload.status
+
+    if "assignee_id" in provided:
+        if payload.assignee_id is not None:
+            worker = _get_worker(db, task.project_id, payload.assignee_id)
+            task.assignee_id = worker.id
+            _sync_task_final_object(task, assignee_name=worker.name)
+        else:
+            task.assignee_id = None
+            _sync_task_final_object(task, assignee_name=None)
+
+    if "due_date" in provided:
+        if payload.due_date is None:
+            task.due_date = None
+            _sync_task_final_object(task, due_date_value=None)
+        else:
+            try:
+                parsed_due_date = date.fromisoformat(payload.due_date)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid due_date") from exc
+            task.due_date = parsed_due_date
+            _sync_task_final_object(task, due_date_value=parsed_due_date.isoformat())
+
+    if "status" in provided:
+        _sync_task_final_object(task, completed=task.status == "COMPLETED")
+
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return ProjectTaskUpdateResponse(
+        **ProjectTaskRead.model_validate(task).model_dump(),
+        task_id=task.id,
+        updated=True,
+    )
+
+
+def _sync_task_final_object(
+    task: ProjectTask,
+    *,
+    assignee_name: str | None | object = ...,
+    due_date_value: str | None | object = ...,
+    completed: bool | object = ...,
+) -> None:
+    final_task = dict(task.final_task_object or {})
+    if assignee_name is not ...:
+        assignee = dict(final_task.get("assignee") or {})
+        assignee["id"] = task.assignee_id
+        assignee["name"] = assignee_name
+        final_task["assignee"] = assignee
+    if due_date_value is not ...:
+        final_task["due_date"] = due_date_value
+    if completed is not ...:
+        flags = dict(final_task.get("flags") or {})
+        if completed:
+            flags["needs_user_confirmation"] = False
+        final_task["flags"] = flags
+    task.final_task_object = _serialize_task_final_object(final_task)
+
+
+def _serialize_task_final_object(final_task: dict[str, Any]) -> dict[str, Any]:
+    serialized = dict(final_task)
+    due_date_payload = serialized.get("due_date")
+    due_date_value: str | None = None
+    due_date_source = serialized.get("due_date_source")
+    due_date_confidence = serialized.get("due_date_confidence")
+
+    if isinstance(due_date_payload, dict):
+        due_date_value = str(due_date_payload["value"]) if due_date_payload.get("value") else None
+        due_date_source = due_date_source or due_date_payload.get("source")
+        due_date_confidence = due_date_confidence if due_date_confidence is not None else due_date_payload.get("confidence")
+    elif due_date_payload:
+        due_date_value = str(due_date_payload)
+
+    final_time = serialized.get("context", {}).get("time") if isinstance(serialized.get("context"), dict) else None
+    if isinstance(final_time, dict):
+        if final_time.get("source") == "user_edit":
+            due_date_source = "user_edit"
+        else:
+            due_date_source = due_date_source or final_time.get("source")
+        due_date_confidence = due_date_confidence if due_date_confidence is not None else final_time.get("confidence")
+
+    serialized["due_date"] = due_date_value
+    serialized["due_date_source"] = due_date_source
+    serialized["due_date_confidence"] = due_date_confidence
+    return serialized
 
 
 @router.post(
@@ -4338,7 +4767,7 @@ def export_project_payments_csv(
         rows.append([
             _datetime_text(payment.created_at),
             worker.name if worker else "نامشخص",
-            ROLE_LABELS.get(worker.type, "نامشخص") if worker else "نامشخص",
+            role_label_for_worker_type(worker.type.value) if worker else "نامشخص",
             DIRECTION_LABELS.get(payment.direction, payment.direction.value),
             PAYMENT_TYPE_LABELS.get(payment.type, payment.type.value),
             _decimal_text(payment.amount),
@@ -4366,7 +4795,7 @@ def export_project_people_csv(project_id: int, db: DbSession) -> Response:
         stats = worker_rows.get(worker.id, {})
         rows.append([
             worker.name,
-            ROLE_LABELS.get(worker.type, worker.type.value),
+            role_label_for_worker_type(worker.type.value),
             worker.role_detail or "",
             worker.phone or "",
             worker.account_number or "",

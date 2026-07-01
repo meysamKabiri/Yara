@@ -7,7 +7,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.observability_service import track_event, track_timed_event
+from app.core.observability_service import queue_trace_event
+from app.core.trace_context import get_trace_id
 from app.models.core import (
     FinancialDirection,
     Invoice,
@@ -33,6 +34,7 @@ class ConfirmedFinancialInterpretation:
     due_date: str | None = None
     description: str | None = None
     related_invoice_id: int | None = None
+    source_pending_interpretation_id: int | None = None
 
 
 class ExecutionEngine:
@@ -53,11 +55,7 @@ class ExecutionEngine:
         - NOT use semantic rules
         - ONLY execute confirmed structured data
         """
-        return track_timed_event(
-            db=db,
-            event_name="execution_engine.execute",
-            fn=lambda: self._execute_impl(confirmed_interpretation, db, state),
-        )
+        return self._execute_impl(confirmed_interpretation, db, state)
 
     def _execute_impl(
         self,
@@ -71,19 +69,8 @@ class ExecutionEngine:
         payment_method = self._payment_method(confirmed_interpretation.payment_method, action)
         amount = self._amount(confirmed_interpretation.amount)
         entity_id = confirmed_interpretation.entity_id
-        track_event(
-            db=db,
-            event_name="EXECUTION_STARTED",
-            payload={
-                "project_id": confirmed_interpretation.project_id,
-                "entity_id": entity_id,
-                "action": action,
-                "amount": str(amount) if amount is not None else None,
-                "direction": direction.value if direction is not None else None,
-            },
-        )
         logger.info(
-            "execution_engine_input",
+            "financial_transaction_started",
             extra={
                 "project_id": confirmed_interpretation.project_id,
                 "action": action,
@@ -105,7 +92,16 @@ class ExecutionEngine:
             if worker is None or worker.project_id != confirmed_interpretation.project_id:
                 raise ValueError("Resolved entity not found in project")
 
-            state = state or self._get_or_create_state(db, worker)
+            state = self._locked_state(db, state, worker)
+            state_before = _worker_state_snapshot(state)
+            logger.info(
+                "worker_state_lock_acquired",
+                extra={
+                    "project_id": confirmed_interpretation.project_id,
+                    "worker_id": worker.id,
+                    "worker_state_id": state.id,
+                },
+            )
 
             if action == "PURCHASE_PAID":
                 payment = self._create_payment(
@@ -124,6 +120,7 @@ class ExecutionEngine:
                 invoice = Invoice(
                     project_id=confirmed_interpretation.project_id,
                     vendor_id=entity_id,
+                    source_pending_interpretation_id=confirmed_interpretation.source_pending_interpretation_id,
                     total_amount=amount,
                     description=confirmed_interpretation.description,
                     status=InvoiceStatus.OPEN,
@@ -162,32 +159,46 @@ class ExecutionEngine:
 
             result = self._result(payments, invoices)
             duration_ms = round((perf_counter() - start) * 1000, 3)
-            track_event(
-                db=db,
-                event_name="DB_WRITE_SUCCESS",
+            state_after = _worker_state_snapshot(state)
+            queue_trace_event(
+                db,
+                trace_id=get_trace_id(),
+                event_name="FINANCIAL_MUTATION_RECORDED",
                 duration_ms=duration_ms,
                 payload={
+                    "stage": "ENGINE",
+                    "domain": "FINANCIAL",
                     "project_id": confirmed_interpretation.project_id,
-                    "payment_ids": [payment.id for payment in payments],
-                    "invoice_ids": [invoice.id for invoice in invoices],
-                },
-            )
-            track_event(
-                db=db,
-                event_name="EXECUTION_COMPLETED",
-                duration_ms=duration_ms,
-                payload={
-                    "project_id": confirmed_interpretation.project_id,
-                    "payment_ids": [payment.id for payment in payments],
-                    "invoice_ids": [invoice.id for invoice in invoices],
-                    "payment_id": payments[0].id if payments else None,
-                    "invoice_id": invoices[0].id if invoices else None,
-                    "status": "SUCCESS",
-                    "duration_ms": duration_ms,
+                    "source_pending_interpretation_id": confirmed_interpretation.source_pending_interpretation_id,
+                    "semantic_action": action,
+                    "financial_direction": direction.value if direction is not None else None,
+                    "amount": str(amount),
+                    "entity_resolution_result": {
+                        "entity_id": worker.id,
+                        "entity_name": worker.name,
+                        "worker_state_id": state.id,
+                    },
+                    "worker_state_before": state_before,
+                    "worker_state_after": state_after,
+                    "balance_delta": _decimal_delta(
+                        state_before.get("financial_balance"),
+                        state_after.get("financial_balance"),
+                    ),
+                    "db_write_operations": {
+                        "payment_ids": [payment.id for payment in payments],
+                        "invoice_ids": [invoice.id for invoice in invoices],
+                    },
+                    "input_snapshot": {
+                        "semantic_action": action,
+                        "financial_direction": direction.value if direction is not None else None,
+                        "amount": str(amount),
+                        "entity_id": entity_id,
+                    },
+                    "output_snapshot": result,
                 },
             )
             logger.info(
-                "execution_engine_result",
+                "financial_transaction_ready_to_commit",
                 extra={
                     "project_id": confirmed_interpretation.project_id,
                     "payments": len(payments),
@@ -198,20 +209,9 @@ class ExecutionEngine:
                 },
             )
             return result
-        except Exception as exc:
-            track_event(
-                db=db,
-                event_name="ERROR_OCCURRED",
-                payload={
-                    "project_id": confirmed_interpretation.project_id,
-                    "action": action,
-                    "entity_id": entity_id,
-                    "error_message": str(exc),
-                    "duration_ms": round((perf_counter() - start) * 1000, 3),
-                },
-            )
+        except Exception:
             logger.exception(
-                "execution_engine_failed",
+                "financial_transaction_failed_before_commit",
                 extra={
                     "project_id": confirmed_interpretation.project_id,
                     "action": action,
@@ -238,6 +238,7 @@ class ExecutionEngine:
         payment = Payment(
             project_id=confirmed_interpretation.project_id,
             entity_id=state.worker_id,
+            source_pending_interpretation_id=confirmed_interpretation.source_pending_interpretation_id,
             amount=amount,
             related_invoice_id=confirmed_interpretation.related_invoice_id,
             type=payment_method,
@@ -251,12 +252,23 @@ class ExecutionEngine:
             state.financial_balance -= amount
         return payment
 
+    def _locked_state(self, db: Session, state: WorkerState | None, worker: Worker) -> WorkerState:
+        if state is not None and state.id is not None:
+            locked = db.scalar(
+                select(WorkerState)
+                .where(WorkerState.id == state.id)
+                .with_for_update()
+            )
+            if locked is not None:
+                return locked
+        return self._get_or_create_state(db, worker)
+
     def _get_or_create_state(self, db: Session, worker: Worker) -> WorkerState:
         state = db.scalar(
             select(WorkerState).where(
                 WorkerState.project_id == worker.project_id,
                 WorkerState.worker_id == worker.id,
-            )
+            ).with_for_update()
         )
         if state is not None:
             return state
@@ -329,3 +341,19 @@ class ExecutionEngine:
             "description": invoice.description,
             "status": invoice.status.value,
         }
+
+
+def _worker_state_snapshot(state: WorkerState) -> dict[str, Any]:
+    return {
+        "id": state.id,
+        "project_id": state.project_id,
+        "worker_id": state.worker_id,
+        "role": state.role.value if hasattr(state.role, "value") else state.role,
+        "financial_balance": str(state.financial_balance),
+    }
+
+
+def _decimal_delta(before: Any, after: Any) -> str | None:
+    if before is None or after is None:
+        return None
+    return str(Decimal(str(after)) - Decimal(str(before)))
