@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.role_registry import registry_key_to_project_role
 from app.models.core import Worker, WorkerType
 from app.services.persian_role_extractor import PersianRoleExtractor
 
@@ -172,17 +173,7 @@ class EntityRegistryService:
         return any(qualifier in normalized for qualifier in qualifiers)
 
     def _entity_type(self, value: Any) -> WorkerType:
-        if value == "CLIENT":
-            return WorkerType.CLIENT
-        if value == "VENDOR":
-            return WorkerType.VENDOR
-        if value in {"SKILLED", "SKILLED_WORKER"}:
-            return WorkerType.SKILLED_WORKER
-        if value in {"WORKER", "DAILY_WORKER"}:
-            return WorkerType.DAILY_WORKER
-        if value == "OTHER":
-            return WorkerType.OTHER
-        return WorkerType.OTHER
+        return WorkerType(registry_key_to_project_role(str(value) if value is not None else None))
 
     def _update_if_present(self, worker: Worker, field: str, value: Any) -> None:
         if isinstance(value, str) and value.strip():

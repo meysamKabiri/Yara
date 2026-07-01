@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
-import { ROLE_OPTIONS } from "../../constants";
+import { ROLE_OPTIONS, roleLabel } from "../../constants";
 import type { SetupEntity } from "../../types/domain";
 import {
   MULTI_ACTION_WARNING,
@@ -34,10 +34,6 @@ function entityTypeFromRecord(entity: Record<string, unknown>): string {
 
 function shouldShowRoleDetail(type: string): boolean {
   return type === "SKILLED_WORKER" || type === "OTHER";
-}
-
-function roleLabel(type: string): string {
-  return ROLE_OPTIONS.find((option) => option.value === type)?.label ?? type;
 }
 
 function extractSetupEntities(interpretation: PendingInterpretation): SetupEntity[] {
@@ -83,6 +79,14 @@ export function SetupModal({
   const [accountNumber, setAccountNumber] = useState(defaultEntity.accountNumber ?? "");
   const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
   const uncertaintyWarning = isUncertainInterpretation(interpretation);
+
+  useEffect(() => {
+    setName(defaultEntity.name);
+    setType(defaultEntity.type);
+    setRoleDetail(defaultEntity.roleDetail ?? "");
+    setPhone(defaultEntity.phone ?? "");
+    setAccountNumber(defaultEntity.accountNumber ?? "");
+  }, [interpretation.id, defaultEntity.name, defaultEntity.type, defaultEntity.roleDetail, defaultEntity.phone, defaultEntity.accountNumber]);
 
   function handleConfirm() {
     const entity: SetupEntity = {

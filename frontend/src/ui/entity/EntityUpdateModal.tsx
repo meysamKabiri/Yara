@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { api } from "../../api";
-import { ROLE_OPTIONS } from "../../constants";
+import { ROLE_OPTIONS, roleLabel } from "../../constants";
 import { buildConfirmPayload, exactEntityIdByName, getCandidateEntityId, normalizeNeedsSelection, type NeedsSelectionCandidate } from "../confirmPayload";
 import {
   MULTI_ACTION_WARNING,
@@ -19,12 +19,7 @@ function firstEntity(interpretation: PendingInterpretation): Record<string, unkn
 }
 
 function roleLabelFromType(type: string | undefined): string {
-  if (type === "CLIENT") return "کارفرما";
-  if (type === "VENDOR") return "فروشنده";
-  if (type === "SKILLED_WORKER") return "استادکار";
-  if (type === "DAILY_WORKER") return "کارگر";
-  if (type === "OTHER") return "سایر";
-  return "فرد";
+  return type ? roleLabel(type) : "فرد";
 }
 
 function createNewLabel(name: string, role: string): string {

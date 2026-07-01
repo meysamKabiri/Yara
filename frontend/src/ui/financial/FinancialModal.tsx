@@ -1,9 +1,8 @@
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
-import { FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS, ROLE_OPTIONS, SEMANTIC_ACTION_OPTIONS } from "../../constants";
+import { FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS, ROLE_OPTIONS, SEMANTIC_ACTION_OPTIONS, roleLabel } from "../../constants";
 import { exactEntityIdByName } from "../confirmPayload";
 import {
-  MONEY_UNIT_HELPER,
   MULTI_ACTION_WARNING,
   UNCERTAIN_INTERPRETATION_MESSAGE,
   interpretationText,
@@ -13,14 +12,6 @@ import {
 } from "../betaSafety";
 
 const CREATE_NEW_SENTINEL = -1;
-
-function roleLabel(type: string): string {
-  if (type === "CLIENT") return "کارفرما";
-  if (type === "VENDOR") return "فروشنده";
-  if (type === "DAILY_WORKER") return "کارگر";
-  if (type === "SKILLED_WORKER") return "استادکار";
-  return "سایر";
-}
 
 function createNewLabel(name: string, role: string): string {
   const roleMap: Record<string, string> = {
@@ -86,11 +77,18 @@ function actionLabel(action: string | null): string {
   return "رویداد مالی";
 }
 
+function compactActionPhrase(action: string | null, direction: string, entityName: string): string {
+  const fallbackName = entityName || "طرف حساب نامشخص";
+  if (direction === "INCOMING") return `دریافتی از ${fallbackName}`;
+  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return `پرداخت برای ${fallbackName}`;
+  return `${actionLabel(action)} برای ${fallbackName}`;
+}
+
 function directionImpactText(direction: string, amount: string): string {
   const formattedAmount = moneyWithUnit(amount);
-  if (direction === "INCOMING") return `بعد از تأیید، مبلغ ${formattedAmount} به عنوان دریافتی پروژه ثبت می‌شود و موجودی نقدی پروژه افزایش پیدا می‌کند.`;
-  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return `بعد از تأیید، مبلغ ${formattedAmount} به عنوان پرداختی پروژه ثبت می‌شود و موجودی نقدی پروژه کاهش پیدا می‌کند.`;
-  return "اثر مالی این ثبت بعد از تأیید مشخص می‌شود؛ جهت مالی را بررسی کنید.";
+  if (direction === "INCOMING") return `تأثیر: موجودی پروژه +${formattedAmount}`;
+  if (direction === "OUTGOING" || direction === "DEBT" || direction === "DEFERRED") return `تأثیر: موجودی پروژه -${formattedAmount}`;
+  return "این ثبت موجودی مالی پروژه را تغییر نمی‌دهد.";
 }
 
 interface FinancialModalProps {
@@ -99,6 +97,7 @@ interface FinancialModalProps {
   activeProjectId: number | null;
   projectName?: string | null;
   isLoading: boolean;
+  showHeader?: boolean;
   onConfirm: (data: {
     entity_id?: number | null;
     amount: string;
@@ -119,6 +118,7 @@ export function FinancialModal({
   activeProjectId,
   projectName,
   isLoading,
+  showHeader = true,
   onConfirm,
   onDiscard,
 }: FinancialModalProps) {
@@ -197,6 +197,29 @@ export function FinancialModal({
   const [description, setDescription] = useState(interpretation.description ?? interpretation.matched_input_text ?? "");
   const [dueDate, setDueDate] = useState(interpretation.due_date ?? "");
 
+  useEffect(() => {
+    setEntityId(showCreateNew ? CREATE_NEW_SENTINEL : resolvedEntityId);
+    setAmount(interpretation.extracted_amount ?? "");
+    setDirection(interpretation.financial_direction ?? "");
+    setPaymentMethod(interpretation.payment_method ?? "");
+    setNewEntityName(extractedName);
+    setNewEntityRole(extractedType);
+    setDescription(interpretation.description ?? interpretation.matched_input_text ?? "");
+    setDueDate(interpretation.due_date ?? "");
+  }, [
+    interpretation.id,
+    interpretation.extracted_amount,
+    interpretation.financial_direction,
+    interpretation.payment_method,
+    interpretation.description,
+    interpretation.matched_input_text,
+    interpretation.due_date,
+    showCreateNew,
+    resolvedEntityId,
+    extractedName,
+    extractedType,
+  ]);
+
   const isCreatingNew = entityId === CREATE_NEW_SENTINEL;
   const selectedEntityName = isCreatingNew
     ? newEntityName.trim()
@@ -237,23 +260,27 @@ export function FinancialModal({
 
   return (
     <article className="interpretation-card modal-shell">
-      <header className="modal-header">
-        <div>
-          <h3 className="modal-title">ثبت مالی</h3>
-          <p>برداشت سیستم از متن شما: مبلغ و طرف حساب را بررسی کنید.</p>
-          <p>{MONEY_UNIT_HELPER}</p>
-        </div>
-      </header>
+      {showHeader && (
+        <header className="modal-header">
+          <div>
+            <h3 className="modal-title">بررسی اطلاعات</h3>
+            <p>اگر درست است تأیید کنید، اگر نه اصلاح کنید.</p>
+          </div>
+        </header>
+      )}
       <section className="approval-section modal-body">
-        {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
-        {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
+        {(uncertaintyWarning || multiActionWarning) && (
+          <div className="compact-warning-list">
+            {uncertaintyWarning && <p className="warning-text">{UNCERTAIN_INTERPRETATION_MESSAGE}</p>}
+            {multiActionWarning && <p className="warning-text">{MULTI_ACTION_WARNING}</p>}
+          </div>
+        )}
         <div className="confirmation-summary">
-          <p><strong>نوع عملیات:</strong> {actionLabel(interpretation.semantic_action)}</p>
-          <p><strong>شخص / طرف حساب:</strong> {selectedEntityName || "نامشخص"}</p>
-          <p><strong>مبلغ:</strong> {moneyWithUnit(amount)}</p>
-          <p><strong>اثر بعد از تأیید:</strong> <span className="impact-text">{directionImpactText(direction, amount)}</span></p>
-          <p>قبل از تأیید می‌توانید طرف حساب، مبلغ، جهت مالی و توضیحات را اصلاح کنید.</p>
+          <p><strong>{compactActionPhrase(interpretation.semantic_action, direction, selectedEntityName)}</strong></p>
+          <p className="summary-amount">{moneyWithUnit(amount)}</p>
+          <p><span className="impact-text">{directionImpactText(direction, amount)}</span></p>
         </div>
+        <h4 className="editable-details-title">جزئیات قابل ویرایش</h4>
         <div className="edit-grid">
           <label>
             نوع ثبت
@@ -306,7 +333,7 @@ export function FinancialModal({
             </>
           )}
           <label>
-            مبلغ
+            مبلغ (تومان)
             <input value={amount} onChange={(e) => setAmount(e.target.value)} />
           </label>
           <label>
@@ -349,7 +376,7 @@ export function FinancialModal({
             onClick={handleConfirm}
             disabled={isLoading || !canConfirm}
           >
-            تأیید و ثبت مالی
+            تأیید و ثبت
           </button>
           <button className="danger-action" type="button" onClick={onDiscard} disabled={isLoading}>
             رد کردن

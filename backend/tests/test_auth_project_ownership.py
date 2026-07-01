@@ -113,6 +113,98 @@ def test_direct_worker_id_bypass_attempt_forbidden(client: TestClient) -> None:
     assert response.status_code == 403
 
 
+def test_task_owner_can_update_task(client: TestClient) -> None:
+    owner_token = _signup(client, "task-owner@example.com")
+    project = client.post(
+        "/projects",
+        json={"name": "کارهای مالک"},
+        headers=_auth(owner_token),
+    ).json()
+    task = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={"title": "فردا بیاد کار کنه"},
+        headers=_auth(owner_token),
+    ).json()
+
+    response = client.patch(
+        f"/tasks/{task['task_id']}",
+        json={"status": "COMPLETED"},
+        headers=_auth(owner_token),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "COMPLETED"
+
+
+def test_another_user_cannot_update_task(client: TestClient) -> None:
+    owner_token = _signup(client, "task-private-owner@example.com")
+    other_token = _signup(client, "task-private-other@example.com")
+    project = client.post(
+        "/projects",
+        json={"name": "کار خصوصی"},
+        headers=_auth(owner_token),
+    ).json()
+    task = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={"title": "فردا بیاد کار کنه"},
+        headers=_auth(owner_token),
+    ).json()
+
+    response = client.patch(
+        f"/tasks/{task['task_id']}",
+        json={"status": "COMPLETED"},
+        headers=_auth(other_token),
+    )
+
+    assert response.status_code == 403
+
+
+def test_status_only_task_update_validates_project_ownership(client: TestClient) -> None:
+    owner_token = _signup(client, "task-status-owner@example.com")
+    other_token = _signup(client, "task-status-other@example.com")
+    project = client.post(
+        "/projects",
+        json={"name": "وضعیت خصوصی"},
+        headers=_auth(owner_token),
+    ).json()
+    task = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={"title": "امروز بیاد کار کنه"},
+        headers=_auth(owner_token),
+    ).json()
+
+    response = client.patch(
+        f"/tasks/{task['task_id']}",
+        json={"status": "COMPLETED"},
+        headers=_auth(other_token),
+    )
+
+    assert response.status_code == 403
+
+
+def test_due_date_only_task_update_validates_project_ownership(client: TestClient) -> None:
+    owner_token = _signup(client, "task-date-owner@example.com")
+    other_token = _signup(client, "task-date-other@example.com")
+    project = client.post(
+        "/projects",
+        json={"name": "زمان خصوصی"},
+        headers=_auth(owner_token),
+    ).json()
+    task = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={"title": "فردا بیاد کار کنه"},
+        headers=_auth(owner_token),
+    ).json()
+
+    response = client.patch(
+        f"/tasks/{task['task_id']}",
+        json={"due_date": "2026-08-10"},
+        headers=_auth(other_token),
+    )
+
+    assert response.status_code == 403
+
+
 def test_cross_user_natural_input_job_access_forbidden(client: TestClient) -> None:
     owner_token = _signup(client, "job-owner@example.com")
     other_token = _signup(client, "job-other@example.com")

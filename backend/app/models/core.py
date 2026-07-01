@@ -299,6 +299,29 @@ class WorkLog(TimestampMixin, Base):
     worker: Mapped[Worker] = relationship(back_populates="work_logs")
 
 
+class ProjectTask(TimestampMixin, Base):
+    __tablename__ = "project_task"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assignee_id: Mapped[int | None] = mapped_column(ForeignKey("worker.id"), nullable=True, index=True)
+    assignee_suggestion: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    suggestion_source: Mapped[str] = mapped_column(String(30), default="none", nullable=False)
+    assignment_status: Mapped[str] = mapped_column(String(30), default="unassigned", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_task_object: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(nullable=True)
+    due_date_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    due_date_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    project: Mapped[Project] = relationship()
+    assignee: Mapped[Worker | None] = relationship()
+
+
 class Invoice(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("source_pending_interpretation_id", name="uq_invoice_source_pending_interpretation"),
@@ -430,6 +453,7 @@ class PendingInterpretation(TimestampMixin, Base):
     semantic_explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     structured_interpretation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    domain_route: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[PendingInterpretationStatus] = mapped_column(
         SqlEnum(PendingInterpretationStatus, native_enum=False, length=20),
         default=PendingInterpretationStatus.PENDING,

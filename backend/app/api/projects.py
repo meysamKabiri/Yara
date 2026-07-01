@@ -16,9 +16,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import authenticated_user_id, get_current_user
+from app.core.domain_fallback_policy import DEFAULT_FALLBACK
 from app.core.financial_role_repair import normalize_outgoing_payment_roles_in_result
 from app.core.observability_service import flush_queued_trace_events, track_event, track_timed_event
+from app.core.pending_domain_route import resolve_pending_domain_route, stamp_pending_domain_route
 from app.core.queue import get_queue
+from app.core.role_registry import (
+    ROLE_REGISTRY,
+    frontend_role_options,
+    is_skilled_role_text,
+    registry_key_to_project_role,
+    role_label_for_worker_type,
+)
 from app.core.trace_context import get_trace_id
 from app.dependencies.database import DbSession
 from app.models.core import (
@@ -40,6 +49,7 @@ from app.models.core import (
     PendingInterpretation,
     PendingInterpretationStatus,
     Project,
+    ProjectTask,
     RawEntry,
     RawEntryStatus,
     Worker,
@@ -71,10 +81,17 @@ from app.schemas.projects import (
     ProjectDetailWithSummary,
     ProjectRead,
     ProjectSummary,
+    ProjectTaskCreate,
+    ProjectTaskCreateResponse,
+    ProjectTaskRead,
+    ProjectTaskSuggestRequest,
+    ProjectTaskUpdate,
+    ProjectTaskUpdateResponse,
     ProjectTotals,
     ProjectUpdate,
     RawEntryCreate,
     RawEntryRead,
+    TaskAssigneeSuggestion,
     NoteUpdate,
     VoidPayload,
     WorkerCreate,
@@ -118,6 +135,8 @@ from app.services.semantic_normalizer import (
     CanonicalEvent,
     CanonicalEventType,
 )
+from app.services.task_assignment_suggester import suggest_assignee
+from app.services.task_orchestrator import TaskOrchestrator
 
 router = APIRouter(tags=["projects"], dependencies=[Depends(get_current_user)])
 logger = logging.getLogger(__name__)
@@ -148,14 +167,6 @@ def _get_project(db: DbSession, project_id: int) -> Project:
     return project
 
 
-ROLE_LABELS = {
-    WorkerType.CLIENT: "کارفرما",
-    WorkerType.DAILY_WORKER: "کارگر روزمزد",
-    WorkerType.SKILLED_WORKER: "نیروی متخصص",
-    WorkerType.VENDOR: "فروشنده / تامین‌کننده",
-    WorkerType.OTHER: "سایر",
-}
-
 DIRECTION_LABELS = {
     FinancialDirection.INCOMING: "دریافتی",
     FinancialDirection.OUTGOING: "پرداختی",
@@ -169,6 +180,14 @@ PAYMENT_TYPE_LABELS = {
     PaymentType.CHECK: "چک",
     PaymentType.OTHER: "سایر",
 }
+
+
+@router.get("/role-registry")
+def get_role_registry() -> dict[str, Any]:
+    return {
+        "roles": ROLE_REGISTRY,
+        "frontend_options": frontend_role_options(),
+    }
 
 PAYABLE_KIND_LABELS = {
     "vendor_payable": "بدهی فروشنده",
@@ -395,37 +414,8 @@ def _daily_worker_wage(worker: Worker | None, quantity: Decimal) -> Decimal | No
     return Decimal(str(quantity)) * Decimal(str(worker.daily_rate))
 
 
-SKILLED_ROLE_TERMS = {
-    "welder",
-    "electrician",
-    "plumber",
-    "painter",
-    "tiler",
-    "جوشکار",
-    "برقکار",
-    "گچ کار",
-    "گچکار",
-    "گچ‌کار",
-    "رنگ کار",
-    "رنگکار",
-    "رنگ‌کار",
-    "سرامیک کار",
-    "سرامیککار",
-    "سرامیک‌کار",
-    "لوله کش",
-    "لولهکش",
-    "لوله‌کش",
-    "سنگ کار",
-    "سنگکار",
-    "سنگ‌کار",
-}
-
-
 def _has_skilled_role(value: str | None) -> bool:
-    if not value:
-        return False
-    normalized = normalize_text(value)
-    return any(term in normalized for term in SKILLED_ROLE_TERMS)
+    return is_skilled_role_text(value)
 
 
 def _display_worker_type(worker: Worker) -> WorkerType:
@@ -465,17 +455,11 @@ def _refresh_invoice_status(db: DbSession, invoice: Invoice) -> None:
 
 
 def _role_to_worker_type(role: str | None, event_type: str | None = None) -> WorkerType:
-    if role == "CLIENT":
-        return WorkerType.CLIENT
-    if role == "VENDOR" or event_type == "INVOICE":
+    if event_type == "INVOICE":
         return WorkerType.VENDOR
-    if role in {"SKILLED", "SKILLED_WORKER"}:
-        return WorkerType.SKILLED_WORKER
-    if role == "OTHER":
-        return WorkerType.OTHER
-    if role == "WORKER" or event_type == "WORK_LOG":
+    if event_type == "WORK_LOG" and role is None:
         return WorkerType.DAILY_WORKER
-    return WorkerType.OTHER
+    return WorkerType(registry_key_to_project_role(role))
 
 
 def _worker_type_for_entity(
@@ -701,11 +685,17 @@ def _build_pending_interpretations(
                 event_graph["quantity_text"] = raw_event.get("quantity_text")
         effective_action = canonical_event.action
         effective_type = canonical_event.type
-        if effective_type == CanonicalEventType.NOTE and _graph_setup_entities(
-            event_graph
-        ):
-            effective_type = CanonicalEventType.SETUP
-            effective_action = "SETUP"
+        if effective_type == CanonicalEventType.NOTE:
+            routed_domain = DomainRouterService().route(
+                raw_text,
+                {
+                    "graph": event_graph,
+                    "entities": _graph_setup_entities(event_graph),
+                },
+            )
+            if routed_domain.get("domain") == "SETUP":
+                effective_type = CanonicalEventType.SETUP
+                effective_action = "SETUP"
         if (
             detect_purchase_payment(raw_text) is not None
             and effective_action == "PAYMENT"
@@ -772,7 +762,7 @@ def _build_pending_interpretations(
                 "project_role": resolved_entity.type.value,
             }
         interpretations.append(
-            PendingInterpretation(
+            stamp_pending_domain_route(PendingInterpretation(
                 project_id=project_id,
                 raw_input_text=raw_text,
                 canonical_event_type=effective_type.value,
@@ -808,7 +798,7 @@ def _build_pending_interpretations(
                 ),
                 confidence=canonical_event.metadata.get("confidence"),
                 status=PendingInterpretationStatus.PENDING,
-            )
+            ))
         )
     return interpretations
 
@@ -1094,7 +1084,7 @@ def _draft_description(graph: dict[str, Any], raw_text: str) -> str:
 
 def _fallback_note_event(text: str) -> dict[str, Any]:
     return {
-        "type": "NOTE",
+        "type": DEFAULT_FALLBACK,
         "amount_text": None,
         "counterparty_name": None,
         "counterparty_type": "UNKNOWN",
@@ -2069,29 +2059,7 @@ def _resolve_entity_phase_if_needed(
 
 
 def _domain_route(interpretation: PendingInterpretation, db: Session | None = None) -> dict[str, Any]:
-    route_input: dict[str, Any] = {
-        "semantic_action": interpretation.semantic_action,
-        "action": interpretation.semantic_action,
-        "entities": interpretation.extracted_entities or [],
-        "extracted_entities": interpretation.extracted_entities or [],
-        "financial": {
-            "amount": interpretation.extracted_amount,
-            "direction": interpretation.financial_direction.value if interpretation.financial_direction is not None else None,
-        },
-    }
-    if isinstance(interpretation.structured_interpretation, dict):
-        route_input.update(interpretation.structured_interpretation)
-        route_input.setdefault("semantic_action", interpretation.semantic_action)
-        route_input.setdefault("action", interpretation.semantic_action)
-        if not route_input.get("entities"):
-            route_input["entities"] = interpretation.extracted_entities or []
-        if not route_input.get("extracted_entities"):
-            route_input["extracted_entities"] = interpretation.extracted_entities or []
-    return DomainRouterService().route(
-        interpretation.raw_input_text,
-        route_input,
-        db=db,
-    )
+    return resolve_pending_domain_route(interpretation, db=db)
 
 
 def _resolve_entity_phase(
@@ -3820,7 +3788,7 @@ def _graph_intent(graph: dict[str, Any]) -> str:
             return "WORK"
         if event_type in {"PAYMENT", "INVOICE"}:
             return str(event_type)
-    return "NOTE"
+    return DEFAULT_FALLBACK
 
 
 def _execution_intent(
@@ -3836,7 +3804,7 @@ def _execution_intent(
         )
     if canonical_type == CanonicalEventType.WORK:
         return "WORK"
-    return "NOTE"
+    return DEFAULT_FALLBACK
 
 
 def _entity_snapshot(entity: Worker) -> dict[str, Any]:
@@ -4153,6 +4121,235 @@ def list_history_entries(project_id: int, db: DbSession) -> list[HistoryEntry]:
             .order_by(HistoryEntry.created_at.desc(), HistoryEntry.id.desc())
         )
     )
+
+
+@router.post(
+    "/projects/{project_id}/tasks/suggest",
+    response_model=TaskAssigneeSuggestion,
+)
+def suggest_project_task_assignee(
+    project_id: int,
+    payload: ProjectTaskSuggestRequest,
+    db: DbSession,
+) -> dict[str, Any]:
+    _get_project(db, project_id)
+    return suggest_assignee(
+        db,
+        task_input=payload.raw_text or payload.title,
+        project_id=project_id,
+        extracted_actor=payload.extracted_actor,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/tasks",
+    response_model=ProjectTaskCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_project_task(
+    project_id: int,
+    payload: ProjectTaskCreate,
+    db: DbSession,
+    debug: bool = False,
+) -> ProjectTaskCreateResponse:
+    _get_project(db, project_id)
+    task_text = (payload.raw_text or payload.title).strip()
+    due_date_was_provided = "due_date" in payload.model_fields_set
+    orchestrator = TaskOrchestrator()
+    final_task = orchestrator.build_task(
+        task_text,
+        {
+            "db": db,
+            "project_id": project_id,
+            "extracted_actor": payload.extracted_actor,
+            **({"due_date_override": payload.due_date} if due_date_was_provided else {}),
+        },
+    )
+    detected_domain = str(final_task.get("domain") or "NOTE")
+    if detected_domain != "TASK":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detected_domain": detected_domain,
+                "message": "Only TASK domain inputs can be created through the task endpoint.",
+            },
+        )
+    final_task = _serialize_task_final_object(final_task)
+    logger.info(
+        "TaskOrchestrator used successfully for task creation",
+        extra={"project_id": project_id, "task_domain": final_task.get("domain")},
+    )
+    suggestion = final_task.get("context", {}).get("assignment") or {
+        "suggested_person": None,
+        "source": "none",
+        "candidates": [],
+    }
+    due_date_value: date | None = None
+    if final_task.get("due_date"):
+        due_date_value = date.fromisoformat(str(final_task["due_date"]))
+    due_date_confidence = final_task.get("due_date_confidence")
+    due_date_source = final_task.get("due_date_source")
+
+    assignee_id: int | None = None
+    assignment_status = "suggested" if suggestion.get("suggested_person") else "unassigned"
+    if payload.assign_to_person:
+        if payload.assignee_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="assignee_id is required when assign_to_person is true",
+            )
+        _get_worker(db, project_id, payload.assignee_id)
+        assignee_id = payload.assignee_id
+        assignment_status = "confirmed"
+
+    task = ProjectTask(
+        project_id=project_id,
+        title=str(final_task.get("title") or payload.title).strip(),
+        description=str(final_task.get("description") or task_text).strip() or None,
+        raw_text=task_text or None,
+        assignee_id=assignee_id,
+        assignee_suggestion=suggestion,
+        suggestion_source=str(suggestion.get("source") or "none"),
+        assignment_status=assignment_status,
+        status="CONFIRMED" if assignment_status == "confirmed" else "PENDING",
+        confidence=final_task.get("confidence") if isinstance(final_task.get("confidence"), int | float) else None,
+        final_task_object=final_task,
+        due_date=due_date_value,
+        due_date_confidence=due_date_confidence,
+        due_date_source=str(due_date_source) if due_date_source else None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    legacy_interpretations = [
+        {
+            "deprecated": True,
+            "source": "legacy_task_response",
+            "task": ProjectTaskRead.model_validate(task).model_dump(mode="json"),
+            "assignment_suggestion": TaskAssigneeSuggestion.model_validate(suggestion).model_dump(mode="json"),
+        }
+    ] if debug else []
+    return ProjectTaskCreateResponse(
+        final_task_object=final_task,
+        task_id=task.id,
+        task=ProjectTaskRead.model_validate(task),
+        assignment_suggestion=TaskAssigneeSuggestion.model_validate(suggestion),
+        interpretations=legacy_interpretations,
+    )
+
+
+@router.get("/projects/{project_id}/tasks", response_model=list[ProjectTaskRead])
+def list_project_tasks(project_id: int, db: DbSession) -> list[ProjectTask]:
+    _get_project(db, project_id)
+    return list(
+        db.scalars(
+            select(ProjectTask)
+            .where(ProjectTask.project_id == project_id)
+            .order_by(ProjectTask.created_at.desc(), ProjectTask.id.desc())
+        )
+    )
+
+
+@router.patch("/tasks/{task_id}", response_model=ProjectTaskUpdateResponse)
+def update_project_task(
+    task_id: int,
+    payload: ProjectTaskUpdate,
+    db: DbSession,
+) -> ProjectTaskUpdateResponse:
+    task = db.get(ProjectTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    _get_project(db, task.project_id)
+
+    provided = payload.model_fields_set
+    if "status" in provided:
+        if payload.status not in {"PENDING", "COMPLETED"}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task status")
+        task.status = payload.status
+
+    if "assignee_id" in provided:
+        if payload.assignee_id is not None:
+            worker = _get_worker(db, task.project_id, payload.assignee_id)
+            task.assignee_id = worker.id
+            _sync_task_final_object(task, assignee_name=worker.name)
+        else:
+            task.assignee_id = None
+            _sync_task_final_object(task, assignee_name=None)
+
+    if "due_date" in provided:
+        if payload.due_date is None:
+            task.due_date = None
+            _sync_task_final_object(task, due_date_value=None)
+        else:
+            try:
+                parsed_due_date = date.fromisoformat(payload.due_date)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid due_date") from exc
+            task.due_date = parsed_due_date
+            _sync_task_final_object(task, due_date_value=parsed_due_date.isoformat())
+
+    if "status" in provided:
+        _sync_task_final_object(task, completed=task.status == "COMPLETED")
+
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return ProjectTaskUpdateResponse(
+        **ProjectTaskRead.model_validate(task).model_dump(),
+        task_id=task.id,
+        updated=True,
+    )
+
+
+def _sync_task_final_object(
+    task: ProjectTask,
+    *,
+    assignee_name: str | None | object = ...,
+    due_date_value: str | None | object = ...,
+    completed: bool | object = ...,
+) -> None:
+    final_task = dict(task.final_task_object or {})
+    if assignee_name is not ...:
+        assignee = dict(final_task.get("assignee") or {})
+        assignee["id"] = task.assignee_id
+        assignee["name"] = assignee_name
+        final_task["assignee"] = assignee
+    if due_date_value is not ...:
+        final_task["due_date"] = due_date_value
+    if completed is not ...:
+        flags = dict(final_task.get("flags") or {})
+        if completed:
+            flags["needs_user_confirmation"] = False
+        final_task["flags"] = flags
+    task.final_task_object = _serialize_task_final_object(final_task)
+
+
+def _serialize_task_final_object(final_task: dict[str, Any]) -> dict[str, Any]:
+    serialized = dict(final_task)
+    due_date_payload = serialized.get("due_date")
+    due_date_value: str | None = None
+    due_date_source = serialized.get("due_date_source")
+    due_date_confidence = serialized.get("due_date_confidence")
+
+    if isinstance(due_date_payload, dict):
+        due_date_value = str(due_date_payload["value"]) if due_date_payload.get("value") else None
+        due_date_source = due_date_source or due_date_payload.get("source")
+        due_date_confidence = due_date_confidence if due_date_confidence is not None else due_date_payload.get("confidence")
+    elif due_date_payload:
+        due_date_value = str(due_date_payload)
+
+    final_time = serialized.get("context", {}).get("time") if isinstance(serialized.get("context"), dict) else None
+    if isinstance(final_time, dict):
+        if final_time.get("source") == "user_edit":
+            due_date_source = "user_edit"
+        else:
+            due_date_source = due_date_source or final_time.get("source")
+        due_date_confidence = due_date_confidence if due_date_confidence is not None else final_time.get("confidence")
+
+    serialized["due_date"] = due_date_value
+    serialized["due_date_source"] = due_date_source
+    serialized["due_date_confidence"] = due_date_confidence
+    return serialized
 
 
 @router.post(
@@ -4570,7 +4767,7 @@ def export_project_payments_csv(
         rows.append([
             _datetime_text(payment.created_at),
             worker.name if worker else "نامشخص",
-            ROLE_LABELS.get(worker.type, "نامشخص") if worker else "نامشخص",
+            role_label_for_worker_type(worker.type.value) if worker else "نامشخص",
             DIRECTION_LABELS.get(payment.direction, payment.direction.value),
             PAYMENT_TYPE_LABELS.get(payment.type, payment.type.value),
             _decimal_text(payment.amount),
@@ -4598,7 +4795,7 @@ def export_project_people_csv(project_id: int, db: DbSession) -> Response:
         stats = worker_rows.get(worker.id, {})
         rows.append([
             worker.name,
-            ROLE_LABELS.get(worker.type, worker.type.value),
+            role_label_for_worker_type(worker.type.value),
             worker.role_detail or "",
             worker.phone or "",
             worker.account_number or "",

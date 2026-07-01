@@ -2,29 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-
-_PROFILE_FIELDS = {"phone", "account_number", "card_number", "daily_rate", "notes"}
-
-
-def _extracted_entities_have_profile_fields(entities: list[dict] | None) -> bool:
-    if not entities:
-        return False
-    for entity in entities:
-        if not isinstance(entity, dict):
-            continue
-        field_updates = entity.get("field_updates")
-        if isinstance(field_updates, dict) and any(
-            field_updates.get(key) not in (None, "")
-            for key in _PROFILE_FIELDS
-        ):
-            return True
-        if any(
-            entity.get(key) not in (None, "")
-            for key in _PROFILE_FIELDS
-        ):
-            return True
-    return False
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.core import (
     CounterpartyType,
@@ -236,6 +214,77 @@ class WorkLogRead(BaseModel):
     updated_at: datetime
 
 
+class TaskAssigneeSuggestion(BaseModel):
+    suggested_person: dict[str, Any] | None = None
+    source: str = "none"
+    candidates: list[dict[str, Any]] = []
+
+
+class ProjectTaskCreate(BaseModel):
+    title: str
+    raw_text: str | None = None
+    extracted_actor: str | None = None
+    assign_to_person: bool = False
+    assignee_id: int | None = None
+    due_date: date | None = None
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        title = value.strip()
+        if not title:
+            raise ValueError("Task title is required")
+        return title
+
+
+class ProjectTaskSuggestRequest(BaseModel):
+    title: str
+    raw_text: str | None = None
+    extracted_actor: str | None = None
+
+
+class ProjectTaskRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    title: str
+    description: str | None = None
+    raw_text: str | None = None
+    assignee_id: int | None = None
+    assignee_suggestion: dict[str, Any] | None = None
+    suggestion_source: str = "none"
+    assignment_status: str = "unassigned"
+    status: str = "PENDING"
+    confidence: float | None = None
+    final_task_object: dict[str, Any] | None = None
+    due_date: date | None = None
+    due_date_confidence: float | None = None
+    due_date_source: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectTaskCreateResponse(BaseModel):
+    final_task_object: dict[str, Any] | None = None
+    task_id: int | None = None
+    task: ProjectTaskRead
+    assignment_suggestion: TaskAssigneeSuggestion
+    interpretations: list[dict[str, Any]] = Field(default_factory=list)
+    interpretations_deprecated: bool = True
+
+
+class ProjectTaskUpdate(BaseModel):
+    status: str | None = None
+    assignee_id: int | None = None
+    due_date: str | None = None
+
+
+class ProjectTaskUpdateResponse(ProjectTaskRead):
+    task_id: int
+    updated: bool = True
+
+
 class InvoiceCreate(BaseModel):
     vendor_id: int
     total_amount: Decimal
@@ -396,38 +445,36 @@ class PendingInterpretationRead(BaseModel):
     @model_validator(mode="after")
     def attach_domain_route(self) -> "PendingInterpretationRead":
         if self.domain_route is None:
+            from app.core.pending_domain_route import pending_route_input
+            from app.models.core import PendingInterpretation
             from app.services.domain_router_service import DomainRouterService
 
-            route_input = {
-                "semantic_action": self.semantic_action,
-                "action": self.semantic_action,
-                "entities": self.extracted_entities or [],
-                "extracted_entities": self.extracted_entities or [],
-                "financial": {
-                    "amount": self.extracted_amount,
-                    "direction": self.financial_direction.value if self.financial_direction is not None else None,
-                },
-            }
-            if isinstance(self.structured_interpretation, dict):
-                route_input.update(self.structured_interpretation)
-                route_input.setdefault("semantic_action", self.semantic_action)
-                route_input.setdefault("action", self.semantic_action)
-                if not route_input.get("entities"):
-                    route_input["entities"] = self.extracted_entities or []
-                if not route_input.get("extracted_entities"):
-                    route_input["extracted_entities"] = self.extracted_entities or []
+            legacy_interpretation = PendingInterpretation(
+                project_id=self.project_id,
+                raw_input_text=self.raw_input_text,
+                canonical_event_type=self.canonical_event_type,
+                semantic_action=self.semantic_action,
+                suggested_entity_id=self.suggested_entity_id,
+                matched_input_text=self.matched_input_text,
+                extracted_entities=self.extracted_entities,
+                extracted_amount=self.extracted_amount,
+                extracted_quantity=self.extracted_quantity,
+                payment_method=self.payment_method,
+                financial_direction=self.financial_direction,
+                due_date=self.due_date,
+                description=self.description,
+                semantic_explanation=self.semantic_explanation,
+                confidence=self.confidence,
+                structured_interpretation=self.structured_interpretation,
+                status=self.status,
+            )
+            # Legacy migration compatibility: old rows may not have a stored route.
             self.domain_route = DomainRouteRead(
                 **DomainRouterService().route(
                     self.raw_input_text,
-                    route_input,
+                    pending_route_input(legacy_interpretation),
                 )
             )
-        if (
-            self.domain_route.domain == "ENTITY_UPDATE"
-            and self.semantic_action in {"SET_ROLE", "SETUP", "UPDATE_ENTITY"}
-            and _extracted_entities_have_profile_fields(self.extracted_entities)
-        ):
-            self.semantic_action = "ENTITY_UPDATE"
         return self
 
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PendingInterpretation, Worker } from "../../api";
 import { ROLE_OPTIONS, FINANCIAL_DIRECTION_OPTIONS, PAYMENT_METHOD_OPTIONS } from "../../constants";
 import {
@@ -82,6 +82,30 @@ export function SplitFlowModal({
   const [paymentMethod, setPaymentMethod] = useState(interpretation.payment_method ?? "");
   const multiActionWarning = looksLikeMultiAction(interpretationText(interpretation));
   const uncertaintyWarning = isUncertainInterpretation(interpretation);
+
+  useEffect(() => {
+    setStep(1);
+    setSetupName(initialName);
+    setSetupType(projectRole);
+    setSetupRoleDetail(typeof entity.role_detail === "string" ? entity.role_detail : "");
+    setSetupPhone(typeof entity.phone === "string" ? entity.phone : "");
+    setSetupAccountNumber(typeof entity.account_number === "string" ? entity.account_number : "");
+    setFinancialEntityId(interpretation.suggested_entity_id ?? null);
+    setAmount(interpretation.extracted_amount ?? "");
+    setDirection(interpretation.financial_direction ?? "");
+    setPaymentMethod(interpretation.payment_method ?? "");
+  }, [
+    interpretation.id,
+    initialName,
+    projectRole,
+    entity.role_detail,
+    entity.phone,
+    entity.account_number,
+    interpretation.suggested_entity_id,
+    interpretation.extracted_amount,
+    interpretation.financial_direction,
+    interpretation.payment_method,
+  ]);
 
   function handleFinalConfirm() {
     if (!financialEntityId) return;

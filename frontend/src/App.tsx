@@ -12,6 +12,8 @@ import {
   PendingInterpretation,
   Project,
   ProjectDetail,
+  ProjectTask,
+  ProjectTaskCreatePayload,
   RawEntry,
   Worker,
   WorkerState,
@@ -21,12 +23,14 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { PeoplePage } from "./pages/PeoplePage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ReportsPage } from "./pages/ReportsPage";
+import { TaskDashboardPage } from "./pages/TaskDashboardPage";
 import { JobDetailPage } from "./observability/pages/JobDetailPage";
 import { JobsPage } from "./observability/pages/JobsPage";
 import { toJobState, useNaturalInputJob } from "./observability/hooks/useNaturalInputJob";
 import { DomainUIController } from "./ui/DomainUIController";
 import { buildConfirmPayload, exactEntityIdByName, exactNeedsSelectionEntityId, normalizeNeedsSelection } from "./ui/confirmPayload";
 import { SetupEntity } from "./types/domain";
+import { applyRoleRegistry } from "./constants";
 import { AiProcessingStatus } from "./components/AiProcessingStatus";
 import { AuthPage } from "./features/auth/AuthPage";
 import { authApi, AUTH_TOKEN_KEY } from "./features/auth/authApi";
@@ -44,17 +48,24 @@ const exampleInputs = [
 type Route =
   | { name: "dashboard" }
   | { name: "project"; projectId: number | null; tab?: string | null }
+  | { name: "projectTasks"; projectId: number }
   | { name: "people" }
   | { name: "person"; personId: number }
   | { name: "reports" }
   | { name: "jobs" }
   | { name: "job"; jobId: string };
 
-function parseRoute(pathname: string): Route {
+function parseRoute(path: string): Route {
+  const [pathname, query = ""] = path.split("?");
+  const search = query ? `?${query}` : window.location.search;
+  const projectTasksMatch = pathname.match(/^\/projects\/(\d+)\/tasks\/?$/);
+  const legacyTaskProjectId = Number(new URLSearchParams(search).get("project_id"));
   const projectMatch = pathname.match(/^\/projects\/(\d+)/);
   const personMatch = pathname.match(/^\/people\/(\d+)/);
   const jobMatch = pathname.match(/^\/jobs\/([^/]+)/);
-  if (projectMatch) return { name: "project", projectId: Number(projectMatch[1]), tab: new URLSearchParams(window.location.search).get("tab") };
+  if (projectTasksMatch) return { name: "projectTasks", projectId: Number(projectTasksMatch[1]) };
+  if (pathname === "/tasks" && legacyTaskProjectId) return { name: "projectTasks", projectId: legacyTaskProjectId };
+  if (projectMatch) return { name: "project", projectId: Number(projectMatch[1]), tab: new URLSearchParams(search).get("tab") };
   if (personMatch) return { name: "person", personId: Number(personMatch[1]) };
   if (jobMatch) return { name: "job", jobId: decodeURIComponent(jobMatch[1]) };
   if (pathname === "/people") return { name: "people" };
@@ -115,8 +126,6 @@ function firstEntity(interpretation: PendingInterpretation): Record<string, unkn
   return interpretation.extracted_entities?.[0] ?? {};
 }
 
-type UnknownEntityForm = { workerId: string; name: string; type: string; roleDetail: string };
-type EntityOverride = { name: string; type: string; roleDetail?: string | null };
 type ConfirmPayload = { entity_id?: number | null; selected_person_id?: number | null; confirmed?: boolean; create_new?: boolean; name?: string | null; role?: string | null; role_detail?: string | null; amount?: string | null; direction?: FinancialDirection | null; payment_method?: PaymentType | null; description?: string | null; due_date?: string | null; field_updates?: Record<string, unknown> | null };
 
 function textValue(value: unknown): string | null {
@@ -150,23 +159,15 @@ function setupEntities(interpretation: PendingInterpretation): SetupEntity[] {
     .filter((entity) => entity.name.trim());
 }
 
-function workInfo(interpretation: PendingInterpretation): { quantity: string; periodLabel: string | null; description: string | null } {
-  const structured = interpretation.structured_interpretation as Record<string, unknown> | null;
-  const work = typeof structured?.work === "object" && structured.work !== null
-    ? structured.work as Record<string, unknown>
-    : {};
-  return {
-    quantity: textValue(interpretation.extracted_quantity ?? work.quantity) ?? "1",
-    periodLabel: textValue(work.period_label),
-    description: textValue(work.description) ?? interpretation.description ?? interpretation.matched_input_text ?? interpretation.raw_input_text ?? null,
-  };
-}
-
 function workWorkerId(interpretation: PendingInterpretation, workers: Worker[]): number | null {
   if (interpretation.suggested_entity_id) return interpretation.suggested_entity_id;
   const entityName = textValue(firstEntity(interpretation).name);
   if (!entityName) return null;
   return exactEntityIdByName(entityName, workers);
+}
+
+function routedDomain(interpretation: PendingInterpretation): string | null {
+  return interpretation.domain_route?.domain ?? null;
 }
 
 function entityTypeFromRecord(entity: Record<string, unknown>): string {
@@ -197,7 +198,7 @@ async function confirmPendingWithSelectionRetry(
 
 
 function App() {
-  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.pathname));
+  const [route, setRoute] = useState<Route>(() => parseRoute(`${window.location.pathname}${window.location.search}`));
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -211,14 +212,12 @@ function App() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
+  const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [operatingSummary, setOperatingSummary] = useState<OperatingSummary | null>(null);
   const [projectFinancials, setProjectFinancials] = useState<Record<number, ProjectCardFinancials>>({});
   const [naturalText, setNaturalText] = useState("");
   const [pendingInterpretations, setPendingInterpretations] = useState<PendingInterpretation[]>([]);
   const [naturalInputJobId, setNaturalInputJobId] = useState<string | null>(null);
-  const [setupEditEntities, setSetupEditEntities] = useState<Record<number, SetupEntity[]>>({});
-  const [candidateSelections, setCandidateSelections] = useState<Record<number, string>>({});
-  const [unknownEntityForms, setUnknownEntityForms] = useState<Record<number, UnknownEntityForm>>({});
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -230,7 +229,7 @@ function App() {
   const submittedIdempotencyKeyRef = useRef("");
 
   const isLoading = loadingAction !== null;
-  const routeProjectId = route.name === "project" ? route.projectId : null;
+  const routeProjectId = route.name === "project" || route.name === "projectTasks" ? route.projectId : null;
   const activeProjectId = routeProjectId ?? selectedProjectId ?? null;
   const notificationItems = useMemo<NotificationItem[]>(() => {
     const items: NotificationItem[] = [];
@@ -277,7 +276,7 @@ function App() {
 
   const navItems = useMemo(
     () => [
-      { label: "خانه", path: "/dashboard", active: route.name === "dashboard" || route.name === "project", icon: "home" },
+      { label: "خانه", path: "/dashboard", active: route.name === "dashboard" || route.name === "project" || route.name === "projectTasks", icon: "home" },
       { label: "افراد", path: "/people", active: route.name === "people" || route.name === "person", icon: "users" },
       { label: "گزارش‌ها", path: "/reports", active: route.name === "reports", icon: "reports" },
     ],
@@ -287,6 +286,7 @@ function App() {
   const pageTitle = useMemo(() => {
     if (route.name === "dashboard") return "خانه";
     if (route.name === "project") return projectDetail?.name ?? "پروژه";
+    if (route.name === "projectTasks") return "کارهای پروژه";
     if (route.name === "people" || route.name === "person") return "افراد";
     if (route.name === "reports") return "گزارش‌ها";
     if (route.name === "jobs") return "وظایف";
@@ -304,7 +304,7 @@ function App() {
 
   useEffect(() => {
     function handlePopState() {
-      setRoute(parseRoute(window.location.pathname));
+      setRoute(parseRoute(`${window.location.pathname}${window.location.search}`));
     }
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -332,7 +332,16 @@ function App() {
     if (!authChecked || !authUser) return;
     if (window.location.pathname === "/") navigate("/dashboard", true);
     loadProjects();
+    api.getRoleRegistry()
+      .then(applyRoleRegistry)
+      .catch(() => undefined);
   }, [authChecked, authUser]);
+
+  useEffect(() => {
+    if (route.name === "projectTasks" && window.location.pathname === "/tasks") {
+      navigate(`/projects/${route.projectId}/tasks`, true);
+    }
+  }, [route]);
 
   useEffect(() => {
     if (projects.length > 0) loadProjectFinancials(projects);
@@ -405,9 +414,6 @@ function App() {
     setNaturalText("");
     setPendingInterpretations([]);
     setNaturalInputJobId(null);
-    setSetupEditEntities({});
-    setCandidateSelections({});
-    setUnknownEntityForms({});
     setPendingTabEditingId(null);
     setReviewModalDismissed(true);
     setIsNotificationOpen(false);
@@ -475,7 +481,7 @@ function App() {
 
   async function loadProjectData(projectId: number) {
     await runAction("در حال بارگذاری پروژه", async () => {
-      const [detail, rawEntryList, workerList, states, historyList, invoiceList, paymentList, workLogList, summary, pendingList] = await Promise.all([
+      const [detail, rawEntryList, workerList, states, historyList, invoiceList, paymentList, workLogList, taskList, summary, pendingList] = await Promise.all([
         api.getProject(projectId),
         api.listRawEntries(projectId),
         api.listWorkers(projectId),
@@ -484,6 +490,7 @@ function App() {
         api.listInvoices(projectId),
         api.listPayments(projectId),
         api.listWorkLogs(projectId),
+        api.listProjectTasks(projectId),
         api.getOperatingSummary(projectId),
         api.listPendingInterpretations(projectId),
       ]);
@@ -495,6 +502,7 @@ function App() {
       setInvoices(invoiceList);
       setPayments(paymentList);
       setWorkLogs(workLogList);
+      setProjectTasks(taskList);
       setOperatingSummary(summary);
       setPendingInterpretations(pendingList);
     });
@@ -837,7 +845,7 @@ function App() {
   async function confirmInterpretation(interpretation: PendingInterpretation, payload: ConfirmPayload = {}) {
     if (!activeProjectId) return;
     await runAction("در حال تایید", async () => {
-      if (interpretation.canonical_event_type === "FINANCIAL_EVENT") await confirmFinancialInterpretation(interpretation, payload);
+      if (routedDomain(interpretation) === "FINANCIAL") await confirmFinancialInterpretation(interpretation, payload);
       else await api.confirmPendingInterpretation(interpretation.id, payload);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
       setNaturalInputJobId(null);
@@ -848,65 +856,22 @@ function App() {
     });
   }
 
-  async function confirmRoleInterpretation(
+  async function confirmTaskInterpretation(
     interpretation: PendingInterpretation,
-    payload: ConfirmPayload = {},
-    entityOverride?: EntityOverride,
+    payload: ProjectTaskCreatePayload,
   ) {
     if (!activeProjectId) return;
-    const roleEntities = entityOverride
-      ? [{ name: entityOverride.name, type: entityOverride.type, roleDetail: entityOverride.roleDetail ?? null, phone: null, accountNumber: null, dailyRate: null }]
-      : setupEditEntities[interpretation.id] ?? setupEntities(interpretation);
-    const extractedEntities = roleEntities
-      .filter((entity) => entity.name.trim())
-      .map((entity) => ({
-        name: entity.name,
-        type: entity.type,
-        project_role: entity.type,
-        role_detail: entity.roleDetail || null,
-      }));
-    await runAction("در حال تایید", async () => {
-      await api.updatePendingInterpretation(interpretation.id, {
-        semantic_action: "SET_ROLE",
-        extracted_entities: extractedEntities,
-      });
-      if (interpretation.canonical_event_type === "FINANCIAL_EVENT") await confirmFinancialInterpretation(interpretation, payload);
-      else await api.confirmPendingInterpretation(interpretation.id, payload);
+    await runAction("در حال ثبت کار", async () => {
+      const response = await api.createProjectTask(activeProjectId, payload);
+      await api.discardPendingInterpretation(interpretation.id);
+      setProjectTasks((items) => [response.task, ...items]);
       setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
       setNaturalInputJobId(null);
-      await loadProjectData(activeProjectId);
-      await loadProjectFinancials(projects);
-      setSuccessMessage("ثبت شد");
-      window.setTimeout(() => setSuccessMessage(null), 2600);
-    });
-  }
-
-  async function confirmCandidateInterpretation(
-    interpretation: PendingInterpretation,
-    payload: ConfirmPayload,
-    entityOverride?: EntityOverride,
-  ) {
-    if (!activeProjectId) return;
-    await runAction("در حال تایید", async () => {
-      if (entityOverride) {
-        await api.updatePendingInterpretation(interpretation.id, {
-          extracted_entities: [{
-            ...firstEntity(interpretation),
-            name: entityOverride.name,
-            type: entityOverride.type,
-            project_role: entityOverride.type,
-            role_detail: entityOverride.roleDetail || null,
-          }],
-        });
+      setReviewModalDismissed(true);
+      setSuccessMessage("کار ثبت شد.");
+      if (route.name !== "projectTasks" || route.projectId !== activeProjectId) {
+        navigate(`/projects/${activeProjectId}/tasks`);
       }
-      if (interpretation.canonical_event_type === "FINANCIAL_EVENT") await confirmFinancialInterpretation(interpretation, payload);
-      else await api.confirmPendingInterpretation(interpretation.id, payload);
-      setPendingInterpretations((items) => items.filter((item) => item.id !== interpretation.id));
-      setNaturalInputJobId(null);
-      await loadProjectData(activeProjectId);
-      await loadProjectFinancials(projects);
-      setSuccessMessage("ثبت شد");
-      window.setTimeout(() => setSuccessMessage(null), 2600);
     });
   }
 
@@ -916,22 +881,6 @@ function App() {
       await api.updateWorker(workerId, payload);
       await loadProjectData(activeProjectId);
       await loadProjectFinancials(projects);
-    });
-  }
-
-  async function resolveUnknownEntity(interpretation: PendingInterpretation) {
-    const form = unknownEntityForms[interpretation.id];
-    if (!form) return;
-    const selectedWorker = workers.find((worker) => String(worker.id) === form.workerId);
-    const name = selectedWorker?.name ?? form.name.trim();
-    const type = selectedWorker?.type ?? form.type;
-    if (!name) return;
-    await runAction("در حال به‌روزرسانی فرد", async () => {
-      const updated = await api.updatePendingInterpretation(interpretation.id, {
-        suggested_entity_id: selectedWorker?.id ?? null,
-        extracted_entities: [{ ...firstEntity(interpretation), name, type: type || "VENDOR", create_new: selectedWorker ? null : true }],
-      });
-      setPendingInterpretations((items) => items.map((item) => item.id === updated.id ? updated : item));
     });
   }
 
@@ -960,8 +909,9 @@ function App() {
     const entityName = textValue(entity.name) ?? "نامشخص";
     const role = entityTypeFromRecord(entity);
     const exactEntityId = interpretation.suggested_entity_id ?? exactEntityIdByName(entityName, workers);
+    const domain = routedDomain(interpretation);
 
-    if (interpretation.canonical_event_type === "FINANCIAL_EVENT") {
+    if (domain === "FINANCIAL") {
       await confirmInterpretation(interpretation, exactEntityId
         ? { entity_id: exactEntityId }
         : {
@@ -971,20 +921,18 @@ function App() {
         });
       return;
     }
-    if (interpretation.canonical_event_type === "WORK_EVENT" || interpretation.semantic_action === "WORK_LOG") {
-      const work = workInfo(interpretation);
-      await confirmInterpretation(interpretation, {
-        entity_id: workWorkerId(interpretation, workers),
-        confirmed: true,
-        field_updates: {
-          quantity_days: work.quantity,
-          period_label: work.periodLabel,
-          description: work.description,
-        },
+    if (domain === "TASK") {
+      const assigneeId = workWorkerId(interpretation, workers);
+      await confirmTaskInterpretation(interpretation, {
+        title: interpretation.description ?? interpretation.matched_input_text ?? interpretation.raw_input_text,
+        raw_text: interpretation.raw_input_text,
+        assign_to_person: Boolean(assigneeId),
+        assignee_id: assigneeId,
+        due_date: interpretation.due_date,
       });
       return;
     }
-    if (interpretation.semantic_action === "ENTITY_UPDATE" || interpretation.domain_route?.domain === "ENTITY_UPDATE") {
+    if (domain === "ENTITY_UPDATE") {
       await confirmEntityUpdateAction(interpretation, {
         entityId: exactEntityId,
         name: entityName,
@@ -1000,12 +948,8 @@ function App() {
       });
       return;
     }
-    if (interpretation.semantic_action === "SET_ROLE") {
-      if (exactEntityId) {
-        await confirmRoleInterpretation(interpretation, { selected_person_id: exactEntityId });
-      } else {
-        await confirmSetupEntities(interpretation, setupEntities(interpretation));
-      }
+    if (domain === "SETUP") {
+      await confirmSetupEntities(interpretation, setupEntities(interpretation));
       return;
     }
     await confirmInterpretation(interpretation, { confirmed: true });
@@ -1020,6 +964,7 @@ function App() {
           workers={workers}
           pendingInterpretations={pendingInterpretations}
           workLogs={workLogs}
+          projectTasks={projectTasks}
           payments={payments}
           invoices={invoices}
           history={history}
@@ -1046,6 +991,7 @@ function App() {
           onCorrectNote={correctNote}
           onVoidNote={voidNote}
           onUpdateProject={updateProject}
+          onOpenTasks={(projectId) => navigate(`/projects/${projectId}/tasks`)}
         />
       );
     }
@@ -1053,6 +999,7 @@ function App() {
       return <PeoplePage projects={projects} selectedProjectId={activeProjectId} onProjectChange={(projectId) => { setSelectedProjectId(projectId); navigate("/people"); }} workers={workers} workerStates={workerStates} payments={payments} workLogs={workLogs} invoices={invoices} summary={operatingSummary} selectedPersonId={route.name === "person" ? route.personId : null} onOpenPerson={(personId) => navigate(`/people/${personId}`)} onBackToPeople={() => navigate("/people")} onUpdateWorker={updateWorkerProfile} />;
     }
     if (route.name === "reports") return <ReportsPage projects={projects} selectedProjectId={activeProjectId} onProjectChange={setSelectedProjectId} />;
+    if (route.name === "projectTasks") return <TaskDashboardPage projectId={route.projectId} />;
     if (route.name === "jobs") return <JobsPage onOpenJob={(jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)} />;
     if (route.name === "job") return <JobDetailPage jobId={route.jobId} onBack={() => navigate("/jobs")} />;
     return (
@@ -1144,7 +1091,7 @@ function App() {
       </section>
 
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
-        <button className={(route.name === "dashboard" || route.name === "project") ? "active" : ""} type="button" onClick={() => navigate("/dashboard")}>
+        <button className={(route.name === "dashboard" || route.name === "project" || route.name === "projectTasks") ? "active" : ""} type="button" onClick={() => navigate("/dashboard")}>
           <Home aria-hidden="true" size={20} />
           <span>خانه</span>
         </button>
@@ -1184,30 +1131,18 @@ function App() {
           activeProjectId={activeProjectId}
           projectName={projectDetail?.name ?? null}
           isLoading={isLoading}
-          setupEditEntities={setupEditEntities}
-          candidateSelections={candidateSelections}
-          unknownEntityForms={unknownEntityForms}
-          setSetupEditEntities={setSetupEditEntities}
-          setCandidateSelections={setCandidateSelections}
-          setUnknownEntityForms={setUnknownEntityForms}
           onConfirm={async (interpretation, payload) => {
             await confirmInterpretation(interpretation, payload);
             setPendingTabEditingId(null);
           }}
-          onConfirmFinancial={confirmFinancialInterpretation}
-          onConfirmRole={async (interpretation, payload, entityOverride) => {
-            await confirmRoleInterpretation(interpretation, payload, entityOverride);
-            setPendingTabEditingId(null);
-          }}
-          onConfirmCandidate={async (interpretation, payload, entityOverride) => {
-            await confirmCandidateInterpretation(interpretation, payload, entityOverride);
+          onConfirmTask={async (interpretation, payload) => {
+            await confirmTaskInterpretation(interpretation, payload);
             setPendingTabEditingId(null);
           }}
           onDiscard={async (interpretation) => {
             await discardInterpretation(interpretation);
             setPendingTabEditingId(null);
           }}
-          onResolveUnknownEntity={resolveUnknownEntity}
           onClose={() => {
             setReviewModalDismissed(true);
             setPendingTabEditingId(null);

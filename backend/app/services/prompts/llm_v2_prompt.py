@@ -1,5 +1,6 @@
 import json
 
+from app.core.role_registry import role_token_map
 from app.services.input_normalizer import normalize_user_input
 from app.services.llm_classification_contract import (
     ALLOWED_ACTIONS,
@@ -96,7 +97,8 @@ def detect_prompt_domain(raw_text: str, structured_input: dict | None = None) ->
         return "multi"
     if _has_financial_signal(normalized):
         return "financial"
-    if any(term in normalized for term in ["شماره", "حساب", "کارت", "موبایل", "تلفن", "دستمزد", "روزی", "کارفرما", "مالک", "فروشنده", "کارگر", "جوشکار"]):
+    setup_terms = ["شماره", "حساب", "کارت", "موبایل", "تلفن", "دستمزد", "روزی", *role_token_map().keys()]
+    if any(term in normalized for term in setup_terms):
         return "setup"
     if any(term in normalized for term in ["متر", "روز", "کار کرد", "کارکرد", "اومد", "آمد"]):
         return "work"

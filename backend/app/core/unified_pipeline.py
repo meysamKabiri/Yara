@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.domain_fallback_policy import DEFAULT_FALLBACK, is_strong_setup_signal
 from app.core.feature_flags import get_financial_migration_mode
 from app.core.governance.governance_context_builder import GovernanceContextBuilder
 from app.core.governance.unified_governance_engine import UnifiedGovernanceEngine
@@ -20,6 +21,8 @@ from app.core.observability.decision_logger import (
 )
 from app.core.observability.performance_logger import record_pipeline_performance
 from app.core.observability_service import track_event
+from app.core.pending_domain_route import stamp_pending_domain_route
+from app.core.role_registry import labels_for_project_role
 from app.core.runtime.request_cache import RequestCache, new_request_cache
 from app.core.trace_context import get_trace_id
 from app.dev_tools.semantic_firewall.firewall import (
@@ -526,14 +529,14 @@ def _process_split_fallback_chunks(
             continue
 
         profile_update = _build_profile_update_interpretation(project_id, chunk, entity_context)
-        if profile_update is not None:
+        if profile_update is not None and is_strong_setup_signal(profile_update):
             _retarget_interpretation_to_raw_text(profile_update, raw_text, chunk)
             interpretations.append(profile_update)
             _emit_chunk_processed(db, chunk_index, chunk, "FALLBACK")
             continue
 
         fast_setup = _build_role_assignment_interpretation(project_id, chunk, entity_context)
-        if fast_setup is not None:
+        if fast_setup is not None and is_strong_setup_signal(fast_setup):
             _retarget_interpretation_to_raw_text(fast_setup, raw_text, chunk)
             interpretations.append(fast_setup)
             _emit_chunk_processed(db, chunk_index, chunk, "FALLBACK")
@@ -1065,7 +1068,7 @@ def _build_one_llm_v2_interpretation(
 
     matched_text = getattr(interpretation, "matched_text", None)
 
-    return PendingInterpretation(
+    return stamp_pending_domain_route(PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type=canonical_type,
@@ -1087,7 +1090,7 @@ def _build_one_llm_v2_interpretation(
         confidence=interpretation.confidence,
         structured_interpretation=_json_safe(interpretation.model_dump()),
         status=PendingInterpretationStatus.PENDING,
-    )
+    ))
 
 
 def _repair_outgoing_unknown_counterparty_role(
@@ -1265,7 +1268,7 @@ def _build_profile_update_interpretation(
         extracted_entity["requires_confirmation"] = True
         extracted_entity["candidate_matches"] = resolution["candidates"]
     structured = _profile_update_structured_interpretation(name, role, updates)
-    return PendingInterpretation(
+    return stamp_pending_domain_route(PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="SETUP_EVENT",
@@ -1282,7 +1285,7 @@ def _build_profile_update_interpretation(
         confidence=0.95,
         structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
-    )
+    ))
 
 
 def _profile_update_structured_interpretation(
@@ -1334,8 +1337,8 @@ def _build_safe_note_interpretation(
     if not _has_plain_note_text(normalized):
         return None
     structured = {
-        "intent": "NOTE",
-        "action": "NOTE",
+        "intent": DEFAULT_FALLBACK,
+        "action": DEFAULT_FALLBACK,
         "entities": [],
         "financial": {
             "amount": None,
@@ -1350,7 +1353,7 @@ def _build_safe_note_interpretation(
         "missing_fields": [],
         "reasoning_summary": "deterministic safe note",
     }
-    return PendingInterpretation(
+    return stamp_pending_domain_route(PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="NOTE_EVENT",
@@ -1367,7 +1370,7 @@ def _build_safe_note_interpretation(
         confidence=0.85,
         structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
-    )
+    ))
 
 
 _PERSIAN_INT_WORDS = {
@@ -1473,7 +1476,7 @@ def _build_daily_work_log_interpretation(
             "event classified as WORK_EVENT",
         ],
     }
-    return PendingInterpretation(
+    return stamp_pending_domain_route(PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="WORK_EVENT",
@@ -1491,7 +1494,7 @@ def _build_daily_work_log_interpretation(
         confidence=0.94,
         structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
-    )
+    ))
 
 
 def _daily_work_period_label(normalized: str) -> str | None:
@@ -1647,7 +1650,7 @@ def _build_financial_payment_fast_path_interpretation(
         "missing_fields": [],
         "reasoning_summary": "deterministic financial payment fast path",
     }
-    return PendingInterpretation(
+    return stamp_pending_domain_route(PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="FINANCIAL_EVENT",
@@ -1664,7 +1667,7 @@ def _build_financial_payment_fast_path_interpretation(
         confidence=0.96,
         structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
-    )
+    ))
 
 
 def _financial_payment_fast_path_direction(normalized: str) -> str | None:
@@ -1859,7 +1862,7 @@ def _build_role_assignment_interpretation(
         "missing_fields": [],
         "reasoning_summary": f"{extracted_name} نقش {normalized_role_token or role} دارد",
     }
-    return PendingInterpretation(
+    return stamp_pending_domain_route(PendingInterpretation(
         project_id=project_id,
         raw_input_text=raw_text,
         canonical_event_type="SETUP_EVENT",
@@ -1876,7 +1879,7 @@ def _build_role_assignment_interpretation(
         confidence=confidence,
         structured_interpretation=structured,
         status=PendingInterpretationStatus.PENDING,
-    )
+    ))
 
 
 def _text_has_financial_signal(raw_text: str) -> bool:
@@ -2071,9 +2074,18 @@ def _coerce_llm_v2_profile_update_action(interpretation: Any) -> None:
             getattr(entity, key, None) is not None
             for key in ["phone", "account_number", "daily_rate", "notes"]
         ):
-            interpretation.intent = LLMv2Intent.SETUP
-            interpretation.action = LLMv2Action.UPDATE_ENTITY
-            return
+            if is_strong_setup_signal(
+                {
+                    "raw_text": getattr(interpretation, "matched_text", ""),
+                    "interpretation": {
+                        "action": "UPDATE_ENTITY",
+                        "entities": [getattr(entity, "model_dump", lambda: {})()],
+                    },
+                }
+            ):
+                interpretation.intent = LLMv2Intent.SETUP
+                interpretation.action = LLMv2Action.UPDATE_ENTITY
+                return
 
 
 def _profile_update_name(raw_text: str, normalized: str, updates: dict[str, str | int]) -> str | None:
@@ -2251,7 +2263,7 @@ def _llm_v2_intent_to_canonical(intent: str) -> str:
         "NOTE": "NOTE_EVENT",
         "DOCUMENT": "NOTE_EVENT",
     }
-    return mapping.get(intent, "NOTE_EVENT")
+    return mapping.get(intent, f"{DEFAULT_FALLBACK}_EVENT")
 
 
 def _llm_v2_action_to_semantic(action: str) -> str:
@@ -2267,7 +2279,7 @@ def _llm_v2_action_to_semantic(action: str) -> str:
         "CHECK_PAYMENT": "CHECK_PAYMENT",
         "NOTE": "NOTE",
     }
-    return mapping.get(action, "NOTE")
+    return mapping.get(action, DEFAULT_FALLBACK)
 
 
 def _llm_v2_project_role_to_worker_type(project_role: str) -> str:
@@ -2386,8 +2398,8 @@ def _safe_llm_v2_result(
         return result
     except Exception:
         result = {
-            "intent": "NOTE",
-            "action": "NOTE",
+            "intent": DEFAULT_FALLBACK,
+            "action": DEFAULT_FALLBACK,
             "entities": [],
             "financial": {
                 "amount": None, "direction": "NONE",
@@ -2494,17 +2506,10 @@ def _split_multi_event_text(text: str) -> list[str]:
             "میباشد",
             "اضافه شد",
             "به پروژه اضافه",
-            "کارگر",
-            "کارفرما",
-            "سرامیک کار",
-            "برق کار",
-            "لوله کش",
-            "نقاش",
-            "کابینت کار",
-            "گچ کار",
-            "کناف کار",
-            "نما کار",
-            "فروشنده",
+            *labels_for_project_role("CLIENT"),
+            *labels_for_project_role("DAILY_WORKER"),
+            *labels_for_project_role("VENDOR"),
+            *labels_for_project_role("SKILLED_WORKER"),
         }
         has_money = any(t in chunk for t in money_terms)
         has_financial_verb = any(v in chunk for v in financial_verbs)

@@ -5,38 +5,21 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
+from app.core.role_registry import labels_for_project_role, role_token_map
 from app.services.persian_money_engine import normalize_text, parse_persian_money
 
 FUZZY_THRESHOLD = 0.88
 
-ROLE_MAP: dict[str, str] = {
-    "کارفرما": "CLIENT",
-    "صاحب": "CLIENT",
-    "مالک": "CLIENT",
-    "مشتری": "CLIENT",
-    "کارگر": "WORKER",
-    "نیروی کار": "WORKER",
+ROLE_TOKEN_MAP: dict[str, str] = {
+    **role_token_map(),
     "دستمزد": "PAYMENT",
     "حقوق": "PAYMENT",
-}
-
-ROLE_TOKEN_MAP: dict[str, str] = {
-    **ROLE_MAP,
-    "روزمزد": "DAILY_WORKER",
-    "روز مزد": "DAILY_WORKER",
-    "استاد کار": "SKILLED_WORKER",
-    "کاشی کار": "SKILLED_WORKER",
-    "برق کار": "SKILLED_WORKER",
-    "نقاش": "SKILLED_WORKER",
-    "رنگ زن": "SKILLED_WORKER",
-    "سرامیک کار": "SKILLED_WORKER",
-    "جوشکار": "SKILLED_WORKER",
-    "ساده": "OTHER",
 }
 
 ROLE_PRIORITY = {
     "SKILLED_WORKER": 4,
     "DAILY_WORKER": 3,
+    "GENERAL_WORKER": 3,
     "WORKER": 2,
     "CLIENT": 1,
     "PAYMENT": 0,
@@ -46,7 +29,7 @@ CONTACT_TERMS = ("شماره تماس", "شماره موبایل", "موبایل
 ACCOUNT_TERMS = ("شماره حساب", "شماره کارت", "حساب", "کارت", "شبا")
 VALUE_TERMS = ("دستمزد", "حقوق")
 MONEY_TERMS = ("تومان", "تومن", "ریال", "هزار", "میلیون", "میلیارد")
-ENTITY_NOISE_TERMS = ("کابینت کار", "گچ کار")
+ENTITY_NOISE_TERMS = tuple(labels_for_project_role("SKILLED_WORKER"))
 FILLER_TERMS = (
     "است",
     "هست",

@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
+from app.core.domain_fallback_policy import DEFAULT_FALLBACK, is_strong_setup_signal
 from app.core.observability_service import track_event, track_timed_event
 from app.core.trace_context import get_trace_id
 from app.services.input_normalizer import clean_entity_name, normalize_user_input
@@ -137,7 +138,7 @@ def _wrap_bare_entity(value: dict, raw_text: str = "") -> dict:
     supported = {"name", "kind", "project_role", "role_detail", "phone", "account_number", "daily_rate", "notes", "field_updates"}
     clean = {k: v for k, v in value.items() if k in supported}
 
-    if _has_profile_fields(value):
+    if _has_profile_fields(value) and is_strong_setup_signal({"raw_text": raw_text, "interpretation": value}):
         return {
             "intent": "SETUP",
             "action": "UPDATE_ENTITY",
@@ -173,13 +174,30 @@ def _wrap_bare_entity(value: dict, raw_text: str = "") -> dict:
             "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
         }
 
+    project_role = str(value.get("project_role") or "").upper()
+    if is_strong_setup_signal({"raw_text": raw_text, "interpretation": value}) and (
+        value.get("role_detail") or project_role in {"CLIENT", "DAILY_WORKER", "SKILLED_WORKER", "VENDOR"}
+    ):
+        return {
+            "intent": "SET_ROLE",
+            "action": "SET_ROLE",
+            "entities": [clean],
+            "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
+            "work": {"quantity": None, "unit": None, "description": None},
+            "note": {"text": None},
+            "confidence": float(value.get("confidence", 0.8) or 0.8),
+            "ambiguity": bool(value.get("ambiguity")),
+            "missing_fields": [],
+            "reasoning_summary": str(value.get("reasoning_summary", "") or ""),
+        }
+
     return {
-        "intent": "SET_ROLE",
-        "action": "SET_ROLE",
+        "intent": DEFAULT_FALLBACK,
+        "action": DEFAULT_FALLBACK,
         "entities": [clean],
         "financial": {"amount": None, "direction": "NONE", "payment_method": None, "due_date_text": None},
         "work": {"quantity": None, "unit": None, "description": None},
-        "note": {"text": None},
+        "note": {"text": raw_text or None},
         "confidence": float(value.get("confidence", 0.8) or 0.8),
         "ambiguity": bool(value.get("ambiguity")),
         "missing_fields": [],
@@ -447,7 +465,7 @@ class LLMv2Interpreter:
                         entities[0]["project_role"] = "VENDOR"
 
         result = {
-            "intent": intent if intent in VALID_INTENTS else "NOTE",
+            "intent": intent if intent in VALID_INTENTS else DEFAULT_FALLBACK,
             "action": action if action in VALID_ACTIONS else self._action_for_intent(intent),
             "entities": entities,
             "financial": {
@@ -511,7 +529,7 @@ class LLMv2Interpreter:
             return "WORK_LOG"
         if intent == "FINANCIAL":
             return "PAYMENT_OUT"
-        return "NOTE"
+        return DEFAULT_FALLBACK
 
     def _entities(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):
@@ -682,8 +700,8 @@ class LLMv2Interpreter:
 
     def _fallback(self, raw_text: str, reason: str) -> dict[str, Any]:
         return {
-            "intent": "NOTE",
-            "action": "NOTE",
+            "intent": DEFAULT_FALLBACK,
+            "action": DEFAULT_FALLBACK,
             "entities": [],
             "financial": {
                 "amount": None, "direction": "NONE",

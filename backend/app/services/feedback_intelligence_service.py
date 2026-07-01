@@ -8,12 +8,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.role_registry import project_role_values
 from app.models.core import InterpretationFeedback, InterpretationFeedbackErrorType
 from app.services.input_normalizer import ROLE_TOKEN_MAP, normalize_user_input
 from app.services.persian_money_engine import normalize_text
 
 ERROR_TYPES = [error.value for error in InterpretationFeedbackErrorType]
-KNOWN_PROJECT_ROLES = {"CLIENT", "VENDOR", "DAILY_WORKER", "SKILLED_WORKER", "OTHER"}
+KNOWN_PROJECT_ROLES = project_role_values()
 PROFILE_TERMS = {
     "شماره",
     "تماس",

@@ -5,11 +5,23 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from app.core.domain_fallback_policy import DEFAULT_FALLBACK
+from app.core.role_registry import labels_for_project_role
 from app.core.semantic_rules.conflict_detector import ConflictDetectorService
 from app.core.semantic_rules.explainability import RuleTrace, SemanticExplainabilityService
 from app.models.core import Worker
 from app.services.persian_money_engine import normalize_text
 from app.services.persian_role_extractor import PersianRoleExtractor
+
+_PROJECT_JOIN_PHRASES = (
+    "به پروژه اضافه شد",
+    "اضافه شد به پروژه",
+    "به پروژه اضافه گردید",
+    "اضافه کردن به پروژه",
+    "joined project",
+    "added to project",
+)
+_SETUP_PROJECT_JOIN_RULE_ID = "SETUP_SKILLED_WORKER_RULE"
 
 
 class CanonicalEventType(StrEnum):
@@ -42,16 +54,14 @@ EVENT_RULES: dict[str, dict[str, Any]] = {
         "event_type": "SETUP_EVENT",
         "triggers": {
             "keywords": [
-                "کارفرما",
-                "کارگر",
+                *labels_for_project_role("CLIENT"),
+                *labels_for_project_role("DAILY_WORKER"),
                 "کارگرها",
                 "کارگرهای پروژه",
-                "کارگر ساده",
                 "به عنوان کارگر ساده",
-                "فروشنده",
+                *labels_for_project_role("VENDOR"),
                 "پیمانکار",
-                "جوشکار",
-                "برقکار",
+                *labels_for_project_role("SKILLED_WORKER"),
                 "پروژه",
                 "شماره",
                 "تماس",
@@ -183,6 +193,8 @@ class SemanticRuleEngine:
             [CanonicalEventType(trace.event_type) for trace in rule_traces]
         )
         confidence = self._confidence(llm_output)
+        if self._has_role_project_join_setup_signal(normalized, llm_output):
+            confidence = max(confidence, 0.85)
         action = self.action_for(event_type, normalized)
         delta = Decimal("1") if event_type == CanonicalEventType.WORK else None
         rejected_rules = self._rejected_rules(
@@ -261,7 +273,7 @@ class SemanticRuleEngine:
 
     def resolve_conflicts(self, event_types: list[CanonicalEventType]) -> CanonicalEventType:
         if not event_types:
-            return CanonicalEventType.NOTE
+            return CanonicalEventType[DEFAULT_FALLBACK]
         return min(event_types, key=lambda item: EVENT_RULES[item.value]["priority"])
 
     def reclassify(
@@ -275,6 +287,8 @@ class SemanticRuleEngine:
         entity = self.resolve_entity(llm_output or {}, text, context)
         normalized = self._normalize(text)
         confidence = self._confidence(llm_output or {})
+        if self._has_role_project_join_setup_signal(normalized, llm_output or {}):
+            confidence = max(confidence, 0.85)
         rule_traces = self._matching_rule_traces(normalized, entity, llm_output or {})
         action = self.action_for(event_type, normalized)
         explanation = self.explainability.explain(
@@ -324,7 +338,7 @@ class SemanticRuleEngine:
             return self._deprecated_financial_action_hint(normalized_text)
         if event_type == CanonicalEventType.WORK:
             return "INCREMENT"
-        return "NOTE"
+        return DEFAULT_FALLBACK
 
     def _deprecated_financial_action_hint(self, normalized_text: str) -> str:
         """Legacy pre-confirmation hint; ExecutionEngine owns final financial effects."""
@@ -406,9 +420,10 @@ class SemanticRuleEngine:
         self,
         normalized_text: str,
         entity: Worker | None,
+        llm_output: dict[str, Any] | None = None,
     ) -> list[CanonicalEventType]:
         matches: list[CanonicalEventType] = []
-        if self._has_setup_meaning(normalized_text):
+        if self._has_setup_meaning(normalized_text) or self._has_role_project_join_setup_signal(normalized_text, llm_output or {}):
             matches.append(CanonicalEventType.SETUP)
         if self._has_financial_meaning(normalized_text):
             matches.append(CanonicalEventType.FINANCIAL)
@@ -429,12 +444,18 @@ class SemanticRuleEngine:
     ) -> list[RuleTrace]:
         traces: list[RuleTrace] = []
         confidence = self._confidence(llm_output)
-        for event_type in self._matching_event_types(normalized_text, entity):
+        for event_type in self._matching_event_types(normalized_text, entity, llm_output):
             rule = EVENT_RULES[event_type.value]
             signals = self._matched_signals(normalized_text, event_type, entity)
+            rule_id = rule["rule_id"]
+            confidence = self._confidence(llm_output)
+            if event_type == CanonicalEventType.SETUP and self._has_role_project_join_setup_signal(normalized_text, llm_output):
+                rule_id = _SETUP_PROJECT_JOIN_RULE_ID
+                signals = self._role_project_join_signals(normalized_text, llm_output)
+                confidence = max(confidence, 0.85)
             traces.append(
                 RuleTrace(
-                    rule_id=rule["rule_id"],
+                    rule_id=rule_id,
                     event_type=event_type.value,
                     priority=rule["priority"],
                     matched_signals=signals,
@@ -461,6 +482,7 @@ class SemanticRuleEngine:
                 for declaration in rule.get("declarations", [])
                 if declaration in normalized_text
             )
+            signals.extend(self._role_project_join_signals(normalized_text, {}))
         if event_type == CanonicalEventType.WORK and entity is not None:
             signals.extend(
                 keyword
@@ -522,6 +544,59 @@ class SemanticRuleEngine:
             normalized_text,
             set(rule["triggers"]["keywords"]),
         ) and self._contains_any(normalized_text, set(rule["declarations"]))
+
+    def _has_role_project_join_setup_signal(
+        self,
+        normalized_text: str,
+        llm_output: dict[str, Any],
+    ) -> bool:
+        return self._has_project_join_phrase(normalized_text) and self._has_registry_worker_role_signal(normalized_text, llm_output)
+
+    def _role_project_join_signals(
+        self,
+        normalized_text: str,
+        llm_output: dict[str, Any],
+    ) -> list[str]:
+        signals: list[str] = []
+        signals.extend(phrase for phrase in _PROJECT_JOIN_PHRASES if phrase in normalized_text)
+        role_signal = self._registry_worker_role_signal(normalized_text, llm_output)
+        if role_signal is not None:
+            signals.append(role_signal)
+        return list(dict.fromkeys(signals))
+
+    def _has_project_join_phrase(self, normalized_text: str) -> bool:
+        return any(phrase in normalized_text for phrase in _PROJECT_JOIN_PHRASES)
+
+    def _has_registry_worker_role_signal(
+        self,
+        normalized_text: str,
+        llm_output: dict[str, Any],
+    ) -> bool:
+        return self._registry_worker_role_signal(normalized_text, llm_output) is not None
+
+    def _registry_worker_role_signal(
+        self,
+        normalized_text: str,
+        llm_output: dict[str, Any],
+    ) -> str | None:
+        role_labels = [
+            *labels_for_project_role("SKILLED_WORKER"),
+            *labels_for_project_role("DAILY_WORKER"),
+        ]
+        for label in role_labels:
+            normalized_label = self._normalize(label)
+            if normalized_label and normalized_label in normalized_text:
+                return normalized_label
+
+        entities = llm_output.get("entities")
+        if isinstance(entities, list):
+            for entity in entities:
+                if not isinstance(entity, dict):
+                    continue
+                role = str(entity.get("project_role") or entity.get("type") or entity.get("role_guess") or "").upper()
+                if role in {"SKILLED_WORKER", "DAILY_WORKER", "WORKER", "SKILLED"}:
+                    return role
+        return None
 
     def _has_financial_meaning(self, normalized_text: str) -> bool:
         if self._contains_any(normalized_text, {"تسویه"}):
