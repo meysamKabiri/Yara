@@ -16,6 +16,6 @@ echo "Running staging E2E suite"
 docker compose --env-file .env.staging "${COMPOSE_FILES[@]}" --profile test run --rm e2e
 
 echo "Running staging smoke tests"
-BASE_URL="http://localhost:${API_HOST_PORT:-18080}" scripts/smoke-test.sh
+BASE_URL="http://localhost:18080" scripts/smoke-test.sh
 
 echo "Staging deployment validated"

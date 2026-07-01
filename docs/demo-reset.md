@@ -22,11 +22,7 @@ profiles do not confuse the tester.
 Use the normal development compose stack:
 
 ```bash
-docker compose \
-  --env-file .env.development \
-  -f docker-compose.yml \
-  -f docker-compose.development.yml \
-  up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
 Verify the backend is healthy:
@@ -101,7 +97,7 @@ the internal host `postgres`, the script automatically rewrites:
 postgresql+psycopg://...@postgres:5432/...
 ```
 
-to the local forwarded port from `POSTGRES_HOST_PORT`, usually:
+to the deterministic local development port:
 
 ```text
 postgresql+psycopg://...@127.0.0.1:5433/...

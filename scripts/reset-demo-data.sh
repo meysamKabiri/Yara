@@ -155,8 +155,7 @@ def database_url() -> str:
     if not url:
         url = "postgresql+psycopg://yara:yara_password@127.0.0.1:5433/yara_dev"
 
-    host_port = os.environ.get("POSTGRES_HOST_PORT", "5433")
-    url = url.replace("@postgres:5432/", f"@127.0.0.1:{host_port}/")
+    url = url.replace("@postgres:5432/", "@127.0.0.1:5433/")
     return url
 
 

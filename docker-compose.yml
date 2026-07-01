@@ -2,33 +2,9 @@ x-backend-build: &backend-build
   context: ./backend
   dockerfile: Dockerfile
 
-x-backend-env: &backend-env
-  APP_NAME: ${APP_NAME:-Yara API}
-  ENVIRONMENT: ${ENVIRONMENT:-development}
-  DEBUG: ${DEBUG:-true}
-  LOG_LEVEL: ${LOG_LEVEL:-debug}
-  LLM: ${LLM:-local}
-  TRACE_ENABLED: ${TRACE_ENABLED:-true}
-  RECONCILIATION: ${RECONCILIATION:-false}
-  ANOMALY_DETECTION: ${ANOMALY_DETECTION:-false}
-  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://yara:yara_password@postgres:5432/yara_dev}
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-  JWT_SECRET: ${JWT_SECRET:-dev-only-yara-secret}
-  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
-  OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
-  OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-120}
-  OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0}
-  RQ_QUEUES: ${RQ_QUEUES:-llm_tasks}
-  PYTHONUNBUFFERED: "1"
-
 services:
   postgres:
     image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-yara_dev}
-      POSTGRES_USER: ${POSTGRES_USER:-yara}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yara_password}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -47,12 +23,7 @@ services:
     restart: unless-stopped
 
   api:
-    build:
-      <<: *backend-build
-      args:
-        INSTALL_DEV: ${INSTALL_DEV:-false}
-    image: ${YARA_IMAGE:-yara-backend}:${IMAGE_TAG:-local}
-    environment: *backend-env
+    build: *backend-build
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,22 +35,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
   worker:
-    build:
-      <<: *backend-build
-      args:
-        INSTALL_DEV: ${INSTALL_DEV:-false}
-    image: ${YARA_IMAGE:-yara-backend}:${IMAGE_TAG:-local}
-    environment:
-      <<: *backend-env
-      SERVICE_NAME: worker
+    build: *backend-build
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: python -m app.scripts.start_worker
     restart: unless-stopped

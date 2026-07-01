@@ -7,14 +7,15 @@ Yara uses one Docker service topology across every environment:
 - `postgres`: environment-owned PostgreSQL database
 - `redis`: environment-owned Redis cache/queue
 
-The same codebase is used everywhere. Environment behavior comes only from compose overlays and env files.
+The same codebase is used everywhere. Environment behavior is selected
+explicitly with Compose files and env files.
 
 ## Environments
 
 Development:
 
 ```bash
-docker compose --env-file .env.development -f docker-compose.yml -f docker-compose.development.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 Staging:
@@ -26,18 +27,24 @@ scripts/deploy-staging.sh
 Production:
 
 ```bash
-scripts/deploy-production.sh approve-production
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d
 ```
 
 ## Compose Files
 
-`docker-compose.yml` is the shared base. It defines the identical service structure, health checks, commands, and shared backend environment.
+`docker-compose.yml` is the neutral shared base. It defines services, build
+contexts, dependencies, restart policies, and health checks without env files,
+ports, bind mounts, debug flags, secrets, or environment-specific defaults.
 
-`docker-compose.development.yml` adds local development bind mounts, ports, and development volumes.
+`docker-compose.dev.yml` is the explicit development environment. It adds
+`.env.development`, local ports, backend bind mounts, development volumes,
+development image/build args, worker command, and API hot reload.
+
+`docker-compose.prod.yml` is the explicit production environment. It adds
+`.env.production`, production persistence, production image/build args, API
+port exposure, and production commands.
 
 `docker-compose.staging.yml` adds staging env binding, staging volumes, staging host ports, and an `e2e` test service.
-
-`docker-compose.prod.yml` adds production env binding, production volumes, production host port exposure, and production restart policy.
 
 ## Staging Flow
 
@@ -65,7 +72,7 @@ The script:
 
 1. Preserves the current `yara-backend:production` image as `yara-backend:previous`.
 2. Builds the new production image.
-3. Starts production containers.
+3. Starts production containers with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`.
 4. Runs smoke tests against:
    - `/health`
    - `/auth/login`
@@ -92,5 +99,6 @@ The rollback script:
 - Do not reuse `.env.development`, `.env.staging`, or `.env.production` across environments.
 - Do not deploy production before staging validation passes.
 - Do not edit production secrets directly in git. Replace placeholder values during deployment.
+- Always pass both the base compose file and the target environment compose file.
 - Do not enable traffic until production smoke tests pass.
 - Roll back immediately if health or smoke checks fail.
